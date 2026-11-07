@@ -29,7 +29,8 @@
 - Copilot CLI(`copilot`)にサインイン済みであること。既定のモデルは gpt-6-luna です
 - 解析対象の Nox の写し(作業フォルダ)と、その `.cdb\compile_commands.json`。`run.ps1` は作業フォルダの `.github\` と `.index\` を書き換えるので、元のリポジトリではなく写しを使います(下の「計測に使うソースの写し」)
 - 条件 C・E は、ltidx で作った索引(`<名前>.tsv` と `.tu.tsv`・`.skip.tsv`)
-- 条件 B・D は clangd(`-Clangd` でパスを指定。既定は PATH 上の `clangd`)
+- 条件 B・D は clangd(`-Clangd` でパスを指定。既定は PATH 上の `clangd`。`batch.ps1` にも同じ `-Clangd` があります)
+  - clangd の索引(`<作業フォルダ>\.cdb\.cache\clangd\index`)を、計測の前にそろえておきます。`python -I clangd_warm.py <clangd.exe> <写し>` が `re-indexed TUs: 0 (ready)` と出るまで流します(初回は数分。索引がそろっていないと、Copilot の clangd が計測の途中で索引を作り直し、参照が欠けます)
 
 ## 使い方
 
@@ -49,14 +50,15 @@ python -I autoupdate_bench.py --workspace <写し> --index <索引.tsv> --reps 5
 
 - `run.ps1` は、条件ごとの `.github\`(と `.index\`)を作業フォルダに置き直してから、1 問を実行します
   - Copilot に渡すのは読み取り専用のツール(`view` `rg` `grep` `glob` `lsp`)だけで、書き込みは渡しません
+  - 条件 B・D の `.github\lsp.json` は公式の形(`lspServers`)のままで、`command` だけを記録用の中継 `lsp_log_proxy.py` にします。中継はメッセージをそのまま通し、やり取りを `runs\<名前>.lsp.log` に書きます。`python -I lsp_summary.py <回>` で、サーバーが起動したか・0 件の応答の数・最初にファイルを開いた時刻・索引し直しの有無を 1 回 1 行で出します
   - シェルは条件 E だけで渡し、`--allow-tool 'shell(ltq)'` で `ltq` 以外のコマンドは承認しません(非対話モードなので拒否されます)
   - セッションは `runs\index.jsonl` に記録し、やり取りの Markdown は `runs\` に出します(`runs\` はリポジトリに入れません)
-- `-Round` は計測の回です。v1 は最初の計測、v2 は `dep` 行と指示の改善後、v3 は ltq、v4 は MCP、v5 はコードベース B での MCP の再計測、v6 は写しを固定して各問 5 回で測り直したもの、v7 は MCP サーバーに出力の大きさの上限を入れた後の G、v8 はコードベース C の問題文の範囲を言い直した後の A・G です。集計は回ごとに出ます
+- `-Round` は計測の回です。v1 は最初の計測、v2 は `dep` 行と指示の改善後、v3 は ltq、v4 は MCP、v5 はコードベース B での MCP の再計測、v6 は写しを固定して各問 5 回で測り直したもの、v7 は MCP サーバーに出力の大きさの上限を入れた後の G、v8 はコードベース C の問題文の範囲を言い直した後の A・G、v11 は clangd の準備を確かめてから測り直した B・D です。集計は回ごとに出ます
 - `-Index` は、条件 C・E・F・G・H で使う索引のファイル名です(`-IndexDir` 配下)。条件 F・G・H では `.deps.tsv` も写し、作業フォルダ向けの作り方の記録(`.recipe.json`)を作るので、自動更新が働きます(`compile_commands.json` は `-Cdb`、既定は `<作業フォルダ>\.cdb`)
 - 自動更新の作り直しが Copilot の終了後も続いているときは、終わるのを待ってから次に進みます
 - 条件 F・G の `.mcp.json` は、Copilot CLI が信頼済みのフォルダでしか読みません。`run.ps1` は `--trust-folder` を付けて実行します
 - `collect.py` は `~/.copilot/session-store.db` と、各セッションの `events.jsonl` を読み取り専用で開き、`runs\summary.tsv` と条件ごとの平均を出します。`rep=0` は試運転として集計から外します
-- 問題と正解は `tasks.json`(と `tasks-<名前>.json`。`collect.py` はすべて読むので、id はファイルをまたいで重ねません)、回答の書式は `answer-format.md` です。指示は、索引用が `index-instructions.md`(v1 の計測で使ったものは `index-instructions-v1.md`)、LSP 用が `lsp-instructions.md`、ltq 用が `cli-instructions.md` です
+- 問題と正解は `tasks.json`(と `tasks-<名前>.json`。`collect.py` はすべて読むので、id はファイルをまたいで重ねません)、回答の書式は `answer-format.md` です。指示は、索引用が `index-instructions.md`(v1 の計測で使ったものは `index-instructions-v1.md`)、LSP 用が `lsp-instructions.md`(v1 の計測で使ったものは `lsp-instructions-v1.md`)、ltq 用が `cli-instructions.md` です
 
 ## 計測に使うソースの写し
 

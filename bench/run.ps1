@@ -33,9 +33,17 @@ $ltq = (Resolve-Path (Join-Path $bench '..\query')).Path
 $tools = 'view', 'rg', 'grep', 'glob', 'lsp'
 $allow = $tools
 
+$name = if ($Round -eq 'v1') { "$TaskId-$Cond-r$Rep" } else { "$Round-$TaskId-$Cond-r$Rep" }
+New-Item -ItemType Directory "$bench\runs" -Force | Out-Null
+
+# 公式の設定の形(.github/lsp.json の lspServers)のまま、command だけを記録用の中継(lsp_log_proxy.py)にする。
+# 中継はメッセージをそのまま通し、やり取りを runs\<名前>.lsp.log に書く(サーバーが動いていたかを後から確かめる)
 function Write-LspJson {
     $j = Get-Content "$bench\lsp.json" -Raw -Encoding utf8 | ConvertFrom-Json
-    $j.lspServers.clangd.command = $Clangd
+    $lspLog = "$bench\runs\$name.lsp.log"
+    if (Test-Path $lspLog) { Remove-Item $lspLog }
+    $j.lspServers.clangd.args = @('-I', "$bench\lsp_log_proxy.py", $lspLog, $Clangd) + $j.lspServers.clangd.args
+    $j.lspServers.clangd.command = 'python'
     $j | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 "$ws\.github\lsp.json"
 }
 
@@ -140,8 +148,6 @@ foreach ($e in @($task.edit | Where-Object { $_ })) {
     [IO.File]::WriteAllText($fp, ($lines -join $eol), [Text.UTF8Encoding]::new($bom))
 }
 
-$name = if ($Round -eq 'v1') { "$TaskId-$Cond-r$Rep" } else { "$Round-$TaskId-$Cond-r$Rep" }
-New-Item -ItemType Directory "$bench\runs" -Force | Out-Null
 $t0 = Get-Date
 Push-Location $ws
 try {
