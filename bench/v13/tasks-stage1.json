@@ -1,0 +1,114 @@
+[
+ {
+  "id": "S1-requests-usage",
+  "repo": "requests",
+  "kind": "usage",
+  "symbol": "parse_dict_header",
+  "def_file": "src/requests/utils.py",
+  "prompt": "utils.py の parse_dict_header で、値が空のキーの扱いを変えようかと考えています。影響範囲を見たいので、この関数がどこで使われているか調べてもらえますか。"
+ },
+ {
+  "id": "S1-requests-change",
+  "repo": "requests",
+  "kind": "change",
+  "symbol": "prepare_cookies",
+  "def_file": "src/requests/models.py",
+  "prompt": "PreparedRequest.prepare_cookies に `replace_existing: bool` という引数を足したいです。True のときは既にある Cookie ヘッダーを消してから作り直す、False のときは今までどおりの動きにしてください。今ある呼び出し側はすべて直して、replace_existing=False を渡すようにしてください。",
+  "change_spec": {
+   "param": "replace_existing: bool",
+   "callers_pass": "False"
+  }
+ },
+ {
+  "id": "S1-requests-explain",
+  "repo": "requests",
+  "kind": "explain",
+  "symbol": "cookies",
+  "def_file": "src/requests/cookies.py",
+  "prompt": "src/requests/cookies.py って何をしているモジュールなのか、ざっくり説明してください。"
+ },
+ {
+  "id": "S1-newtonsoft-usage",
+  "repo": "newtonsoft",
+  "kind": "usage",
+  "symbol": "TryGetByFirst",
+  "def_file": "Src/Newtonsoft.Json/Utilities/BidirectionalDictionary.cs",
+  "prompt": "BidirectionalDictionary の TryGetByFirst の挙動を追いたいので、どこから呼ばれているか教えて。"
+ },
+ {
+  "id": "S1-newtonsoft-change",
+  "repo": "newtonsoft",
+  "kind": "change",
+  "symbol": "GetDataMemberAttribute",
+  "def_file": "Src/Newtonsoft.Json/Serialization/JsonTypeReflector.cs",
+  "prompt": "GetDataMemberAttribute に `bool searchBaseProperties` を追加してください。false のときは、プロパティに属性が無くても virtual な基底プロパティまでさかのぼって探さないようにしたいです。挙動は変えたくないので、呼び出し側はすべて true を渡すように直してください。",
+  "change_spec": {
+   "param": "bool searchBaseProperties",
+   "callers_pass": "true"
+  }
+ },
+ {
+  "id": "S1-newtonsoft-explain",
+  "repo": "newtonsoft",
+  "kind": "explain",
+  "symbol": "JValue",
+  "def_file": "Src/Newtonsoft.Json/Linq/JValue.cs",
+  "prompt": "Src/Newtonsoft.Json/Linq/JValue.cs の役割を簡単に説明してもらえますか? 中で何をやっているかの概要がつかめれば十分です。"
+ },
+ {
+  "id": "S1-zod-usage",
+  "repo": "zod",
+  "kind": "usage",
+  "symbol": "custom",
+  "def_file": "src/types.ts",
+  "prompt": "types.ts にある custom を少しいじりたいんだけど、どこで使われてるか先に知りたい。調べてくれる?"
+ },
+ {
+  "id": "S1-zod-change",
+  "repo": "zod",
+  "kind": "change",
+  "symbol": "getErrorMap",
+  "def_file": "src/errors.ts",
+  "prompt": "getErrorMap に `ignoreOverride: boolean` を足して、true なら setErrorMap で設定されたものではなく defaultErrorMap を返すようにしたい。呼んでいるところは全部直して、false を渡しておいて。",
+  "change_spec": {
+   "param": "ignoreOverride: boolean",
+   "callers_pass": "false"
+  }
+ },
+ {
+  "id": "S1-zod-explain",
+  "repo": "zod",
+  "kind": "explain",
+  "symbol": "parseUtil",
+  "def_file": "src/helpers/parseUtil.ts",
+  "prompt": "src/helpers/parseUtil.ts は何のためのファイル?ざっくりでいいので教えて。"
+ },
+ {
+  "id": "S1-nox-noindex-usage",
+  "repo": "nox-noindex",
+  "kind": "usage",
+  "symbol": "CreateEntityImmediate",
+  "def_file": "runtime/core/world_legacy.cpp",
+  "prompt": "World::CreateEntityImmediate を遅延生成に寄せられないか検討しています。今どこから呼ばれているのか確認してください。"
+ },
+ {
+  "id": "S1-nox-noindex-change",
+  "repo": "nox-noindex",
+  "kind": "change",
+  "symbol": "BuildRuntimeDependencyGraphText",
+  "def_file": "runtime/core/world_legacy.h",
+  "prompt": "BuildRuntimeDependencyGraphText に `bool include_edges` 引数を追加してほしいです。false のときは NODE 行だけを出して、EDGE 行(依存関係)は出さないようにします。既存の呼び出し側はすべて true を渡すように修正してください。",
+  "change_spec": {
+   "param": "bool include_edges",
+   "callers_pass": "true"
+  }
+ },
+ {
+  "id": "S1-nox-noindex-explain",
+  "repo": "nox-noindex",
+  "kind": "explain",
+  "symbol": "assertion_kernel",
+  "def_file": "runtime/kernel/assertion_kernel.h",
+  "prompt": "runtime/kernel/assertion_kernel.h が何をしているヘッダーなのか、概要を説明してください。"
+ }
+]

@@ -1,0 +1,58 @@
+{
+ "requests": {
+  "candidates": 64,
+  "usage": {
+   "name": "parse_dict_header",
+   "def_file": "src/requests/utils.py",
+   "uses": 4
+  },
+  "change": {
+   "name": "prepare_cookies",
+   "def_file": "src/requests/models.py",
+   "uses": 3
+  },
+  "explain_file": "src/requests/cookies.py"
+ },
+ "newtonsoft": {
+  "candidates": 363,
+  "usage": {
+   "name": "TryGetByFirst",
+   "def_file": "Src/Newtonsoft.Json/Utilities/BidirectionalDictionary.cs",
+   "uses": 2
+  },
+  "change": {
+   "name": "GetDataMemberAttribute",
+   "def_file": "Src/Newtonsoft.Json/Serialization/JsonTypeReflector.cs",
+   "uses": 2
+  },
+  "explain_file": "Src/Newtonsoft.Json/Linq/JValue.cs"
+ },
+ "zod": {
+  "candidates": 8,
+  "usage": {
+   "name": "custom",
+   "def_file": "src/types.ts",
+   "uses": 8
+  },
+  "change": {
+   "name": "getErrorMap",
+   "def_file": "src/errors.ts",
+   "uses": 6
+  },
+  "explain_file": "src/helpers/parseUtil.ts"
+ },
+ "nox-noindex": {
+  "candidates": 184,
+  "usage": {
+   "name": "CreateEntityImmediate",
+   "def_file": "runtime/core/world_legacy.cpp",
+   "uses": 7
+  },
+  "change": {
+   "name": "BuildRuntimeDependencyGraphText",
+   "def_file": "runtime/core/world_legacy.h",
+   "uses": 3
+  },
+  "explain_file": "runtime/kernel/assertion_kernel.h"
+ }
+}

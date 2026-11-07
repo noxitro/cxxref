@@ -1,0 +1,4 @@
+[
+  {"id": "SMOKE-nox", "repo": "nox", "kind": "usage", "prompt": "nox::JobSystem::Initialize ってどこから呼ばれてる?"},
+  {"id": "SMOKE-req", "repo": "requests", "kind": "explain", "prompt": "src/requests/hooks.py が何をしているか一言で教えて。"}
+]
