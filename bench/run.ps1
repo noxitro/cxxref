@@ -88,7 +88,11 @@ switch ($Cond) {
                     args = @($ext.args | ForEach-Object { & $expand $_ }); env = $envMap; tools = @($ext.tools) } } } |
             ConvertTo-Json -Depth 6 | Set-Content -Encoding utf8 "$ws\.mcp.json"
         New-Item -ItemType Directory "$ws\.github" | Out-Null
-        Copy-Item "$bench\ext\$($ext.instructions)" "$ws\.github\copilot-instructions.md"
+        # 環境変数 CRI_BENCH_EXT_INSTR に '-v13' などを置くと、ext\<名前>-instructions-v13.md(cxxref と同じくらい手厚い指示)を使う
+        $instr = $ext.instructions
+        if ($env:CRI_BENCH_EXT_INSTR) { $instr = $instr -replace '\.md$', "$($env:CRI_BENCH_EXT_INSTR).md" }
+        if (-not (Test-Path "$bench\ext\$instr")) { throw "ext\$instr がない" }
+        Copy-Item "$bench\ext\$instr" "$ws\.github\copilot-instructions.md"
         $tools = 'view', 'rg', 'grep', 'glob', $ext.server
         $allow = $tools
     }
