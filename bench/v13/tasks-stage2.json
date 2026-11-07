@@ -1,0 +1,122 @@
+[
+ {
+  "id": "C2-wait",
+  "repo": "nox",
+  "kind": "change",
+  "symbol": "nox::JobSystem::Wait",
+  "def_file": "runtime/kernel/job_system.cpp",
+  "prompt": "JobSystem::Wait に `bool help_with_queued_jobs` という引数を足してほしいです。true なら今までどおり待っている間にキューのジョブを自分で拾って実行し、false ならジョブには手を出さずに counter が 0 になるのを待つだけ、という動きにしたいです。呼び出し側も全部直してください。既存の呼び出し側は今の挙動を変えたくないので true を渡してください。",
+  "change_spec": {
+   "param": "bool help_with_queued_jobs",
+   "callers_pass": "true"
+  },
+  "truth": [
+   "runtime/bench/bench_ecs.cpp:234",
+   "runtime/bench/bench_job.cpp:43",
+   "runtime/bench/bench_job.cpp:108",
+   "runtime/core/test/entity_ecs_test.cpp:390",
+   "runtime/core/test/job_system_dispatch_test.cpp:49",
+   "runtime/core/test/job_system_dispatch_test.cpp:82",
+   "runtime/core/test/job_system_dispatch_test.cpp:109",
+   "runtime/core/test/job_system_test.cpp:76",
+   "runtime/core/test/job_system_test.cpp:119",
+   "runtime/core/test/job_system_test.cpp:173",
+   "runtime/core/test/updater_graph_benchmark.cpp:189",
+   "runtime/core/test/updater_graph_benchmark.cpp:232",
+   "runtime/core/test/updater_graph_benchmark.cpp:450",
+   "runtime/core/test/updater_graph_benchmark.cpp:462",
+   "runtime/core/world_legacy.cpp:866",
+   "runtime/core/world_legacy.cpp:906"
+  ]
+ },
+ {
+  "id": "C2-findremote",
+  "repo": "nox",
+  "kind": "change",
+  "symbol": "nox::dev::editor_remote::EditorRemoteServer::FindRemoteInstanceId",
+  "def_file": "runtime/core/dev/editor_remote_server.cpp",
+  "prompt": "nox::dev::editor_remote::EditorRemoteServer::FindRemoteInstanceId で、見つからなかったときに返す値を呼ぶ側が決められるようにしたい。`nox::int64 not_found_id` って引数を追加して、未登録ならそれを返すようにして。呼び出し側も全部合わせてほしい。今の呼び出し側は 0 を渡しておけば OK。",
+  "change_spec": {
+   "param": "nox::int64 not_found_id",
+   "callers_pass": "0"
+  },
+  "truth": [
+   "runtime/core/dev/socket_stream_writer.cpp:138",
+   "runtime/core/dev/socket_stream_writer.cpp:148"
+  ]
+ },
+ {
+  "id": "C2-createinstance",
+  "repo": "nox",
+  "kind": "change",
+  "symbol": "nox::legacy::EntityLogicStorage::CreateInstance",
+  "def_file": "runtime/core/entity_logic_legacy.cpp",
+  "prompt": "EntityLogicStorage::CreateInstance に、entity が今いる Archetype を `const nox::Archetype* archetype` として渡せるようにしたいです。生成時にその Archetype が descriptor の必須マスクを満たしているかチェックするのに使う予定です。引数を追加して、呼び出し側もすべて直してください。World::RefreshEntityLogics からはそこで受け取っている archetype をそのまま、テストからは world.TryGetArchetype(entity) を渡してください。",
+  "change_spec": {
+   "param": "const nox::Archetype* archetype",
+   "callers_pass": "archetype / world.TryGetArchetype(entity)"
+  },
+  "truth": [
+   "runtime/core/test/entity_ecs_test.cpp:523",
+   "runtime/core/test/entity_ecs_test.cpp:691",
+   "runtime/core/world_legacy.cpp:1006"
+  ]
+ },
+ {
+  "id": "I2-createsocket",
+  "repo": "nox",
+  "kind": "impact",
+  "symbol": "nox::os::network::CreateSocket",
+  "def_file": "runtime/kernel/detail/network_win64.cpp",
+  "prompt": "nox::os::network::CreateSocket で作るソケットを、作った時点でノンブロッキングにする仕様に変えようと思っています。今はブロッキングのまま返しているので、これを変えると影響が出るところがあるはずです。変更する前に、影響を受ける箇所を洗い出してもらえますか。",
+  "truth": [
+   "runtime/core/dev/net/server.cpp:91",
+   "runtime/kernel/test/network_test.cpp:60",
+   "runtime/kernel/test/network_test.cpp:213",
+   "runtime/kernel/test/network_test.cpp:220",
+   "runtime/kernel/test/network_test.cpp:407"
+  ]
+ },
+ {
+  "id": "I2-buildquery",
+  "repo": "nox",
+  "kind": "impact",
+  "symbol": "nox::legacy::World::BuildQuery",
+  "def_file": "runtime/core/world_legacy.cpp",
+  "prompt": "World::BuildQuery を、マッチする Archetype が 1 つも無かったときに false を返すようにしたい(戻り値を void から bool に変える)。直す前に、どこに影響が出るか調べてくれる?",
+  "truth": [
+   "runtime/bench/bench_ecs.cpp:162",
+   "runtime/bench/bench_ecs.cpp:247",
+   "runtime/core/test/entity_ecs_test.cpp:310",
+   "runtime/core/test/entity_ecs_test.cpp:432",
+   "runtime/core/test/entity_structural_change_test.cpp:145",
+   "runtime/core/test/entity_structural_change_test.cpp:226",
+   "runtime/core/test/updater_graph_benchmark.cpp:323",
+   "runtime/core/test/updater_graph_benchmark.cpp:386"
+  ]
+ },
+ {
+  "id": "E2-socketutil",
+  "repo": "nox",
+  "kind": "explain",
+  "symbol": "runtime/core/dev/socket_stream_utility.h",
+  "def_file": "runtime/core/dev/socket_stream_utility.h",
+  "prompt": "runtime/core/dev/socket_stream_utility.h って何をしているファイルですか?ざっくりでいいので説明してください。"
+ },
+ {
+  "id": "G2-log",
+  "repo": "nox",
+  "kind": "log",
+  "symbol": "nox::os::network::GetLocalEndPoint",
+  "def_file": "runtime/kernel/detail/network_win64.cpp",
+  "prompt": "nox::os::network::GetLocalEndPoint(runtime/kernel/detail/network_win64.cpp)が失敗したときに、ログを 1 行出すようにしてほしい。ログはこのリポジトリで普段使ってる仕組みに合わせてね。"
+ },
+ {
+  "id": "G2-test",
+  "repo": "nox",
+  "kind": "test",
+  "symbol": "runtime/core/test/updater_worker_count_test.cpp",
+  "def_file": "runtime/core/test/updater_worker_count_test.cpp",
+  "prompt": "runtime/core/test/updater_worker_count_test.cpp に、テストケースを 1 つ追加してください。--updater-workers=007 のように先頭にゼロが付いた値でも 10 進としてそのまま読まれる(007 なら 7、00 なら 0 になる)ことを確かめるものです。書き方は既存のテストにならってください。"
+ }
+]

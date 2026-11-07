@@ -1,0 +1,107 @@
+{
+ "candidates": 107,
+ "change": [
+  {
+   "name": "nox::JobSystem::Wait",
+   "short": "Wait",
+   "decl": "runtime/kernel/job_system.h:76:8",
+   "def": "runtime/kernel/job_system.cpp:222:22",
+   "calls_index": 16,
+   "same_short": 4,
+   "truth": [
+    "runtime/bench/bench_ecs.cpp:234",
+    "runtime/bench/bench_job.cpp:43",
+    "runtime/bench/bench_job.cpp:108",
+    "runtime/core/test/entity_ecs_test.cpp:390",
+    "runtime/core/test/job_system_dispatch_test.cpp:49",
+    "runtime/core/test/job_system_dispatch_test.cpp:82",
+    "runtime/core/test/job_system_dispatch_test.cpp:109",
+    "runtime/core/test/job_system_test.cpp:76",
+    "runtime/core/test/job_system_test.cpp:119",
+    "runtime/core/test/job_system_test.cpp:173",
+    "runtime/core/test/updater_graph_benchmark.cpp:189",
+    "runtime/core/test/updater_graph_benchmark.cpp:232",
+    "runtime/core/test/updater_graph_benchmark.cpp:450",
+    "runtime/core/test/updater_graph_benchmark.cpp:462",
+    "runtime/core/world_legacy.cpp:866",
+    "runtime/core/world_legacy.cpp:906"
+   ],
+   "tus": 209
+  },
+  {
+   "name": "nox::dev::editor_remote::EditorRemoteServer::FindRemoteInstanceId",
+   "short": "FindRemoteInstanceId",
+   "decl": "runtime/core/dev/editor_remote_server.h:84:14",
+   "def": "runtime/core/dev/editor_remote_server.cpp:339:57",
+   "calls_index": 3,
+   "same_short": 1,
+   "truth": [
+    "runtime/core/dev/socket_stream_writer.cpp:138",
+    "runtime/core/dev/socket_stream_writer.cpp:148"
+   ],
+   "tus": 126
+  },
+  {
+   "name": "nox::legacy::EntityLogicStorage::CreateInstance",
+   "short": "CreateInstance",
+   "decl": "runtime/core/entity_logic_legacy.h:116:8",
+   "def": "runtime/core/entity_logic_legacy.cpp:79:39",
+   "calls_index": 3,
+   "same_short": 2,
+   "truth": [
+    "runtime/core/test/entity_ecs_test.cpp:523",
+    "runtime/core/test/entity_ecs_test.cpp:691",
+    "runtime/core/world_legacy.cpp:1006"
+   ],
+   "tus": 129
+  }
+ ],
+ "impact": [
+  {
+   "name": "nox::os::network::CreateSocket",
+   "short": "CreateSocket",
+   "decl": "runtime/kernel/network.h:210:81",
+   "def": "runtime/kernel/detail/network_win64.cpp:323:84",
+   "calls_index": 5,
+   "same_short": 1,
+   "truth": [
+    "runtime/core/dev/net/server.cpp:91",
+    "runtime/kernel/test/network_test.cpp:60",
+    "runtime/kernel/test/network_test.cpp:213",
+    "runtime/kernel/test/network_test.cpp:220",
+    "runtime/kernel/test/network_test.cpp:407"
+   ],
+   "tus": 213
+  },
+  {
+   "name": "nox::legacy::World::BuildQuery",
+   "short": "BuildQuery",
+   "decl": "runtime/core/world_legacy.h:497:8",
+   "def": "runtime/core/world_legacy.cpp:2046:26",
+   "calls_index": 8,
+   "same_short": 1,
+   "truth": [
+    "runtime/bench/bench_ecs.cpp:162",
+    "runtime/bench/bench_ecs.cpp:247",
+    "runtime/core/test/entity_ecs_test.cpp:310",
+    "runtime/core/test/entity_ecs_test.cpp:432",
+    "runtime/core/test/entity_structural_change_test.cpp:145",
+    "runtime/core/test/entity_structural_change_test.cpp:226",
+    "runtime/core/test/updater_graph_benchmark.cpp:323",
+    "runtime/core/test/updater_graph_benchmark.cpp:386"
+   ],
+   "tus": 127
+  }
+ ],
+ "rejected": [],
+ "explain_file": "runtime/core/dev/socket_stream_utility.h",
+ "log_function": {
+  "name": "nox::os::network::GetLocalEndPoint",
+  "short": "GetLocalEndPoint",
+  "decl": "runtime/kernel/network.h:213:83",
+  "def": "runtime/kernel/detail/network_win64.cpp:389:86",
+  "calls_index": 10,
+  "same_short": 1
+ },
+ "test_file": "runtime/core/test/updater_worker_count_test.cpp"
+}

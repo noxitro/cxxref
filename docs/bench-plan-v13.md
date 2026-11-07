@@ -89,3 +89,10 @@ v12 では cxxref の指示にだけ「結果はそのまま使ってよい」�
 - 問題文: 別のエージェントが、対象と作業の種類だけを見て書いた(`bench/v13/tasks-stage1.json`)
 - 実行: `bench/run13.py`。条件ごとに空の `COPILOT_HOME` を使う(普段の設定で全体に登録した MCP サーバーなどを混ぜない)。P は公開中の v0.5.1 をマーケットプレイスから入れたもの。道具は既定の一式(`--allow-all-tools`)。依存物の取得・ビルド・ネットワークを使う shell のコマンド(npm・pip・dotnet・msbuild・cmake・curl・git push など)は、どの条件でも禁じる
 - 試運転(Nox の短い質問、各 1 回): 1 回目の入力は A 15,265、P 16,213 トークン(+948)
+
+## 段階 2・3 で決めたこと(流す前に固定、2026-11-08)
+
+- 段階 2 は Nox だけで先に流す。O3DE は、正解づくりと採点の構文チェックが 1 問あたり数千 TU に及び、CPU を長く使うので、Nox の結果を見てから範囲を決める
+- 段階 2 の対象: `bench/v13/sample2.py`(候補 107、乱数の種 13)。正解は、宣言と定義に引数を足した中身を overlay で差し替えて clang-cl /Zs にかけたときに増えるエラーの位置(`bench/v13/stage2-sample-nox.json`)。問題文は別のエージェントが書いた(`bench/v13/tasks-stage2.json`)
+- 段階 2 の条件は A・P・M・X、各 5 回。採点は `bench/score13.py --compile`
+- 段階 3: v12 と同じ台本(`run.ps1`、道具は view・rg・grep・glob と各 MCP)・同じ 4 問・Haiku 5.5(BYOK)・各 3 回で、ほかの 5 つの MCP サーバーに手厚い指示(`bench/ext/*-instructions-v13.md`)を渡して測り直す。cxxref(G)と rg だけ(A)も同じ時期に測る
