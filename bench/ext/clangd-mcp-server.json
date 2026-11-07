@@ -1,0 +1,17 @@
+{
+  "cond": "N",
+  "server": "clangd-mcp-server",
+  "repo": "https://github.com/felipeerias/clangd-mcp-server",
+  "commit": "be6bf91 + Windows の手直し 2 か所(clangd-mcp-server.patch)",
+  "command": "node",
+  "args": ["${TOOLS}\\clangd-mcp-server\\dist\\index.js"],
+  "env": {
+    "CLANGD_PATH": "${LLVM}\\bin\\clangd.exe",
+    "COMPILE_COMMANDS_DIR": "${TOOLS}\\clangd-cdb-${CB}",
+    "PROJECT_ROOT": "${TOOLS}\\clangd-cdb-${CB}",
+    "CLANGD_ARGS": "--background-index -j=${JOBS}"
+  },
+  "tools": ["*"],
+  "instructions": "clangd-mcp-server-instructions.md",
+  "note": "既定では背景索引が切れている(--background-index=false)ので CLANGD_ARGS で入れる。clangd の索引は clangd-mcp と共用"
+}

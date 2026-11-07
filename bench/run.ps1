@@ -8,7 +8,8 @@
 # Copilot に渡すのは読み取り専用のツール(view / rg / grep / glob / lsp / MCP)だけ。書き込みは渡さない。
 # シェルは条件 E だけで渡し、実行を許すのは ltq コマンドだけにする。
 param(
-    [Parameter(Mandatory)][ValidateSet('A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'P', 'S', 'Y')][string]$Cond,
+    # I・K・L・M・N は、ほかの MCP サーバー(ext\<名前>.json に起動方法と指示を書いたもの)+ 使い方の指示。比べるために v12 で足した
+    [Parameter(Mandatory)][ValidateSet('A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'P', 'S', 'Y', 'I', 'K', 'L', 'M', 'N')][string]$Cond,
     [Parameter(Mandatory)][string]$TaskId,
     [int]$Rep = 1,
     [string]$Model = 'gpt-6-luna',
@@ -20,7 +21,16 @@ param(
     [string]$Clangd = 'clangd',     # 条件 B・D の clangd
     [string]$Tasks = 'tasks.json',          # 問題と正解(bench 配下。公開しない別のコードベースの問題は local\tasks-<名前>.json に置く)
     [string]$Format = 'answer-format.md',   # 回答の書式(bench 配下。local\ に置いたものも指定できる)
-    [string]$Serena = $env:CRI_BENCH_SERENA # 条件 S: Serena を入れたフォルダ(bin\serena.exe と、設定の home\ がある)
+    [string]$Serena = $env:CRI_BENCH_SERENA, # 条件 S: Serena を入れたフォルダ(bin\serena.exe と、設定の home\ がある)
+    # 'anthropic' で、Copilot の経路ではなく Anthropic API を直接使う(BYOK。従量課金)。$Model は API のモデル名(claude-haiku-5-5 など)。
+    # キーは COPILOT_PROVIDER_API_KEY_COMMAND か COPILOT_PROVIDER_API_KEY を、このプロセスかユーザーの環境変数に置く(ここでは読むだけで表示しない)。
+    # どちらも無ければ ~/.copilot/providers.json の提供元 anthropic の apiKey を使う(providers.json のモデルは --model では選べなかった。v12)
+    [ValidateSet('', 'anthropic')][string]$Provider = '',
+    # 条件 I・K・M・N: ほかのツールを入れたフォルダ(ext\*.json の ${TOOLS})、LLVM(${LLVM})、コードベースの名前(${CB}。索引の置き場の名前に使う)
+    [string]$ToolsDir = $env:CRI_BENCH_TOOLS,
+    [string]$Llvm = $env:CRI_BENCH_LLVM,
+    [string]$Codebase = 'nox',
+    [switch]$DryRun                 # 作業フォルダに条件の設定を置いて、その中身を出すだけ(Copilot は呼ばない)
 )
 $ErrorActionPreference = 'Stop'
 $bench = $PSScriptRoot
@@ -50,9 +60,38 @@ function Write-LspJson {
 # 条件ごとの設定を作業フォルダに置く(他の条件の物は消す)。ルートの compile_commands.json は、条件 S・Y が置いたもの
 # (目印 .cri-bench-cdb がある)だけを消す。写しに元からあるものは解析対象の一部なので残す
 $cdbMark = "$ws\.cri-bench-cdb"
+# 条件 F・G・H・P が写した索引は、消さずに .index-keep へ退避して次の回に使い回す(UE5 では 54 GB あり、毎回は写せない)。
+# 使い回すのは、元の索引と大きさ・更新日時が同じで、写しも写した時のままのときだけ(自動更新が作り直したら写し直す)
+$keep = "$ws\.index-keep"
+if (Test-Path "$ws\.index\keep.txt") {
+    if (Test-Path $keep) { Remove-Item -Recurse -Force $keep }
+    Move-Item "$ws\.index" $keep
+}
 foreach ($p in "$ws\.github", "$ws\.index", "$ws\.mcp.json") { if (Test-Path $p) { Remove-Item -Recurse -Force $p } }
 if (Test-Path $cdbMark) { Remove-Item -Force "$ws\compile_commands.json", $cdbMark -ErrorAction SilentlyContinue }
 switch ($Cond) {
+    { $_ -in 'I', 'K', 'L', 'M', 'N' } {
+        # ext\<名前>.json の起動方法を、作業フォルダの .mcp.json に書く(${...} を置き換える)。使い方の指示も置く。シェルは渡さない
+        $ext = Get-ChildItem "$bench\ext\*.json" | ForEach-Object { Get-Content $_ -Raw -Encoding utf8 | ConvertFrom-Json } |
+            Where-Object cond -eq $Cond
+        if (-not $ext) { throw "ext\*.json に条件 $Cond がない" }
+        if (-not $ToolsDir -or -not (Test-Path $ToolsDir)) { throw 'set -ToolsDir (or CRI_BENCH_TOOLS)' }
+        if (-not $Llvm -or -not (Test-Path $Llvm)) { throw 'set -Llvm (or CRI_BENCH_LLVM)' }
+        $vars = @{ TOOLS = $ToolsDir; LLVM = $Llvm; WS = (Resolve-Path $ws).Path; CB = $Codebase
+            JOBS = [Math]::Max(1, [int]([Environment]::ProcessorCount / 2)) }
+        # コードベースごとの値(clangd を起こすために開くファイル、索引の置き場など)は ext の vars.<名前> に書く
+        if ($ext.vars -and $ext.vars.$Codebase) { foreach ($p in $ext.vars.$Codebase.PSObject.Properties) { $vars[$p.Name] = $p.Value } }
+        $expand = { param($s) [regex]::Replace($s, '\$\{(\w+)\}', { param($m) $vars[$m.Groups[1].Value] }) }
+        $envMap = [ordered]@{}
+        foreach ($p in $ext.env.PSObject.Properties) { $envMap[$p.Name] = & $expand $p.Value }
+        @{ mcpServers = @{ $ext.server = [ordered]@{ type = 'local'; command = (& $expand $ext.command)
+                    args = @($ext.args | ForEach-Object { & $expand $_ }); env = $envMap; tools = @($ext.tools) } } } |
+            ConvertTo-Json -Depth 6 | Set-Content -Encoding utf8 "$ws\.mcp.json"
+        New-Item -ItemType Directory "$ws\.github" | Out-Null
+        Copy-Item "$bench\ext\$($ext.instructions)" "$ws\.github\copilot-instructions.md"
+        $tools = 'view', 'rg', 'grep', 'glob', $ext.server
+        $allow = $tools
+    }
     { $_ -in 'S', 'Y' } {
         # Serena(既定の REPL の形)を作業フォルダの .mcp.json に登録する。clangd はルートの compile_commands.json を読むので、
         # 実行の間だけ置く(写しの指紋に入るので、実行の後に消す)。Serena と clangd の索引(.serena・.cache)は消さずに使い回す
@@ -102,12 +141,25 @@ switch ($Cond) {
     }
     { $_ -in 'F', 'G', 'H', 'P' } {
         # 段階 3 の MCP。作業フォルダの .mcp.json に登録する(F は指示なし、G・H は指示あり)。シェルは渡さない
-        New-Item -ItemType Directory "$ws\.github", "$ws\.index" | Out-Null
+        New-Item -ItemType Directory "$ws\.github" | Out-Null
         if ($Cond -in 'G', 'H') { Copy-Item "$bench\mcp-instructions.md" "$ws\.github\copilot-instructions.md" }
         # 自動更新には .deps.tsv・.own.bin と作り方の記録(.recipe.json)が要る。記録はこの作業フォルダ向けに作る。
         # ハードリンクにはしない(自動更新が索引の時刻を進め、作り直すと、リンク先の元の索引まで変わる)
-        foreach ($s in '', '.tu.tsv', '.skip.tsv', '.deps.tsv', '.own.bin') {
-            if (Test-Path "$IndexDir\$Index$s") { Copy-Item "$IndexDir\$Index$s" "$ws\.index\index.tsv$s" }
+        $parts = @('', '.tu.tsv', '.skip.tsv', '.deps.tsv', '.own.bin') | Where-Object { Test-Path "$IndexDir\$Index$_" }
+        $sig = $Index + '|' + (($parts | ForEach-Object { $f = Get-Item "$IndexDir\$Index$_"; "$_=$($f.Length):$($f.LastWriteTimeUtc.Ticks)" }) -join ';')
+        $same = (Test-Path "$keep\keep.txt") -and ((Get-Content "$keep\keep.txt" -Raw).Trim() -eq $sig)
+        foreach ($s in $parts) {
+            $src = Get-Item "$IndexDir\$Index$s"; $dst = "$keep\index.tsv$s"
+            if (-not $same -or -not (Test-Path $dst)) { $same = $false; break }
+            $d = Get-Item $dst
+            if ($d.Length -ne $src.Length -or $d.LastWriteTimeUtc -ne $src.LastWriteTimeUtc) { $same = $false }
+        }
+        if ($same) { Move-Item $keep "$ws\.index" }
+        else {
+            if (Test-Path $keep) { Remove-Item -Recurse -Force $keep }
+            New-Item -ItemType Directory "$ws\.index" | Out-Null
+            foreach ($s in $parts) { Copy-Item "$IndexDir\$Index$s" "$ws\.index\index.tsv$s" }
+            Set-Content -LiteralPath "$ws\.index\keep.txt" -Value $sig -Encoding utf8NoBOM
         }
         $cdbDir = if ($Cdb) { $Cdb } else { "$ws\.cdb" }
         [ordered]@{ version = 1; root = (Resolve-Path $ws).Path; cdb = $cdbDir; out = "$((Resolve-Path $ws).Path)\.index\index.tsv"
@@ -124,6 +176,13 @@ switch ($Cond) {
         $tools = 'view', 'rg', 'grep', 'glob', 'code-ref-index'
         $allow = $tools
     }
+}
+if ($DryRun) {
+    foreach ($p in "$ws\.mcp.json", "$ws\.github\copilot-instructions.md") { if (Test-Path $p) { "== $p"; Get-Content $p -Raw -Encoding utf8 } }
+    "tools: $($tools -join ' ')"
+    foreach ($p in "$ws\.github", "$ws\.index", "$ws\.mcp.json") { if (Test-Path $p) { Remove-Item -Recurse -Force $p } }
+    if (Test-Path $cdbMark) { Remove-Item -Force "$ws\compile_commands.json", $cdbMark -ErrorAction SilentlyContinue }
+    return
 }
 # P はこのリポジトリ(plugin.json のあるルート)を --plugin-dir で読ませる。MCP サーバーは mcp.json の ${PLUGIN_ROOT} から起動される
 $pluginArgs = if ($Cond -eq 'P') { @('--plugin-dir', (Resolve-Path (Join-Path $bench '..')).Path) } else { @() }
@@ -148,15 +207,42 @@ foreach ($e in @($task.edit | Where-Object { $_ })) {
     [IO.File]::WriteAllText($fp, ($lines -join $eol), [Text.UTF8Encoding]::new($bom))
 }
 
+# BYOK の環境変数はこの実行の間だけ置き、終わったら元に戻す(ふだんの Copilot の経路に残さない)
+$providerVars = 'COPILOT_PROVIDER_TYPE', 'COPILOT_PROVIDER_BASE_URL', 'COPILOT_PROVIDER_API_KEY', 'COPILOT_PROVIDER_API_KEY_COMMAND',
+'COPILOT_MODEL', 'COPILOT_PROVIDER_MODEL_ID', 'COPILOT_PROVIDER_WIRE_MODEL'
+$oldProvider = @{}
+foreach ($v in $providerVars) { $oldProvider[$v] = [Environment]::GetEnvironmentVariable($v, 'Process') }
+$modelArgs = @('--model', $Model)
+if ($Provider -eq 'anthropic') {
+    foreach ($v in 'COPILOT_PROVIDER_API_KEY_COMMAND', 'COPILOT_PROVIDER_API_KEY') {
+        if (-not [Environment]::GetEnvironmentVariable($v, 'Process')) {
+            $u = [Environment]::GetEnvironmentVariable($v, 'User')
+            if ($u) { [Environment]::SetEnvironmentVariable($v, $u, 'Process') }
+        }
+    }
+    if (-not ($env:COPILOT_PROVIDER_API_KEY_COMMAND -or $env:COPILOT_PROVIDER_API_KEY)) {
+        # どちらも無ければ、Copilot CLI の providers.json の提供元 anthropic の apiKey を、要求のたびに provider_key.py で読む
+        $env:COPILOT_PROVIDER_API_KEY_COMMAND = "python -I `"$bench\provider_key.py`" anthropic"
+    }
+    $env:COPILOT_PROVIDER_TYPE = 'anthropic'
+    $env:COPILOT_PROVIDER_BASE_URL = 'https://api.anthropic.com'
+    # API の名前(claude-haiku-5-5)をそのまま送り、Copilot の既知のモデル名(claude-haiku-5.5)で上限などの設定を引かせる
+    $env:COPILOT_PROVIDER_WIRE_MODEL = $Model
+    $env:COPILOT_PROVIDER_MODEL_ID = $Model -replace '-(\d+)-(\d+)$', '-$1.$2'
+    $env:COPILOT_MODEL = $env:COPILOT_PROVIDER_MODEL_ID
+    $modelArgs = @()
+}
+
 $t0 = Get-Date
 Push-Location $ws
 try {
-    copilot -p $prompt --model $Model --trust-folder --available-tools @tools --allow-tool @allow -s @pluginArgs `
+    copilot -p $prompt @modelArgs --trust-folder --available-tools @tools --allow-tool @allow -s @pluginArgs `
         --share "$bench\runs\$name.md" --log-level error *> "$bench\runs\$name.out.txt"
     $code = $LASTEXITCODE
 } finally {
     Pop-Location
     $env:PATH = $oldPath
+    foreach ($v in $providerVars) { [Environment]::SetEnvironmentVariable($v, $oldProvider[$v], 'Process') }
     # 裏の作り直し(自動更新)が続いていれば終わるまで待つ。次の実行が .index を消すとぶつかる
     $deadline = (Get-Date).AddMinutes(10)
     while ((Test-Path "$ws\.index\update.lock") -and (Get-Date) -lt $deadline) {
@@ -170,9 +256,16 @@ try {
     }
 }
 $sec = [int]((Get-Date) - $t0).TotalSeconds
-# --trust-folder は --session-id と併用できないので、実行後に最新のセッションを引く
-$sid = (Get-ChildItem "$env:USERPROFILE\.copilot\session-state" -Directory | Where-Object LastWriteTime -ge $t0 |
-        Sort-Object LastWriteTime -Descending | Select-Object -First 1).Name
-[pscustomobject]@{ name = $name; round = $Round; task = $TaskId; cond = $Cond; rep = $Rep; model = $Model; session = $sid; exit = $code; sec = $sec; at = $t0.ToString('s') } |
+# --trust-folder は --session-id と併用できないので、実行後にセッションを引く。ほかの作業の Copilot のセッションと
+# 取り違えないよう、開始の記録(session.start)の作業フォルダがこの作業フォルダで、この実行の後に始まったものを選ぶ
+$wsFull = (Resolve-Path $ws).Path.TrimEnd('\')
+$sid = Get-ChildItem "$env:USERPROFILE\.copilot\session-state" -Directory | Where-Object LastWriteTime -ge $t0 |
+    Sort-Object LastWriteTime -Descending | Where-Object {
+        $first = Get-Content "$($_.FullName)\events.jsonl" -TotalCount 1 -Encoding utf8 -ErrorAction SilentlyContinue
+        if (-not $first) { return $false }
+        $st = ($first | ConvertFrom-Json).data
+        $st.context.cwd.TrimEnd('\') -eq $wsFull -and ([datetime]$st.startTime).ToUniversalTime() -ge $t0.ToUniversalTime()
+    } | Select-Object -First 1 -ExpandProperty Name
+[pscustomobject]@{ name = $name; round = $Round; task = $TaskId; cond = $Cond; rep = $Rep; model = $Model; provider = $Provider; session = $sid; exit = $code; sec = $sec; at = $t0.ToString('s') } |
     ConvertTo-Json -Compress | Add-Content -Encoding utf8 "$bench\runs\index.jsonl"
 "$name exit=$code ${sec}s session=$sid"

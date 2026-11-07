@@ -12,7 +12,10 @@ param(
     [string]$IndexDir = $env:CRI_BENCH_INDEXDIR,
     [string]$Index = 'nox.tsv',
     [string]$Digest = '',           # 写しの指紋(snapshot.py digest)。指定すると、始める前と各回の後に確かめる
-    [string]$Clangd = 'clangd'      # 条件 B・D の clangd(run.ps1 に渡す)
+    [string]$Clangd = 'clangd',     # 条件 B・D の clangd(run.ps1 に渡す)
+    [string]$Model = 'gpt-6-luna',  # run.ps1 に渡す
+    [string]$Provider = '',         # run.ps1 に渡す('anthropic' で BYOK)
+    [string]$Codebase = 'nox'       # run.ps1 に渡す(条件 I・K・M・N の索引の置き場の名前)
 )
 $ErrorActionPreference = 'Stop'
 $bench = $PSScriptRoot
@@ -39,7 +42,7 @@ for ($rep = 1; $rep -le $Reps; $rep++) {
             $name = "$Round-$t-$c-r$rep"
             if ($done[$name]) { continue }
             & "$bench\run.ps1" -Cond $c -TaskId $t -Rep $rep -Round $Round -Tasks $Tasks -Format $Format `
-                -Workspace $Workspace -IndexDir $IndexDir -Index $Index -Clangd $Clangd
+                -Workspace $Workspace -IndexDir $IndexDir -Index $Index -Clangd $Clangd -Model $Model -Provider $Provider -Codebase $Codebase
             Test-Digest
         }
     }

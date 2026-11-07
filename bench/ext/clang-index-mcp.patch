@@ -1,0 +1,166 @@
+diff --git a/clang_index_mcp/_compilation/resource_detector.py b/clang_index_mcp/_compilation/resource_detector.py
+index 454277b..6bb1b46 100644
+--- a/clang_index_mcp/_compilation/resource_detector.py
++++ b/clang_index_mcp/_compilation/resource_detector.py
+@@ -303,11 +303,18 @@ def detect_cxx_stdlib_path(arguments: list[str]) -> str | None:
+ 
+ 
+ def find_std_insert_position(arguments: list[str]) -> int:
+-    """Find insertion position after -std= flag if present."""
++    """Find insertion position after -std= flag if present.
++
++    Without -std=, insert after any leading --driver-mode=... argument: clang only
++    honours it as the first argument (clang-cl style MSVC command lines need it).
++    """
+     for i, arg in enumerate(arguments):
+         if arg.startswith("-std="):
+             return i + 1
+-    return 0
++    pos = 0
++    while pos < len(arguments) and arguments[pos].startswith("--driver-mode="):
++        pos += 1
++    return pos
+ 
+ 
+ def is_path_in_args(path: str, arguments: list[str]) -> bool:
+@@ -320,7 +327,9 @@ def is_path_in_args(path: str, arguments: list[str]) -> bool:
+ 
+ def insert_system_include(arguments: list[str], insert_pos: int, path: str) -> int:
+     """Insert -isystem path at insert_pos and return updated position."""
+-    arguments.insert(insert_pos, "-isystem")
++    # clang-cl driver mode does not accept "-isystem <dir>"; /imsvc is its equivalent.
++    flag = "/imsvc" if "--driver-mode=cl" in arguments[:insert_pos] else "-isystem"
++    arguments.insert(insert_pos, flag)
+     arguments.insert(insert_pos + 1, path)
+     return insert_pos + 2
+ 
+diff --git a/clang_index_mcp/_core/sanitization_rules.json b/clang_index_mcp/_core/sanitization_rules.json
+index f54c31a..e52ecaa 100644
+--- a/clang_index_mcp/_core/sanitization_rules.json
++++ b/clang_index_mcp/_core/sanitization_rules.json
+@@ -93,6 +93,16 @@
+       ],
+       "description": "Remove constexpr limit options that may differ between compiler versions"
+     },
++    {
++      "id": "msvc-pch",
++      "type": "prefix_match",
++      "patterns": [
++        "/Yu",
++        "/Yc",
++        "/Fp"
++      ],
++      "description": "Remove MSVC precompiled header options (the .pch files do not exist for libclang)"
++    },
+     {
+       "id": "template-depth",
+       "type": "prefix_match",
+diff --git a/clang_index_mcp/_mcp/tool_handlers/transport_tools.py b/clang_index_mcp/_mcp/tool_handlers/transport_tools.py
+index 5f8a08c..3268652 100644
+--- a/clang_index_mcp/_mcp/tool_handlers/transport_tools.py
++++ b/clang_index_mcp/_mcp/tool_handlers/transport_tools.py
+@@ -8,10 +8,34 @@ import threading
+ from ..._core import diagnostics
+ 
+ 
++def _detach_os_stdin_handle():
++    """Windows: point the OS-level STD_INPUT_HANDLE at NUL (fd 0 stays untouched).
++
++    The stdio transport blocks a thread in a synchronous read on the stdin pipe.
++    While that read is pending, CreateProcess (used by multiprocessing "spawn"
++    for the indexing workers) blocks on the same pipe handle, so the workers
++    only start once the client closes stdin and indexing never finishes.
++    """
++    if os.name != "nt":
++        return
++    try:
++        import ctypes
++        import msvcrt
++
++        nul = open(os.devnull, "rb")  # kept open for the process lifetime
++        kernel32 = ctypes.windll.kernel32
++        kernel32.SetStdHandle.argtypes = [ctypes.c_ulong, ctypes.c_void_p]
++        kernel32.SetStdHandle(0xFFFFFFF6, msvcrt.get_osfhandle(nul.fileno()))  # STD_INPUT_HANDLE
++    except Exception as e:
++        diagnostics.warning(f"Could not detach OS stdin handle: {e}")
++
++
+ async def _run_stdio_transport(server):
+     """Run the server using stdio transport."""
+     from mcp.server.stdio import stdio_server
+ 
++    _detach_os_stdin_handle()
++
+     async with stdio_server() as (read_stream, write_stream):
+         await server.run(read_stream, write_stream, server.create_initialization_options())
+ 
+@@ -53,4 +77,8 @@ def _install_signal_handlers():
+         threading.Thread(target=_hard_shutdown, daemon=True).start()
+ 
+     for sig in (signal.SIGINT, signal.SIGTERM):
+-        loop.add_signal_handler(sig, _signal_handler)
++        try:
++            loop.add_signal_handler(sig, _signal_handler)
++        except NotImplementedError:
++            # Windows event loops do not support add_signal_handler
++            pass
+diff --git a/clang_index_mcp/_persistence/sqlite_cache_backend.py b/clang_index_mcp/_persistence/sqlite_cache_backend.py
+index 7bc4a4f..d490f08 100644
+--- a/clang_index_mcp/_persistence/sqlite_cache_backend.py
++++ b/clang_index_mcp/_persistence/sqlite_cache_backend.py
+@@ -1,6 +1,10 @@
+ """SQLite-based cache backend for C++ analyzer."""
+ 
+-import fcntl
++try:
++    import fcntl
++except ImportError:  # Windows: no fcntl; use msvcrt byte-range locking instead
++    fcntl = None  # type: ignore[assignment]
++    import msvcrt
+ import json
+ import sqlite3
+ import sys
+@@ -214,21 +218,35 @@ class SqliteCacheBackend:
+                 lock_file = open(lock_path, "w")
+                 lock_fd = lock_file.fileno()
+                 # Try non-blocking lock first
+-                try:
+-                    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+-                    diagnostics.debug(f"Acquired init lock on {lock_path}")
+-                except BlockingIOError:
+-                    # Lock is held by another instance, wait for it
+-                    diagnostics.debug(f"Waiting for init lock on {lock_path}...")
+-                    fcntl.flock(lock_fd, fcntl.LOCK_EX)  # Blocking lock
++                if fcntl is None:
++                    # msvcrt.LK_LOCK retries ~10 times (1s apart) then raises OSError
++                    while True:
++                        try:
++                            msvcrt.locking(lock_fd, msvcrt.LK_LOCK, 1)
++                            break
++                        except OSError:
++                            diagnostics.debug(f"Waiting for init lock on {lock_path}...")
+                     diagnostics.debug(f"Acquired init lock on {lock_path}")
++                else:
++                    try:
++                        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
++                        diagnostics.debug(f"Acquired init lock on {lock_path}")
++                    except BlockingIOError:
++                        # Lock is held by another instance, wait for it
++                        diagnostics.debug(f"Waiting for init lock on {lock_path}...")
++                        fcntl.flock(lock_fd, fcntl.LOCK_EX)  # Blocking lock
++                        diagnostics.debug(f"Acquired init lock on {lock_path}")
+ 
+                 yield  # Critical section
+ 
+             finally:
+                 if lock_file:
+                     try:
+-                        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
++                        if fcntl is None:
++                            lock_file.seek(0)
++                            msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
++                        else:
++                            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                         lock_file.close()
+                         diagnostics.debug("Released init lock")
+                     except Exception as e:

@@ -1,0 +1,12 @@
+{
+  "cond": "K",
+  "server": "clast",
+  "repo": "https://github.com/daveelton/clast",
+  "commit": "bf9942c",
+  "command": "${TOOLS}\\clast\\.venv\\Scripts\\python.exe",
+  "args": ["-m", "clang_ast_mcp", "serve", "--db", "${TOOLS}\\clast-run\\data\\${CB}.ast-index.db"],
+  "env": { "LIBCLANG_PATH": "${LLVM}\\bin\\libclang.dll", "PYTHONUTF8": "1" },
+  "tools": ["ast_search", "ast_get_symbol", "ast_get_outline", "ast_get_references", "ast_get_hierarchy", "ast_status"],
+  "instructions": "clast-instructions.md",
+  "note": "ast_index(索引を作り直す書き込み系のツール)は渡さない。cxxref にも書き込み系のツールは無い"
+}

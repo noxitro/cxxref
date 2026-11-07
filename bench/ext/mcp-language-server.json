@@ -1,0 +1,33 @@
+{
+  "cond": "L",
+  "server": "mcp-language-server",
+  "repo": "https://github.com/isaacphi/mcp-language-server",
+  "commit": "e439584 + Windows の手直しと MLS_SEED_FILE(mcp-language-server.patch)",
+  "command": "${TOOLS}\\mcp-language-server\\mcp-language-server.exe",
+  "args": [
+    "--workspace",
+    "${WS}",
+    "--lsp",
+    "${LLVM}\\bin\\clangd.exe",
+    "--",
+    "--compile-commands-dir=${TOOLS}\\clangd-cdb-${CB}",
+    "--background-index",
+    "-j=${JOBS}"
+  ],
+  "env": {
+    "MLS_SEED_FILE": "${WS}\\${SEED}"
+  },
+  "tools": [
+    "definition",
+    "references",
+    "hover",
+    "diagnostics"
+  ],
+  "vars": {
+    "nox": {
+      "SEED": "runtime\\kernel\\job_system.cpp"
+    }
+  },
+  "instructions": "mcp-language-server-instructions.md",
+  "note": "Go 1.27.3 で go build。手直しは 2 つ。(1) ファイルの URI を file:// と Windows のパスの連結で作っていたのを URIFromPath / Path() に替えた(このままでは clangd が『開いていない文書』として参照の要求を断る)。(2) 起動の直後に MLS_SEED_FILE のファイルを 1 つ開く(clangd はファイルを開くまで compile_commands.json と索引を読まず、workspace/symbol が何も返さない。clangd-mcp の --seed-file と同じ役目)。書き込み系の edit_file・rename_symbol は渡さない。clangd の索引は clangd-mcp・clangd-mcp-server と共用"
+}

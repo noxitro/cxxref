@@ -1,0 +1,35 @@
+diff --git a/src/clangd-manager.ts b/src/clangd-manager.ts
+index 86d94ac..17a4551 100644
+--- a/src/clangd-manager.ts
++++ b/src/clangd-manager.ts
+@@ -3,6 +3,7 @@
+ // file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ 
+ import { spawn, ChildProcess } from 'node:child_process';
++import { pathToFileURL } from 'node:url';
+ import { logger } from './utils/logger.js';
+ import { ClangdError } from './utils/errors.js';
+ import { LSPClient } from './lsp-client.js';
+@@ -125,7 +126,7 @@ export class ClangdManager {
+         name: 'clangd-mcp-server',
+         version: '0.1.0'
+       },
+-      rootUri: `file://${this.config.projectRoot}`,
++      rootUri: pathToFileURL(this.config.projectRoot).href,
+       capabilities: {
+         textDocument: {
+           definition: { linkSupport: true },
+diff --git a/src/config-detector.ts b/src/config-detector.ts
+index 053d147..a87296a 100644
+--- a/src/config-detector.ts
++++ b/src/config-detector.ts
+@@ -274,7 +274,8 @@ function generateClangdArgs(isChromiumProject: boolean, compileCommandsPath?: st
+   }
+ 
+   // Always enable malloc trim for long-running instances
+-  if (!args.some(arg => arg.includes('malloc-trim'))) {
++  // (--malloc-trim does not exist in the Windows clangd build and makes it exit)
++  if (process.platform !== 'win32' && !args.some(arg => arg.includes('malloc-trim'))) {
+     args.push('--malloc-trim');
+   }
+ 

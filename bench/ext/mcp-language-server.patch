@@ -1,0 +1,176 @@
+diff --git a/internal/lsp/client.go b/internal/lsp/client.go
+index fc07059..aa76235 100644
+--- a/internal/lsp/client.go
++++ b/internal/lsp/client.go
+@@ -118,7 +118,7 @@ func (c *Client) InitializeLSPClient(ctx context.Context, workspaceDir string) (
+ 		WorkspaceFoldersInitializeParams: protocol.WorkspaceFoldersInitializeParams{
+ 			WorkspaceFolders: []protocol.WorkspaceFolder{
+ 				{
+-					URI:  protocol.URI("file://" + workspaceDir),
++					URI:  protocol.URI(protocol.URIFromPath(workspaceDir)),
+ 					Name: workspaceDir,
+ 				},
+ 			},
+@@ -131,7 +131,7 @@ func (c *Client) InitializeLSPClient(ctx context.Context, workspaceDir string) (
+ 				Version: "0.1.0",
+ 			},
+ 			RootPath: workspaceDir,
+-			RootURI:  protocol.DocumentUri("file://" + workspaceDir),
++			RootURI:  protocol.URIFromPath(workspaceDir),
+ 			Capabilities: protocol.ClientCapabilities{
+ 				Workspace: protocol.WorkspaceClientCapabilities{
+ 					Configuration: true,
+@@ -287,7 +287,7 @@ type OpenFileInfo struct {
+ }
+ 
+ func (c *Client) OpenFile(ctx context.Context, filepath string) error {
+-	uri := fmt.Sprintf("file://%s", filepath)
++	uri := string(protocol.URIFromPath(filepath))
+ 
+ 	c.openFilesMu.Lock()
+ 	if _, exists := c.openFiles[uri]; exists {
+@@ -328,7 +328,7 @@ func (c *Client) OpenFile(ctx context.Context, filepath string) error {
+ }
+ 
+ func (c *Client) NotifyChange(ctx context.Context, filepath string) error {
+-	uri := fmt.Sprintf("file://%s", filepath)
++	uri := string(protocol.URIFromPath(filepath))
+ 
+ 	content, err := os.ReadFile(filepath)
+ 	if err != nil {
+@@ -367,7 +367,7 @@ func (c *Client) NotifyChange(ctx context.Context, filepath string) error {
+ }
+ 
+ func (c *Client) CloseFile(ctx context.Context, filepath string) error {
+-	uri := fmt.Sprintf("file://%s", filepath)
++	uri := string(protocol.URIFromPath(filepath))
+ 
+ 	c.openFilesMu.Lock()
+ 	if _, exists := c.openFiles[uri]; !exists {
+@@ -394,7 +394,7 @@ func (c *Client) CloseFile(ctx context.Context, filepath string) error {
+ }
+ 
+ func (c *Client) IsFileOpen(filepath string) bool {
+-	uri := fmt.Sprintf("file://%s", filepath)
++	uri := string(protocol.URIFromPath(filepath))
+ 	c.openFilesMu.RLock()
+ 	defer c.openFilesMu.RUnlock()
+ 	_, exists := c.openFiles[uri]
+@@ -409,7 +409,7 @@ func (c *Client) CloseAllFiles(ctx context.Context) {
+ 	// First collect all URIs that need to be closed
+ 	for uri := range c.openFiles {
+ 		// Convert URI back to file path by trimming "file://" prefix
+-		filePath := strings.TrimPrefix(uri, "file://")
++		filePath := protocol.DocumentUri(uri).Path()
+ 		filesToClose = append(filesToClose, filePath)
+ 	}
+ 	c.openFilesMu.Unlock()
+diff --git a/internal/tools/definition.go b/internal/tools/definition.go
+index 0ddd3fe..e10b4a0 100644
+--- a/internal/tools/definition.go
++++ b/internal/tools/definition.go
+@@ -79,7 +79,7 @@ func ReadDefinition(ctx context.Context, client *lsp.Client, symbolName string)
+ 				container+
+ 				"Range: L%d:C%d - L%d:C%d\n\n",
+ 			symbol.GetName(),
+-			strings.TrimPrefix(string(loc.URI), "file://"),
++			loc.URI.Path(),
+ 			loc.Range.Start.Line+1,
+ 			loc.Range.Start.Character+1,
+ 			loc.Range.End.Line+1,
+diff --git a/internal/tools/diagnostics.go b/internal/tools/diagnostics.go
+index 5b96b40..c628b1e 100644
+--- a/internal/tools/diagnostics.go
++++ b/internal/tools/diagnostics.go
+@@ -31,7 +31,7 @@ func GetDiagnosticsForFile(ctx context.Context, client *lsp.Client, filePath str
+ 	time.Sleep(time.Second * 3)
+ 
+ 	// Convert the file path to URI format
+-	uri := protocol.DocumentUri("file://" + filePath)
++	uri := protocol.URIFromPath(filePath)
+ 
+ 	// Request fresh diagnostics
+ 	diagParams := protocol.DocumentDiagnosticParams{
+diff --git a/internal/tools/hover.go b/internal/tools/hover.go
+index 874d527..74c7745 100644
+--- a/internal/tools/hover.go
++++ b/internal/tools/hover.go
+@@ -24,7 +24,7 @@ func GetHoverInfo(ctx context.Context, client *lsp.Client, filePath string, line
+ 		Line:      uint32(line - 1),
+ 		Character: uint32(column - 1),
+ 	}
+-	uri := protocol.DocumentUri("file://" + filePath)
++	uri := protocol.URIFromPath(filePath)
+ 	params.TextDocument = protocol.TextDocumentIdentifier{
+ 		URI: uri,
+ 	}
+diff --git a/internal/tools/lsp-utilities.go b/internal/tools/lsp-utilities.go
+index ae7d70b..3b76115 100644
+--- a/internal/tools/lsp-utilities.go
++++ b/internal/tools/lsp-utilities.go
+@@ -3,7 +3,6 @@ package tools
+ import (
+ 	"context"
+ 	"fmt"
+-	"net/url"
+ 	"os"
+ 	"strings"
+ 
+@@ -60,7 +59,7 @@ func GetFullDefinition(ctx context.Context, client *lsp.Client, startLocation pr
+ 
+ 	if found {
+ 		// Convert URI to filesystem path
+-		filePath, err := url.PathUnescape(strings.TrimPrefix(string(startLocation.URI), "file://"))
++		filePath, err := startLocation.URI.Path(), error(nil)
+ 		if err != nil {
+ 			return "", protocol.Location{}, fmt.Errorf("failed to unescape URI: %w", err)
+ 		}
+diff --git a/internal/tools/references.go b/internal/tools/references.go
+index cb424e5..4eb452b 100644
+--- a/internal/tools/references.go
++++ b/internal/tools/references.go
+@@ -94,7 +94,7 @@ func FindReferences(ctx context.Context, client *lsp.Client, symbolName string)
+ 		for _, uriStr := range uris {
+ 			uri := protocol.DocumentUri(uriStr)
+ 			fileRefs := refsByFile[uri]
+-			filePath := strings.TrimPrefix(uriStr, "file://")
++			filePath := uri.Path()
+ 
+ 			// Format file header
+ 			fileInfo := fmt.Sprintf("---\n\n%s\nReferences in File: %d\n",
+diff --git a/internal/tools/utilities.go b/internal/tools/utilities.go
+index e5beb28..7fd34b9 100644
+--- a/internal/tools/utilities.go
++++ b/internal/tools/utilities.go
+@@ -11,7 +11,7 @@ import (
+ )
+ 
+ func ExtractTextFromLocation(loc protocol.Location) (string, error) {
+-	path := strings.TrimPrefix(string(loc.URI), "file://")
++	path := loc.URI.Path()
+ 
+ 	content, err := os.ReadFile(path)
+ 	if err != nil {
+diff --git a/main.go b/main.go
+index f6f3ed5..9eda39f 100644
+--- a/main.go
++++ b/main.go
+@@ -100,7 +100,17 @@ func (s *mcpServer) initializeLSP() error {
+ 	coreLogger.Debug("Server capabilities: %+v", initResult.Capabilities)
+ 
+ 	go s.workspaceWatcher.WatchWorkspace(s.ctx, s.config.workspaceDir)
+-	return client.WaitForServerReady(s.ctx)
++	if err := client.WaitForServerReady(s.ctx); err != nil {
++		return err
++	}
++	// MLS_SEED_FILE: open one file right after startup. clangd loads compile_commands.json and its
++	// background index only when the first file is opened, so workspace/symbol returns nothing before that.
++	if seed := os.Getenv("MLS_SEED_FILE"); seed != "" {
++		if err := client.OpenFile(s.ctx, seed); err != nil {
++			coreLogger.Error("Failed to open seed file %s: %v", seed, err)
++		}
++	}
++	return nil
+ }
+ 
+ func (s *mcpServer) start() error {

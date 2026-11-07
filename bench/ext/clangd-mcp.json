@@ -1,0 +1,14 @@
+{
+  "cond": "M",
+  "server": "clangd-mcp",
+  "repo": "https://github.com/schuay/clangd-mcp",
+  "commit": "5509c00",
+  "command": "${TOOLS}\\clangd-mcp\\.venv\\Scripts\\python.exe",
+  "args": ["${TOOLS}\\clangd-mcp\\server.py", "--clangd", "${LLVM}\\bin\\clangd.exe",
+    "--compile-commands-dir", "${TOOLS}\\clangd-cdb-${CB}", "--workspace-dir", "${WS}", "--seed-file", "${WS}\\${SEED}"],
+  "env": {},
+  "tools": ["*"],
+  "vars": { "nox": { "SEED": "runtime\\kernel\\job_system.cpp" }, "ue5": { "SEED": "Engine\\Source\\Runtime\\Engine\\Private\\Animation\\AnimInstanceProxy.cpp" } },
+  "instructions": "clangd-mcp-instructions.md",
+  "note": "--seed-file が無いと、索引があっても workspace/symbol が何も返さない。clangd の索引は ${TOOLS}\\clangd-cdb-<名前>\\.cache に前もって作る(clangd-mcp-server と共用)"
+}
