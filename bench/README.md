@@ -77,11 +77,16 @@ v13 は、`run.ps1` とは別の台本(`run13.py`・`batch13.py`・`score13.py`)
 - 条件は A(なし)・P(マーケットプレイスから入れた v0.5.1)・M(MCP だけを `--additional-mcp-config` で渡し、rule は無し)・X(P に `v13\adverse-instructions.md` を足したもの)です。どれも空の `COPILOT_HOME` から始め、道具は既定の一式(編集と shell を含む)を渡します。パッケージの導入・ビルド・ネットワークのコマンドだけを `--deny-tool` で止めます
 - 作業フォルダは git で管理した写しで、各回の前に `git checkout`・`git clean` で元に戻し、変更は差分(`runs13\<名前>.diff`)に残します
 - 問題は `v13\tasks-stage1.json`(Python・C#・TypeScript と索引の無い Nox、各 3 問)と `v13\tasks-stage2.json`(Nox の 8 問)です。対象は `v13\sample.py`・`v13\sample2.py` が乱数で選びます。段階 2 の正解は、宣言と定義に引数を足した中身を VFS の overlay で差し替えて `clang-cl /Zs` にかけ、新しく出たエラーの位置から作ります(`v13\cxxcheck.py`)
+- 条件 Q は、P の rule と ltidx だけを直した版に差し替えたものです(`run13.py` の冒頭)。段階 2 の測り直し(`--round v13q`)で使いました
 - 採点は `python -I score13.py --tasks v13\tasks-stage2.json --compile` です。`--compile` は、差分を当てた中身で同じ構文チェックをかけ、元には無いエラーが出ないかを見ます(最低の優先度・4 並列)。`batch13.py` は、終わった回を飛ばし、`runs13\STOP` があれば次の回の前に止まります
+- 入力トークンの比と信頼区間は `ratio13.py` で出します(問題ごとに平均どうしの比を取り、幾何平均と中央値にまとめ、問題と回を引き直す 2 段の bootstrap)
+- `trace13.py <回の名前>` は、1 回の実行で使った道具を、モデルの呼び出しごとの 1 行にして出します(`../docs/benchmarks.md` の「動きの例」)
 
 ```powershell
 python -I batch13.py --tasks v13/tasks-stage2.json --conds A,P,M,X --reps 5 --round v13
 python -I score13.py --tasks v13/tasks-stage2.json --compile
+python -I ratio13.py --round v13 --tasks v13/tasks-stage2.json --conds A,P,M,X
+python -I trace13.py v13q-C2-createinstance-Q-r4
 ```
 
 ## 計測に使うソースの写し
