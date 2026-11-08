@@ -410,6 +410,30 @@ class LtidxTest(unittest.TestCase):
         self.assertTrue(self.has('B', 'def', 'a.cpp:2:6'))
         self.assertEqual(sorted(os.listdir(d)), sorted(names))
 
+    def test_sources_stay_writable_while_indexing(self):
+        # LLVM は大きいファイルを mmap で読み、Windows ではマップされている間そのファイルに書けない(1224)。
+        # 自動更新はエージェントがソースを書き換えている最中にも走るので、解析中もソースへ書けること
+        body = '#pragma once\n' + ''.join(f'inline int f{i}(int x) {{ return x * {i}; }}\n' for i in range(12000))
+        self.write('big.h', body)
+        for k in range(8):
+            self.write(f'tu{k}.cpp', '#include "big.h"\n' + ''.join(
+                f'int g{k}_{i}() {{ return f{i}({k}); }}\n' for i in range(0, 12000, 3)), [])
+        os.makedirs(os.path.join(self.root, '.index'), exist_ok=True)
+        p = subprocess.Popen([LTIDX, '-p', self.root, '-root', self.root, '-o', os.path.join(self.root, '.index', 'index.tsv'),
+                              '-j', '4'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        writes, failed = 0, []
+        while p.poll() is None:
+            try:
+                with open(os.path.join(self.root, 'big.h'), 'w', newline='\n') as f:
+                    f.write(body)
+                writes += 1
+            except OSError as e:
+                failed.append(repr(e))
+            time.sleep(0.02)
+        self.assertEqual(p.returncode, 0)
+        self.assertGreater(writes + len(failed), 0, 'ltidx finished before the first write')
+        self.assertEqual(failed, [])
+
     def test_root_written_differently(self):
         # ルートを 8.3 形式の短い名前で渡し、compile_commands.json は長い名前(MSBuild が返す形)。どちらでもルート配下と判定する
         import ctypes

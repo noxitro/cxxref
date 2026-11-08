@@ -8,6 +8,8 @@ usage: python -I run13.py --tasks v13/tasks-stage1.json --task S1-req-usage --co
   P: 公開中のプラグイン cxxref をマーケットプレイスから入れた COPILOT_HOME(製品のまま。rule あり)
   M: A に、このリポジトリの MCP サーバーだけを --additional-mcp-config で足す(rule なし)
   X: P に、cxxref と食い違うユーザーの指示(v13/adverse-instructions.md)を作業フォルダの .github/copilot-instructions.md に足す
+  Q: P の rule を、このリポジトリの今の rule(使う場面と使わない場面を分けたもの)に差し替え、ltidx をソースをマップせずに
+     読む版(ltidx-next)にしたもの。MCP サーバーなど、ほかは P と同じ v0.5.1(homes/tmpl-Q。段階 2 の測り直し)
 
 作業フォルダは git で管理した写し。実行の前と後に、追跡しているファイルを戻し、増えたファイルを消す(git checkout と git clean)。
 回答の後の差分は runs13/<名前>.diff に残す。採点は score13.py。
@@ -31,6 +33,7 @@ WORKSPACES = {
     'nox-noindex': {'path': os.path.join(DATA, 'nox-20261103'), 'clean': ['.github', '.mcp.json', '.serena']},
 }
 LTIDX = os.path.join(V13, 'ltidx-0.5.1', 'ltidx.exe')
+LTIDX_NEXT = os.path.join(V13, 'ltidx-next', 'ltidx.exe')
 # copilot は .exe を直接起動する(npm の copilot.CMD を経ると、cmd が問題文の記号を解釈しうる)
 COPILOT = os.environ.get('CRI_COPILOT') or shutil.which('copilot.exe') or os.path.join(
     os.environ.get('LOCALAPPDATA', ''), r'Microsoft\WinGet\Packages\GitHub.Copilot_Microsoft.Winget.Source_8wekyb3d8bbwe\copilot.exe')
@@ -176,7 +179,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--tasks', required=True)
     ap.add_argument('--task', required=True)
-    ap.add_argument('--cond', required=True, choices=['A', 'P', 'M', 'X'])
+    ap.add_argument('--cond', required=True, choices=['A', 'P', 'M', 'X', 'Q'])
     ap.add_argument('--rep', type=int, default=1)
     ap.add_argument('--round', default='v13')
     ap.add_argument('--model', default='gpt-6-luna')
@@ -193,7 +196,7 @@ def main():
     os.makedirs(RUNS, exist_ok=True)
 
     reset_ws(w)
-    if a.cond in ('P', 'M', 'X') and w.get('index'):
+    if a.cond in ('P', 'M', 'X', 'Q') and w.get('index'):
         place_index(w)
     if a.cond == 'X':
         gh = os.path.join(ws, '.github')
@@ -204,7 +207,7 @@ def main():
     home = os.path.join(V13, 'homes', name)
     if os.path.exists(home):
         shutil.rmtree(home)
-    shutil.copytree(os.path.join(V13, 'homes', 'tmpl-P' if a.cond in ('P', 'X') else 'tmpl-A'), home)
+    shutil.copytree(os.path.join(V13, 'homes', {'P': 'tmpl-P', 'X': 'tmpl-P', 'Q': 'tmpl-Q'}.get(a.cond, 'tmpl-A')), home)
     usage_file = os.path.join(RUNS, name + '.usage.json')
     if os.path.exists(usage_file):
         os.remove(usage_file)
@@ -218,7 +221,7 @@ def main():
         mcp = {'mcpServers': {'code-ref-index': {'type': 'local', 'command': 'python',
                                                   'args': ['-I', os.path.join(REPO, 'mcp', 'server.py')], 'tools': ['*']}}}
         cmd += ['--additional-mcp-config', json.dumps(mcp)]
-    env = dict(os.environ, COPILOT_HOME=home, LTIDX=LTIDX)
+    env = dict(os.environ, COPILOT_HOME=home, LTIDX=LTIDX_NEXT if a.cond == 'Q' else LTIDX)
     for v in ('COPILOT_PROVIDER_TYPE', 'COPILOT_PROVIDER_BASE_URL', 'COPILOT_PROVIDER_API_KEY', 'COPILOT_PROVIDER_API_KEY_COMMAND',
               'COPILOT_MODEL', 'COPILOT_PROVIDER_MODEL_ID', 'COPILOT_PROVIDER_WIRE_MODEL'):
         env.pop(v, None)

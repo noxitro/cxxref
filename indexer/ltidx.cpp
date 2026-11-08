@@ -174,7 +174,7 @@ public:
       if (auto It = Cache.find(Key); It != Cache.end()) return It->second;
     }
     std::shared_ptr<const std::string> R;
-    if (auto Buf = FS.getBufferForFile(Abs, -1, false)) R = convert((*Buf)->getBuffer(), Cp);
+    if (auto Buf = FS.getBufferForFile(Abs, -1, false, /*IsVolatile=*/true)) R = convert((*Buf)->getBuffer(), Cp);
     std::lock_guard<std::mutex> L(M);
     return Cache.try_emplace(Key, R).first->second;
   }
@@ -209,6 +209,24 @@ private:
   std::shared_ptr<const std::string> D;
 };
 
+// ソースをメモリーにマップせずに読む。LLVM は大きいファイルを mmap で読み、Windows ではマップされている間
+// そのファイルに書き込めない(ERROR_USER_MAPPED_FILE、1224)。索引の自動更新は、エージェントやエディターが
+// ソースを書き換えている最中にも走るので、読む中身はいつも複写にする(IsVolatile)
+class VolatileFile : public llvm::vfs::File {
+public:
+  explicit VolatileFile(std::unique_ptr<llvm::vfs::File> F) : F(std::move(F)) {}
+  llvm::ErrorOr<llvm::vfs::Status> status() override { return F->status(); }
+  llvm::ErrorOr<std::string> getName() override { return F->getName(); }
+  llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> getBuffer(const llvm::Twine &Name, int64_t FileSize,
+                                                               bool RequiresNullTerminator, bool) override {
+    return F->getBuffer(Name, FileSize, RequiresNullTerminator, /*IsVolatile=*/true);
+  }
+  std::error_code close() override { return F->close(); }
+
+private:
+  std::unique_ptr<llvm::vfs::File> F;
+};
+
 // 変換したファイルは、大きさも変換後のものを返す(SourceManager が読んだ大きさと突き合わせる)
 class TranscodingFS : public llvm::vfs::ProxyFileSystem {
 public:
@@ -225,7 +243,7 @@ public:
     auto F = ProxyFileSystem::openFileForRead(Path);
     if (!F) return F;
     auto D = T.get(getUnderlyingFS(), Path, Cp);
-    if (!D) return F;
+    if (!D) return std::unique_ptr<llvm::vfs::File>(new VolatileFile(std::move(*F)));
     auto S = (*F)->status();
     if (!S) return S.getError();
     auto NewS = llvm::vfs::Status::copyWithNewSize(*S, D->size());  // D を渡す前に(引数の評価順は決まっていない)
