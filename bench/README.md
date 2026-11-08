@@ -70,6 +70,20 @@ python -I autoupdate_bench.py --workspace <写し> --index <索引.tsv> --reps 5
 - `collect.py` は `~/.copilot/session-store.db` と、各セッションの `events.jsonl` を読み取り専用で開き、`runs\summary.tsv` と条件ごとの平均を出します。`rep=0` は試運転として集計から外します
 - 問題と正解は `tasks.json`(と `tasks-<名前>.json`。`collect.py` はすべて読むので、id はファイルをまたいで重ねません)、回答の書式は `answer-format.md` です。指示は、索引用が `index-instructions.md`(v1 の計測で使ったものは `index-instructions-v1.md`)、LSP 用が `lsp-instructions.md`(v1 の計測で使ったものは `lsp-instructions-v1.md`)、ltq 用が `cli-instructions.md` です
 
+## v13: ふだんの作業に近い問題での計測
+
+v13 は、`run.ps1` とは別の台本(`run13.py`・`batch13.py`・`score13.py`)で流します。計画と、流す前に固定した問題は `../docs/bench-plan-v13.md`、結果は `../docs/design.md` の「公平に近い条件での測り直し」にあります。
+
+- 条件は A(なし)・P(マーケットプレイスから入れた v0.5.1)・M(MCP だけを `--additional-mcp-config` で渡し、rule は無し)・X(P に `v13\adverse-instructions.md` を足したもの)です。どれも空の `COPILOT_HOME` から始め、道具は既定の一式(編集と shell を含む)を渡します。パッケージの導入・ビルド・ネットワークのコマンドだけを `--deny-tool` で止めます
+- 作業フォルダは git で管理した写しで、各回の前に `git checkout`・`git clean` で元に戻し、変更は差分(`runs13\<名前>.diff`)に残します
+- 問題は `v13\tasks-stage1.json`(Python・C#・TypeScript と索引の無い Nox、各 3 問)と `v13\tasks-stage2.json`(Nox の 8 問)です。対象は `v13\sample.py`・`v13\sample2.py` が乱数で選びます。段階 2 の正解は、宣言と定義に引数を足した中身を VFS の overlay で差し替えて `clang-cl /Zs` にかけ、新しく出たエラーの位置から作ります(`v13\cxxcheck.py`)
+- 採点は `python -I score13.py --tasks v13\tasks-stage2.json --compile` です。`--compile` は、差分を当てた中身で同じ構文チェックをかけ、元には無いエラーが出ないかを見ます(最低の優先度・4 並列)。`batch13.py` は、終わった回を飛ばし、`runs13\STOP` があれば次の回の前に止まります
+
+```powershell
+python -I batch13.py --tasks v13/tasks-stage2.json --conds A,P,M,X --reps 5 --round v13
+python -I score13.py --tasks v13/tasks-stage2.json --compile
+```
+
 ## 計測に使うソースの写し
 
 正解の行番号は、ソースの写しに対するものです。写しは計測の外で書き換えないでください。`snapshot.py digest <写し>` の指紋で、写しが変わっていないかを確かめます(`batch.ps1 -Digest` は始める前と各回の後に確かめます)。指紋は、計測の道具が書き換える `.` で始まるフォルダ・ファイル(`.index` `.cdb` `.github` `.mcp.json`)を除いて作ります。
