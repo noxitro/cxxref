@@ -89,7 +89,7 @@ copilot mcp add code-ref-index -- python -I <このリポジトリ>\mcp\server.p
 
 ### 使い方の指示
 
-Copilot CLI は、許可リストに無い MCP サーバーの初期化時の説明(instructions)をシステムプロンプトに入れません。それでも計測では、指示なしで 12 回とも `refs` が最初に使われました(正答 11/12)。指示を足すと 12/12 になり、トークンも減りました(`../docs/design.md`)。指示を入れるなら、`../bench/mcp-instructions.md` の内容をプロジェクトの `.github/copilot-instructions.md` に足します。
+Copilot CLI は、許可リストに無い MCP サーバーの初期化時の説明(instructions)をシステムプロンプトに入れません。それでも計測では、指示なしで 12 回とも `refs` が最初に使われました(正答 11/12)。指示を足すと 12/12 になり、トークンも減りました(`../docs/design.md`)。指示を入れるなら、`../scripts/setup-instructions.bat`(プラグインの拡張なら `/cxxref-enable on`)で、`../scripts/cxxref-instructions.md` の内容を自分の手元だけか、プロジェクトの `.github/copilot-instructions.md` に足します。
 
 ## VS Code の Copilot で使う
 

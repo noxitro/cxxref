@@ -1,10 +1,11 @@
-// node --test com.github.copilot/extensions/cxxref/lib.test.mjs(mcp/test/test_plugin.py が流す)。/cxxref-index の SDK に依らない部分
+// node --test com.github.copilot/extensions/cxxref/lib.test.mjs(mcp/test/test_plugin.py が流す)。/cxxref-index・/cxxref-enable の SDK に依らない部分
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { escapeMarkdown, findLtidx, indexRoot, lastCwd, pluginRoot, targetRoot } from "./lib.mjs";
+import { enableRoot, escapeMarkdown, findLtidx, gitTop, indexRoot, lastCwd, parseEnableArgs, pluginRoot, targetRoot } from "./lib.mjs";
 
 test("escapeMarkdown: 記号の前の \\ だけを二重にする", () => {
   assert.equal(escapeMarkdown("E:\\src\\Nox\\.index\\a.log"), "E:\\src\\Nox\\\\.index\\a.log");
@@ -61,5 +62,34 @@ test("targetRoot: 引数(引用符・相対)か、親へさかのぼって .inde
     assert.equal(targetRoot(`"${join(repo, "src")}"`, d).root, join(repo, "src"));
     assert.equal(targetRoot("src", repo).root, join(repo, "src"));
     assert.match(targetRoot("none", repo).error, /フォルダがありません/);
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test("parseEnableArgs: on は省くとローカル、off は省くと両方、引数なしは状態", () => {
+  assert.deepEqual(parseEnableArgs(""), { action: "Status", scope: "", root: "" });
+  assert.deepEqual(parseEnableArgs("on"), { action: "Add", scope: "Local", root: "" });
+  assert.deepEqual(parseEnableArgs("ON Project"), { action: "Add", scope: "Project", root: "" });
+  assert.deepEqual(parseEnableArgs("off"), { action: "Remove", scope: "", root: "" });
+  assert.deepEqual(parseEnableArgs("off local D:\\src\\game"), { action: "Remove", scope: "Local", root: "D:\\src\\game" });
+  assert.deepEqual(parseEnableArgs('on "D:\\my src"'), { action: "Add", scope: "Local", root: '"D:\\my src"' });
+  assert.deepEqual(parseEnableArgs("status project"), { action: "Status", scope: "", root: "" });
+  assert.match(parseEnableArgs("enable").error, /使い方/);
+});
+
+test("enableRoot: 引数が無ければ git のルート、リポジトリでなければ作業フォルダ", () => {
+  const d = mkdtempSync(join(tmpdir(), "cri"));
+  try {
+    const real = (p) => realpathSync.native(p).toLowerCase();
+    mkdirSync(join(d, "plain"));
+    assert.equal(real(enableRoot("", join(d, "plain")).root), real(join(d, "plain")));
+    let git = true;
+    try { execFileSync("git", ["init", "-q", join(d, "repo")], { stdio: "ignore" }); } catch { git = false; }
+    if (git) {
+      mkdirSync(join(d, "repo", "src"));
+      assert.equal(real(gitTop(join(d, "repo", "src"))), real(join(d, "repo")));
+      assert.equal(real(enableRoot("", join(d, "repo", "src")).root), real(join(d, "repo")));
+      assert.equal(enableRoot("src", join(d, "repo")).root, join(d, "repo", "src"));  // 引数があればそこ
+    }
+    assert.equal(gitTop(join(d, "none")), "");
   } finally { rmSync(d, { recursive: true, force: true }); }
 });

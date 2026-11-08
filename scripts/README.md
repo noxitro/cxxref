@@ -9,7 +9,7 @@
 | `index-project.bat` | 索引を `<ルート>\.index\` に作る。`compile_commands.json` が無ければ `make-cdb` で作ってから解析する |
 | `make-cdb.bat` | Visual Studio のソリューション・プロジェクトか CMake のプロジェクトから、`compile_commands.json` を作る(ビルドはしない) |
 | `register-copilot.bat` | Copilot CLI のユーザー設定に MCP サーバーを登録する |
-| `setup-instructions.bat` | プロジェクトの `.github\copilot-instructions.md` に、使い方の指示を足す・消す |
+| `setup-instructions.bat` | 使い方の指示を足す・消す。自分だけ(`.github\instructions\cxxref.instructions.md` を git から外して置く)か、プロジェクト(`.github\copilot-instructions.md`)かを選ぶ |
 
 ## 前提
 
@@ -71,19 +71,28 @@ LLVM と Visual Studio で ltidx をビルドせずに使うときは、`get-lti
 
 ### 使い方の指示を足す・消す(`setup-instructions.bat`)
 
-`setup-instructions.bat` をダブルクリックし、ソースのルートを入れます。今の状態(入っているかどうか)が出るので、番号を選びます。
+`setup-instructions.bat` をダブルクリックし、ソースのルートを入れます。今の状態(ローカル・プロジェクトのどちらに入っているか)が出るので、番号を選びます。足す中身は [cxxref-instructions.md](cxxref-instructions.md) です(以前のプラグインの rule と同じもの。プラグインは指示を持たないので、使うリポジトリにここから入れます)。
 
-- **1: 足す**: [../bench/mcp-instructions.md](../bench/mcp-instructions.md) の中身を、`<ルート>\.github\copilot-instructions.md` の末尾に足します。ファイルが無ければ作ります。すでに入っていれば、最新の中身に差し替えます
-- **2: 消す**: 足した部分だけを消します。ほかに中身が無くなったら、ファイルごと消します
+- **1: ローカルに足す(自分だけ)**: `<ルート>\.github\instructions\cxxref.instructions.md` を置き、git の `.git\info\exclude` に 1 組(説明の行とパス)を足して git から外します。`git status` に出ないので、コミットに混ざりません。すでにあれば、最新の中身に差し替えます
+- **2: プロジェクトに足す(コミットすればチーム全員)**: `<ルート>\.github\copilot-instructions.md` の末尾に足します。ファイルが無ければ作ります。すでに入っていれば、最新の中身に差し替えます
+- **3: 消す**: 入っている方(両方なら両方)から、足した分だけを消します。足したときに作ったファイルとフォルダは、ほかに中身が無ければ消します。ローカルでは `.git\info\exclude` に足した 1 組も消します
 
-足した部分は `<!-- cxxref:begin ... -->` と `<!-- cxxref:end -->` の目印で囲みます。目印の外(自分で書いた指示)は書き換えません。目印の間を手で書き換えても、次に「足す」か「消す」を選ぶと上書き・削除されます。改行(CRLF/LF)と BOM の有無は、元のファイルに合わせます。
+二重にはしません。プロジェクトに入っていればローカルには足さず、プロジェクトに足すとローカルの分を消します。
 
-聞かずに実行するときは引数で指定します。
+プロジェクトでは、足した部分を `<!-- cxxref:begin ... -->` と `<!-- cxxref:end -->` の目印で囲みます。目印の外(自分で書いた指示)は書き換えません。目印の間を手で書き換えても、次に「足す」か「消す」を選ぶと上書き・削除されます。改行(CRLF/LF)と BOM の有無は、元のファイルに合わせます。
+
+ローカルのファイルには `<!-- cxxref:local ... -->` の目印を入れます。目印の無い同じ名前のファイル(自分で作ったもの)があれば、書き換えも消しもせずに止まります。その場所がコミットされているリポジトリでも、git から外せないので止まります。Copilot CLI には手元だけの指示ファイル(Claude Code の `CLAUDE.local.md` のようなもの)が無いので、この形にしました。
+
+聞かずに実行するときは引数で指定します。`-Action Add` で `-Scope` を省くとプロジェクト、`-Action Remove` で省くと両方です。
 
 ```bat
-setup-instructions.bat -Root D:\src\game -Action Add
+setup-instructions.bat -Root D:\src\game -Action Add -Scope Local
+setup-instructions.bat -Root D:\src\game -Action Add -Scope Project
 setup-instructions.bat -Root D:\src\game -Action Remove
+setup-instructions.bat -Root D:\src\game -Action Status
 ```
+
+Copilot CLI のプラグインの拡張を使うなら、セッションの中で `/cxxref-enable on`(ローカル)・`/cxxref-enable on project`・`/cxxref-enable off` でも同じことができます(../README.md の「`/cxxref-enable`」)。
 
 ## 仕組みと制約
 
@@ -110,4 +119,4 @@ setup-instructions.bat -Root D:\src\game -Action Remove
   - 引数無し(ダブルクリック)のときの問い合わせ: 空のまま Enter で前の LLVM の場所を使うこと、引用符と末尾の `\` を外すこと、登録の Y/n(空なら Y)。空白と ASCII でない文字(日本語版の Windows なら日本語、英語版なら é)を含む LLVM の場所を書いた `llvm-root.txt` を、`build.bat`(cmd の `set /p`)が読み戻せること。cmd のコードページで表せない文字を含む場所は、`llvm-root.txt` に書かずに知らせること。一時フォルダに写した `setup.ps1` と、偽物の `build.bat`・LLVM で確かめるので、本物のビルドと `indexer\llvm-root.txt` には触れません(pwsh だけで走ります)
 - `llvm-notices.py` が、LLVM のソースの写しから各部品の表示(目印を含むコメント)を写すこと。目印が見つからなければ、欠けた表示を作らずに失敗すること(ネットワークは使いません)
 - `package-ltidx` で作った zip を `get-ltidx` で取り込むと、ltidx.exe・組み込みヘッダー・版・ライセンスの表示が置かれ、その ltidx.exe で索引が作れること。sha256 が合わない zip は取り込まず、前のものを残すこと(ネットワークは使いません。ビルド済みの ltidx.exe と LLVM が要ります)
-- `setup-instructions` で足して消すと元のファイルに戻ること(改行・BOM・自分で書いた指示を含む)、2 回足すと差し替わること(この確かめは pwsh だけで走ります)
+- `setup-instructions` で足して消すと元のファイルに戻ること(改行・BOM・自分で書いた指示を含む)、2 回足すと差し替わること。ローカルに足すと `git status` に出ず、消すと `.git\info\exclude` も元に戻ること(この確かめは pwsh と git だけで走ります)

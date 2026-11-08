@@ -1,11 +1,10 @@
 """このリポジトリを Copilot CLI のプラグインとして入れるための定義の検査(Copilot は要らない)。
-plugin.json・mcp.json(Agent Plugins 1.0)、com.github.copilot/rules の rule(.mdc)、.github/plugin/marketplace.json。
+plugin.json・mcp.json(Agent Plugins 1.0)、com.github.copilot/extensions の拡張、.github/plugin/marketplace.json。
 
 usage: python -I -m unittest discover -s mcp/test   (リポジトリのルートで)
 """
 import json
 import os
-import re
 import shutil
 import subprocess
 import unittest
@@ -49,17 +48,14 @@ class PluginTest(unittest.TestCase):
         self.assertEqual(len(script), 1)
         self.assertTrue(os.path.exists(os.path.join(ROOT, script[0][len('${PLUGIN_ROOT}/'):])))
 
-    def test_rule(self):
-        # Copilot CLI の rule は .mdc(description が必須。alwaysApply・globs)【実測: 1.0.105。.md は読まれなかった】
-        d = os.path.join(ROOT, 'com.github.copilot', 'rules')
-        files = os.listdir(d)
-        self.assertEqual(files, ['cxxref.mdc'])
-        with open(os.path.join(d, files[0]), encoding='utf-8') as f:
+    def test_no_rule(self):
+        # プラグインは指示(rule)を持たない。rule は有効なリポジトリのすべてで毎回読まれるため、使うリポジトリだけで
+        # /cxxref-enable(setup-instructions.ps1)で入れる。指示の中身は scripts/cxxref-instructions.md
+        self.assertFalse(os.path.exists(os.path.join(ROOT, 'com.github.copilot', 'rules')))
+        with open(os.path.join(ROOT, 'scripts', 'cxxref-instructions.md'), encoding='utf-8') as f:
             text = f.read()
-        head = re.match(r'---\n(.*?)\n---\n', text, re.S)
-        self.assertTrue(head, 'frontmatter')
-        self.assertRegex(head.group(1), r'(?m)^description: \S')
-        self.assertRegex(head.group(1), r'(?m)^alwaysApply: true$')
+        self.assertFalse(text.startswith('---'))  # 前置きは setup-instructions.ps1 が足す側で付ける
+        self.assertIn('`refs`', text)
         self.assertIn('`root`', text)  # プラグインのサーバーは作業フォルダを知らないので、root を渡させる
 
     def test_extension(self):
@@ -69,7 +65,8 @@ class PluginTest(unittest.TestCase):
         with open(ext, encoding='utf-8') as f:
             text = f.read()
         self.assertIn('name: "cxxref-index"', text)
-        for s in ('get-ltidx.ps1', 'index-project.ps1'):  # 拡張が動かすスクリプトがプラグインの中にある
+        self.assertIn('name: "cxxref-enable"', text)  # 使い方の指示を足す・消す(setup-instructions.ps1)
+        for s in ('get-ltidx.ps1', 'index-project.ps1', 'setup-instructions.ps1'):  # 拡張が動かすスクリプトがプラグインの中にある
             self.assertIn(s, text)
             self.assertTrue(os.path.exists(os.path.join(ROOT, 'scripts', s)))
         node = shutil.which('node')

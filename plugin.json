@@ -2,7 +2,7 @@
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "cxxref",
   "version": "0.5.1",
-  "description": "C++ reference index built with clang (libtooling) for every TU. Adds the code-ref-index MCP server (refs / check: calls resolved by clang, with the reason for every text match left out) and the rule to use it before grep.",
+  "description": "C++ reference index built with clang (libtooling) for every TU. Adds the code-ref-index MCP server (refs / check: calls resolved by clang, with the reason for every text match left out), /cxxref-index to build the index, and /cxxref-enable to add the usage instructions only to the repositories that use it.",
   "author": { "name": "nitro", "url": "https://github.com/noxitro" },
   "homepage": "https://github.com/noxitro/cxxref",
   "repository": "https://github.com/noxitro/cxxref",

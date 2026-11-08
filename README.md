@@ -52,8 +52,8 @@ Copilot で C++ の呼び出し箇所を探すと、LSP(clangd)を渡しても�
 | [query](query/README.md) | `ltq`: 索引の問い合わせ CLI(Python) |
 | [mcp](mcp/README.md) | MCP サーバー: `ltq` の `refs` / `check` を Copilot のツールとして渡す(Python) |
 | `setup.bat` | 使い始めの手順 2〜5(LLVM の場所を決めて ltidx をビルドし、索引を作り、使い方の指示を足し、Copilot CLI に登録する)をまとめて行う |
-| [scripts](scripts/README.md) | `index-project.bat`: プロジェクトの索引を作る(`compile_commands.json` が無ければ作る。`-Update` で変わった TU だけ作り直す)。`make-cdb.bat`: Visual Studio のソリューションか CMake から `compile_commands.json` を作る。`register-copilot.bat`: Copilot CLI に MCP サーバーを登録する。`setup-instructions.bat`: 使い方の指示を足す・消す。`get-ltidx.bat`: ビルド済みの ltidx をリリースから取ってくる(LLVM 無しで使う) |
-| `plugin.json`・`mcp.json`・`com.github.copilot\rules\`・`.github\plugin\marketplace.json` | このリポジトリを Copilot CLI のプラグイン(cxxref)として入れるための定義(下の「チームで使う」) |
+| [scripts](scripts/README.md) | `index-project.bat`: プロジェクトの索引を作る(`compile_commands.json` が無ければ作る。`-Update` で変わった TU だけ作り直す)。`make-cdb.bat`: Visual Studio のソリューションか CMake から `compile_commands.json` を作る。`register-copilot.bat`: Copilot CLI に MCP サーバーを登録する。`setup-instructions.bat`: 使い方の指示を足す・消す(ローカルかプロジェクトを選ぶ)。`get-ltidx.bat`: ビルド済みの ltidx をリリースから取ってくる(LLVM 無しで使う) |
+| `plugin.json`・`mcp.json`・`com.github.copilot\extensions\`・`.github\plugin\marketplace.json` | このリポジトリを Copilot CLI のプラグイン(cxxref)として入れるための定義(下の「チームで使う」) |
 | `run-tests.bat` | すべてのテストを流す(下の「動作確認」) |
 | [bench](bench/README.md) | Copilot CLI での検索手段の比較(rg・LSP・索引・CLI・MCP) |
 | [docs](docs/design.md) | 設計と計測の記録 |
@@ -78,19 +78,23 @@ Copilot で C++ の呼び出し箇所を探すと、LSP(clangd)を渡しても�
 
    VS Code や、プロジェクト単位の登録は [mcp/README.md](mcp/README.md) を参照してください
    - MCP サーバーの名前は、旧名の `code-ref-index` のままです。ツールの名前(`code-ref-index-refs` など)がこの名前から付き、計測はこの名前で行ったためです
-5. **使い方の指示を足す(推奨)**: `scripts\setup-instructions.bat` をダブルクリックし、ソースのルートを入れて「1: 足す」を選びます。プロジェクトの `.github\copilot-instructions.md` に [bench/mcp-instructions.md](bench/mcp-instructions.md) の内容が入ります。やめるときは同じ .bat で「2: 消す」を選ぶと、足した部分だけが消えます
+5. **使い方の指示を足す(推奨)**: `scripts\setup-instructions.bat` をダブルクリックし、ソースのルートを入れて番号を選びます。[scripts/cxxref-instructions.md](scripts/cxxref-instructions.md) の内容が入ります。やめるときは同じ .bat で「3: 消す」を選ぶと、足した分だけが消えます
+   - 「1: ローカルに足す」: 自分の手元だけに効きます。`.github\instructions\cxxref.instructions.md` を置き、`.git\info\exclude` に足して git から外します(`git status` に出ません)
+   - 「2: プロジェクトに足す」: `.github\copilot-instructions.md` に入れます。コミットすると、チームの全員に効きます
+   - プラグインの拡張を使うなら、セッションの中で `/cxxref-enable on` でも同じことができます(下の「`/cxxref-enable`」)
 
 ## チームで使う(Copilot CLI のプラグイン)
 
-このリポジトリは、そのまま Copilot CLI のプラグイン `cxxref` として入れられます。中身は MCP サーバー(`mcp.json`)と使い方の rule(`com.github.copilot\rules\cxxref.mdc`。上の「使い方の指示」と同じ内容)です。LLVM の用意と ltidx のビルドは要りません(ltidx はリリースの配布物を使います)。Python 3.10 以降・pwsh・Visual Studio(`compile_commands.json` を作るのに使います)は要ります。
+このリポジトリは、そのまま Copilot CLI のプラグイン `cxxref` として入れられます。中身は MCP サーバー(`mcp.json`)と、スラッシュコマンド `/cxxref-index`・`/cxxref-enable` を足す拡張(`com.github.copilot\extensions\cxxref`)です。使い方の指示は持ちません。指示は、索引を使うリポジトリだけで `/cxxref-enable on` で入れます(以前の版は rule として持っていて、プラグインが有効なリポジトリのすべてで毎回読まれていました)。LLVM の用意と ltidx のビルドは要りません(ltidx はリリースの配布物を使います)。Python 3.10 以降・pwsh・Visual Studio(`compile_commands.json` を作るのに使います)は要ります。
 
 マーケットプレイスに載せるだけでは使えません。全体の流れは次のとおりです(詳しくは下の各節)。
 
 | 誰が | いつ | すること |
 |---|---|---|
 | チームのマーケットプレイスの管理者 | 1 回(版を上げるときも) | マーケットプレイスに cxxref を載せる |
-| 各メンバー | PC で 1 回 | プラグインを入れる(手で入れるか、リポジトリの設定で自動で入れる)。`/cxxref-index` を使うなら、機能フラグ `EXTENSIONS` を有効にする |
+| 各メンバー | PC で 1 回 | プラグインを入れる(手で入れるか、リポジトリの設定で自動で入れる)。`/cxxref-index`・`/cxxref-enable` を使うなら、機能フラグ `EXTENSIONS` を有効にする |
 | 各メンバー | リポジトリ(手元の作業フォルダ)ごとに 1 回 | セッションで `/cxxref-index` を実行して索引を作る(ltidx が無ければ先に取ってくる。モデルは呼ばない)。拡張を使わないなら `get-ltidx.bat` と `index-project.bat`。索引は git に入れないので各自が作る。規模によって数分 |
+| 各メンバー(または代表が 1 回) | リポジトリごとに 1 回 | `/cxxref-enable on` で使い方の指示を入れる(自分だけ)。チームで揃えるなら、代表が `/cxxref-enable on project` で入れてコミットする |
 
 その後は、コードを変えても MCP サーバーが変わった TU だけを作り直すので、手で作り直す必要はありません。
 
@@ -127,7 +131,9 @@ Copilot で C++ の呼び出し箇所を探すと、LSP(clangd)を渡しても�
    - 手で行うときの ltidx の取得(PC で 1 回。プラグインを更新したらもう一度): プラグインのフォルダ(`%USERPROFILE%\.copilot\installed-plugins\<マーケットプレイス名>\cxxref`)の `scripts\get-ltidx.bat` をダブルクリックします。リリースから plugin.json の版の配布物を取ってきて、sha256 を確かめてから `%LOCALAPPDATA%\cxxref\ltidx` に置きます
    - 手で行うときの索引づくり(リポジトリごと): 同じフォルダの `scripts\index-project.bat` をダブルクリックし、ソースのルートを入れます(上の「使い始める」の手順 3 と同じです)。セッションの中なら、`!` を付けるとモデルを通さずに動きます: `!"%USERPROFILE%\.copilot\installed-plugins\<マーケットプレイス名>\cxxref\scripts\index-project.bat" -Root .`
    - 以後はコードを変えても、MCP サーバーが変わった TU だけを作り直します
-   - 索引の無いリポジトリで `refs` が呼ばれると、MCP サーバーは「索引が無い」と答え、作り方のコマンドを絶対パスで添えます。rule は、作る前にユーザーに確かめるようモデルに指示しています
+   - 索引の無いリポジトリで `refs` が呼ばれると、MCP サーバーは「索引が無い」と答え、作り方のコマンドを絶対パスで添えます。使い方の指示は、作る前にユーザーに確かめるようモデルに指示しています
+3. **使い方の指示を入れる(リポジトリごと)**: セッションの中で `/cxxref-enable on` を実行します(下の「`/cxxref-enable`」)。自分の手元だけに入り、git には出ません。チームで揃えるなら `/cxxref-enable on project` で入れてコミットします
+   - 入れないと、モデルはツールの説明だけを頼りに `refs` を使うかどうかを決めます。計測(v13、指示なしの条件 M)では、`refs` を呼んだのは 40 回中 24 回でした
 
 ### `/cxxref-index`(索引を作るスラッシュコマンド)
 
@@ -141,9 +147,27 @@ Copilot で C++ の呼び出し箇所を探すと、LSP(clangd)を渡しても�
 
 確かめたこと(Copilot CLI 1.0.105 のランタイムを SDK から画面なしで動かした): この形式(Agent Plugins 1.0)のプラグインで拡張が見つかり、`/cxxref-index` が一覧に出ること。小さなプロジェクトで実行すると索引ができ、2 回目は変わった分だけの作り直しになること。どちらもモデルの呼び出しは 0 回(`totalUserRequests` 0、`totalNanoAiu` 0)。Copilot CLI の画面とデスクトップ アプリでは、まだ試していません。
 
+### `/cxxref-enable`(使い方の指示を足す・消すスラッシュコマンド)
+
+同じ拡張が足すコマンドです。`scripts\setup-instructions.ps1` を動かすだけで、モデルは呼びません。足す先を、ローカル(自分だけ)かプロジェクト(コミットすればチーム全員)から選べます。
+
+| 打つもの | すること |
+|---|---|
+| `/cxxref-enable` | 今の状態(ローカル・プロジェクトのどちらに入っているか)を出す |
+| `/cxxref-enable on` | ローカルに足す。`.github\instructions\cxxref.instructions.md` を置き、`.git\info\exclude` に足して git から外す |
+| `/cxxref-enable on project` | プロジェクトに足す。`.github\copilot-instructions.md` の末尾に、目印で囲んで入れる(目印の外は書き換えない) |
+| `/cxxref-enable off` | 入っている方(両方なら両方)から消す。`off local` / `off project` で片方だけ |
+
+- ルートは、作業フォルダの git のルートです(リポジトリでなければ作業フォルダ)。最後にルートを書けば、そこに足します(`/cxxref-enable on D:\src\game`)
+- 二重にはしません。プロジェクトに入っていればローカルには足さず、プロジェクトに足すとローカルの分を消します
+- ローカルの置き場所(`cxxref.instructions.md`)がコミットされているリポジトリでは、git から外せないので、ローカルには足しません
+- Copilot CLI には、Claude Code の `CLAUDE.local.md` のような「手元だけの指示ファイル」がありません(1.0.107 の本体の文字列で探しました)。そのため、ふつうの指示ファイルを git から外す形にしています。置いたファイルが指示として見つかることは `copilot instruction list` の「Repository instructions」で確かめました(1.0.107)。中身がモデルに渡ったかまでは確かめていません
+- 指示はセッションの始めに読まれるので、新しいセッションから効きます。今のセッションの途中から効くかは確かめていません
+- 入れる中身は [scripts/cxxref-instructions.md](scripts/cxxref-instructions.md) です(以前のプラグインの rule と同じもの)。プラグインを使わず MCP サーバーだけを登録しているリポジトリでは、`setup-instructions.bat` で同じことができます
+
 `setup.bat` の Copilot CLI への登録との関係: cxxref プラグインが入っていれば、`setup.bat` は MCP サーバーを登録しません。手で登録した `code-ref-index` が残っていても、同じ名前のプラグインのものが使われます(公式の優先順位)。要らなければ `copilot mcp remove code-ref-index` で消せます。
 
-プラグインとして入れると、MCP サーバーの作業フォルダはプラグインの場所になります(Copilot CLI 1.0.105 で確かめました)。そのため、サーバーは作業中のフォルダを、ツールの引数 `root`(rule がモデルに渡させます)か Copilot CLI のセッションの記録から決めます([mcp/README.md](mcp/README.md))。
+プラグインとして入れると、MCP サーバーの作業フォルダはプラグインの場所になります(Copilot CLI 1.0.105 で確かめました)。そのため、サーバーは作業中のフォルダを、ツールの引数 `root`(使い方の指示がモデルに渡させます)か、渡されなければ Copilot CLI のセッションの記録から決めます([mcp/README.md](mcp/README.md))。
 
 ### 版を出す(このリポジトリの保守)
 

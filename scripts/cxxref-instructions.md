@@ -1,7 +1,3 @@
----
-description: C++ の関数・型がどこで使われているか(呼び出し元・参照・定義)を知る必要があるときは、grep の前に cxxref の MCP ツール refs を使う
-alwaysApply: true
----
 # C++ 参照の検索(cxxref)
 
 C++ のリポジトリでは、clang(libtooling)で全 TU を解析した参照索引(リポジトリのルートの `.index`)を、MCP サーバー `code-ref-index` のツールで引けます。

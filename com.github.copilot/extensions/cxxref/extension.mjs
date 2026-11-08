@@ -3,6 +3,10 @@
 // /cxxref-index [ルート]  作業中のリポジトリの索引を作る。ltidx.exe が無ければ、先に scripts\get-ltidx.ps1 で取ってくる。
 //                         索引がすでにあれば、変わった TU だけを作り直す(-Update)。裏で動かし、終わったらそう出す。
 //                         ルートを省くと、作業フォルダから親へさかのぼって .index のあるフォルダ、無ければ作業フォルダ。
+// /cxxref-enable on|off|status [local|project] [ルート]
+//                         使い方の指示を足す・消す(scripts\setup-instructions.ps1)。on は省くとローカル(自分だけ。git から外す)、
+//                         project は .github\copilot-instructions.md(コミットすればチーム全員)。off は省くと両方から消す。
+//                         引数なしは今の状態を出す。ルートを省くと、作業フォルダの git のルート、無ければ作業フォルダ。
 //
 // 拡張は Copilot CLI の実験的機能で、機能フラグ EXTENSIONS が有効なときだけ読み込まれる。
 import { joinSession } from "@github/copilot-sdk/extension";
@@ -11,7 +15,7 @@ import { closeSync, existsSync, mkdirSync, openSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { escapeMarkdown, findLtidx, lastCwd, pluginRoot, targetRoot } from "./lib.mjs";
+import { enableRoot, escapeMarkdown, findLtidx, lastCwd, parseEnableArgs, pluginRoot, targetRoot } from "./lib.mjs";
 
 function run(script, args, log) {
   return new Promise((done) => {
@@ -22,6 +26,23 @@ function run(script, args, log) {
     });
     p.on("error", (err) => { closeSync(fd); done({ code: null, error: err }); });
     p.on("exit", (code) => { closeSync(fd); done({ code }); });
+  });
+}
+
+// 出力を受け取る版(setup-instructions.ps1 はパイプには UTF-8 で出す)
+function runText(script, args) {
+  return new Promise((done) => {
+    const p = spawn("pwsh", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, ...args], {
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    let out = "";
+    p.stdout.setEncoding("utf8");
+    p.stderr.setEncoding("utf8");
+    p.stdout.on("data", (s) => { out += s; });
+    p.stderr.on("data", (s) => { out += s; });
+    p.on("error", (err) => done({ code: null, error: err, out }));
+    p.on("close", (code) => done({ code, out }));
   });
 }
 
@@ -85,6 +106,32 @@ async function indexCommand(ctx) {
   }
 }
 
+async function enableCommand(ctx) {
+  const a = parseEnableArgs(ctx.args);
+  if (a.error) {
+    await tell(`cxxref: ${a.error}`, "error");
+    return;
+  }
+  const plugin = pluginRoot(dirname(fileURLToPath(import.meta.url)));
+  const cwd = lastCwd(await session.getEvents()) || process.cwd();
+  const t = enableRoot(a.root, cwd);
+  if (t.error) {
+    await tell(`cxxref: ${t.error}`, "error");
+    return;
+  }
+  const args = ["-Root", t.root, "-Action", a.action, ...(a.scope ? ["-Scope", a.scope] : [])];
+  const r = await runText(join(plugin, "scripts", "setup-instructions.ps1"), args);
+  const out = r.out.trim();
+  if (r.code !== 0) {
+    await tell(`cxxref: 指示を${a.action === "Remove" ? "消せ" : "変えられ"}ませんでした(${why(r)})${out ? `\n${out}` : ""}`, "error");
+    return;
+  }
+  // 指示はセッションの始めに読まれる(今のセッションの途中から効くかは確かめていない)。変えたときだけ添える
+  const changed = /(足し|差し替え|消し)ました/.test(out);
+  const note = changed ? "\n新しいセッションから効きます(copilot instruction list で確かめられます)" : "";
+  await tell(`cxxref: ${out}${note}`);
+}
+
 const session = await joinSession({
   commands: [
     {
@@ -93,6 +140,13 @@ const session = await joinSession({
       description: "[ルート] — C++ の参照索引(cxxref)を作る・作り直す。裏で動かす(モデルは呼ばない)",
       handler: (ctx) => {
         indexCommand(ctx).catch((err) => tell(`cxxref: ${err?.message ?? err}`, "error"));
+      },
+    },
+    {
+      name: "cxxref-enable",
+      description: "on|off|status [local|project] [ルート] — 使い方の指示を足す・消す。on は省くとローカル(自分だけ)(モデルは呼ばない)",
+      handler: (ctx) => {
+        enableCommand(ctx).catch((err) => tell(`cxxref: ${err?.message ?? err}`, "error"));
       },
     },
   ],

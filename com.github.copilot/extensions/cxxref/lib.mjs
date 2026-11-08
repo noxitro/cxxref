@@ -1,6 +1,7 @@
-// /cxxref-index の、Copilot の SDK に依らない部分(テストできるように分けた。test は mcp/test/test_plugin.py が node --test で流す)。
+// /cxxref-index・/cxxref-enable の、Copilot の SDK に依らない部分(テストできるように分けた。test は mcp/test/test_plugin.py が node --test で流す)。
+import { execFileSync } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 
 // プラグインのルート(plugin.json と scripts\index-project.ps1 のあるフォルダ)。start から親へさかのぼる
 export function pluginRoot(start) {
@@ -47,6 +48,42 @@ export function indexRoot(start) {
 // ふつうの(level の無い)session.log は Markdown として表示され、\ の後ろが記号だと \ が消える
 // (E:\src\Nox\.index が E:\src\Nox.index と出る)。その \ を二重にする。error の表示はそのまま出るので通さない
 export const escapeMarkdown = (s) => s.replace(/\\(?=[!-/:-@[-`{-~])/g, "\\\\");
+
+// git のリポジトリのルート(start の上で)。git が無い・リポジトリでなければ ""
+export function gitTop(start) {
+  try {
+    return execFileSync("git", ["-C", start, "rev-parse", "--show-toplevel"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true })
+      .trim().replace(/\//g, sep);
+  } catch {
+    return "";
+  }
+}
+
+// /cxxref-enable の引数: [on|off|status] [local|project] [ルート]。{ action, scope, root } か { error }
+//   action: Add / Remove / Status(省くと Status)。scope: Local / Project / ""(on で省くと Local、off で省くと両方)
+//   root: 残りの文字列(省くと "")
+export function parseEnableArgs(arg) {
+  let rest = (arg ?? "").trim();
+  const take = (words) => {
+    const m = rest.match(/^(\S+)(?:\s+|$)/);
+    const w = m ? words[m[1].toLowerCase()] : undefined;
+    if (w === undefined) return undefined;
+    rest = rest.slice(m[0].length);
+    return w;
+  };
+  const action = take({ on: "Add", off: "Remove", status: "Status" }) ?? (rest ? undefined : "Status");
+  if (action === undefined) return { error: "使い方: /cxxref-enable on|off|status [local|project] [ルート]" };
+  let scope = take({ local: "Local", project: "Project" }) ?? "";
+  if (action === "Add" && !scope) scope = "Local";
+  if (action === "Status") scope = "";
+  return { action, scope, root: rest.trim() };
+}
+
+// 指示を足すルート。引数があれば targetRoot と同じ扱い、無ければ git のルート、それも無ければ作業フォルダ
+export function enableRoot(arg, cwd) {
+  if ((arg ?? "").trim()) return targetRoot(arg, cwd);
+  return { root: gitTop(cwd) || resolve(cwd) };
+}
 
 // 索引を作るルート。引数(引用符は外す。相対なら作業フォルダから)、無ければ indexRoot(cwd)。{ root } か { error }
 export function targetRoot(arg, cwd) {
