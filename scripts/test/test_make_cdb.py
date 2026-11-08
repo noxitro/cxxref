@@ -128,9 +128,11 @@ class MakeCdbTest(unittest.TestCase):
         self.assertIn('runtime.slnx', r.stdout + r.stderr)
         self.assertIn('q.sln', r.stdout + r.stderr)
         # /cxxref-index が選ばせるための一覧(1 行に 1 つのフルパス。C# だけのもの・.vs の中のものは入らない)
+        # 一時フォルダが 8.3 形式の短い名前(RUNNER~1 など)で返ることがあり、スクリプトは長い名前で出すので、実体のパスで比べる
         listed = self.ps('make-cdb.ps1', '-Root', self.root, '-ListProjects').split()
-        self.assertEqual(sorted(listed), sorted([os.path.join(self.root, 'runtime', 'runtime.slnx'),
-                                                 os.path.join(self.root, 'tools', 't', 'q.sln')]))
+        self.assertEqual(sorted(os.path.normcase(os.path.realpath(p)) for p in listed),
+                         sorted(os.path.normcase(os.path.realpath(os.path.join(self.root, *rel)))
+                                for rel in (('runtime', 'runtime.slnx'), ('tools', 't', 'q.sln'))))
         self.assertFalse(os.path.exists(os.path.join(self.root, '.index')))  # 一覧を出すだけで、何も作らない
 
     def test_sln_maps_configuration(self):
