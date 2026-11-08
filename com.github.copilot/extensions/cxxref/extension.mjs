@@ -3,6 +3,8 @@
 // /cxxref-index [ルート]  作業中のリポジトリの索引を作る。ltidx.exe が無ければ、先に scripts\get-ltidx.ps1 で取ってくる。
 //                         索引がすでにあれば、変わった TU だけを作り直す(-Update)。裏で動かし、終わったらそう出す。
 //                         ルートを省くと、作業フォルダから親へさかのぼって .index のあるフォルダ、無ければ作業フォルダ。
+//                         compile_commands.json の作り元(.slnx など)の候補が複数あれば、ダイアログで選ばせる。
+//                         選んだものは作り方の記録に残り、次からは聞かない。
 // /cxxref-enable on|off|status [local|project] [ルート]
 //                         使い方の指示を足す・消す(scripts\setup-instructions.ps1)。on は省くとローカル(自分だけ。git から外す)、
 //                         project は .github\copilot-instructions.md(コミットすればチーム全員)。off は省くと両方から消す。
@@ -15,7 +17,7 @@ import { closeSync, existsSync, mkdirSync, openSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { enableRoot, escapeMarkdown, findLtidx, lastCwd, parseEnableArgs, pluginRoot, targetRoot } from "./lib.mjs";
+import { enableRoot, escapeMarkdown, findLtidx, lastCwd, parseEnableArgs, pluginRoot, projectChoices, savedProject, targetRoot } from "./lib.mjs";
 
 function run(script, args, log) {
   return new Promise((done) => {
@@ -54,6 +56,32 @@ let running = null; // 走っている索引づくり(同時に 1 つだけ)
 const tell = (message, level) =>
   session.log(level ? message : escapeMarkdown(message), { ephemeral: true, ...(level ? { level } : {}) });
 
+// compile_commands.json の作り元(index-project.ps1 の -Project)。{ project }(""なら index-project に探させる)か、
+// やめるときは { stop: true }。候補が複数あれば、CLI のダイアログで選ばせる(モデルは呼ばない)。
+// 前に選んだもの(作り方の記録)があれば、聞かずにそれを使う
+async function chooseProject(plugin, root) {
+  if (existsSync(join(root, "compile_commands.json"))) return { project: "" };
+  const saved = savedProject(root);
+  if (saved) return { project: saved };
+  const r = await runText(join(plugin, "scripts", "make-cdb.ps1"), ["-Root", root, "-ListProjects"]);
+  if (r.code !== 0) return { project: "" };  // 探せなかったわけは、index-project のログに出る
+  const choices = projectChoices(root, r.out);
+  if (choices.length <= 1) return { project: "" };
+  const labels = choices.map((c) => c.label);
+  if (!session.capabilities?.ui?.elicitation) {
+    const cmd = `pwsh -File "${join(plugin, "scripts", "index-project.ps1")}" -Root "${root}" -Project "${choices[0].path}"`;
+    await tell(`cxxref: compile_commands.json の作り元の候補が複数あり、この CLI では選ぶダイアログを出せません: ${labels.join(", ")}\n` +
+      `ターミナルで -Project を付けて作ってください(次からは /cxxref-index がそれを使います)。例: ${cmd}`, "error");
+    return { stop: true };
+  }
+  const picked = await session.ui.select(`cxxref: 索引を作る元を選んでください(${root})`, labels);
+  if (picked == null) {
+    await tell("cxxref: 索引づくりをやめました");
+    return { stop: true };
+  }
+  return { project: choices.find((c) => c.label === picked).path };
+}
+
 async function indexCommand(ctx) {
   // await の前に印を付ける(続けて呼ばれても、2 つ目は始めない)
   if (running) {
@@ -71,6 +99,9 @@ async function indexCommand(ctx) {
     }
     const root = t.root;
     running = root;
+    // ltidx を取ってくる前に選ばせる(やめたときに、取ってくる手間をかけない)
+    const pick = await chooseProject(plugin, root);
+    if (pick.stop) return;
     const t0 = Date.now();
     let lt = findLtidx(plugin);
     if (lt.error) {
@@ -94,7 +125,8 @@ async function indexCommand(ctx) {
     const update = existsSync(join(dir, "index.tsv.deps.tsv"));
     await tell(`cxxref: 索引を${update ? "作り直し" : "作り"}始めました(${root})。裏で動かすので、作業を続けてかまいません。ログ: ${log}`);
     // index-project.ps1 は、索引ができたら 0、できなければ 2 で終える(ltidx の失敗や異常終了も 2)
-    const r = await run(join(plugin, "scripts", "index-project.ps1"), ["-Root", root, ...(update ? ["-Update"] : [])], log);
+    const args = ["-Root", root, ...(pick.project ? ["-Project", pick.project] : []), ...(update ? ["-Update"] : [])];
+    const r = await run(join(plugin, "scripts", "index-project.ps1"), args, log);
     const sec = Math.round((Date.now() - t0) / 1000);
     if (r.code === 0) {
       await tell(`cxxref: 索引ができました(${sec} 秒、${dir})。以後は MCP サーバーの refs / check がこの索引を使い、コードを変えても自動で作り直します`);

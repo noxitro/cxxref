@@ -2,6 +2,7 @@
 # 対象は Visual Studio のソリューション(.slnx / .sln)・プロジェクト(.vcxproj)か、CMake のプロジェクト(CMakeLists.txt)。
 # -Project を省くと、ルートの直下から .slnx → .sln → CMakeLists.txt → .vcxproj の順に探す。
 #   直下に無ければ、2 階層下までのフォルダにある、.vcxproj を含む .slnx / .sln(1 つだけのとき)。
+#   -ListProjects は、その候補を出すだけ(/cxxref-index が複数のときに選ばせる)。
 # Visual Studio: MSBuild の GetClCommandLines(VS の IntelliSense が使うターゲット)で、各 .cpp の cl のコマンドラインを取り出す。
 #   ビルドはしない。「VC++ ディレクトリ」の include パスはコマンドラインに無いので足す(IncludePath は /I、
 #   ExternalIncludePath と VS・SDK の既定のフォルダは /imsvc。/imsvc の中のヘッダーは索引に載らない)。
@@ -13,7 +14,8 @@ param(
     [string]$Configuration = 'Debug',
     [string]$Platform = 'x64',
     [string]$Out,                       # compile_commands.json を置くフォルダ
-    [string]$CMakeArgs = ''           # CMake の構成に足す引数。複数は 1 つの文字列に空白で区切って書く(-CMakeArgs "-DA=1 -DB=2")
+    [string]$CMakeArgs = '',          # CMake の構成に足す引数。複数は 1 つの文字列に空白で区切って書く(-CMakeArgs "-DA=1 -DB=2")
+    [switch]$ListProjects               # 作らずに、-Project を省いたときの候補を 1 行に 1 つ出す
 )
 $ErrorActionPreference = 'Stop'
 # 出力をファイルや別のプロセスへ流すとき(/cxxref-index のログ・MCP サーバーの update.log)は、UTF-8 で色を付けずに書く
@@ -23,11 +25,11 @@ if (-not $Root) { $Root = Read-Host 'ソースのルート' }
 $Root = (Resolve-Path $Root).Path
 if (-not $Out) { $Out = Join-Path $Root ".index\cdb-$Configuration-$Platform" }
 
-function Find-Project {
+# -Project の候補(フルパス)。直下で最初に当たった種類のもの、無ければ下のフォルダの C++ のソリューション
+function Get-ProjectCandidates {
     foreach ($pat in '*.slnx', '*.sln', 'CMakeLists.txt', '*.vcxproj') {
         $f = @(Get-ChildItem -LiteralPath $Root -Filter $pat -File | Where-Object { $_.Name -like $pat })  # *.sln が .slnx に当たらないように
-        if ($f.Count -eq 1) { return $f[0].FullName }
-        if ($f.Count -gt 1) { throw "$pat が複数あります。-Project で選んでください: $($f.Name -join ', ')" }
+        if ($f.Count) { return @($f.FullName) }
     }
     # 直下に無ければ、2 階層下までのフォルダから C++ のプロジェクト(.vcxproj)を含むソリューションを探す
     # (ルートに C# と C++ のソリューションが別のフォルダで並ぶ形)。. で始まるフォルダと依存物のフォルダは見ない。
@@ -39,12 +41,21 @@ function Find-Project {
     $sols = @($dirs | ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -File -ErrorAction SilentlyContinue } |
         Where-Object { $_.Name -like '*.slnx' -or $_.Name -like '*.sln' } |
         Where-Object { (Get-Content -LiteralPath $_.FullName -Raw) -match '\.vcxproj' })
-    if ($sols.Count -eq 1) { Write-Host "ルートの直下に無いので、$($sols[0].FullName) を使います"; return $sols[0].FullName }
-    $rel = $sols | ForEach-Object { $_.FullName.Substring($Root.TrimEnd('\').Length + 1) }
-    if ($sols.Count -gt 1) { throw "C++ のソリューションが下のフォルダに複数あります。-Project で選んでください: $($rel -join ', ')" }
-    throw "ルートの直下に .slnx / .sln / CMakeLists.txt / .vcxproj が無く、2 階層下までに C++ のソリューションもありません。-Project で指定してください"
+    @($sols.FullName)
 }
-if (-not $Project) { $Project = Find-Project }
+if ($ListProjects) {
+    # /cxxref-index が、候補が複数のときに選ばせるために読む(1 行に 1 つ、フルパス)
+    Get-ProjectCandidates
+    return
+}
+if (-not $Project) {
+    $c = @(Get-ProjectCandidates)
+    $rel = @($c | ForEach-Object { $_.Substring($Root.TrimEnd('\').Length + 1) })  # 1 つでも配列に($rel[0] が 1 文字目にならないよう)
+    if ($c.Count -gt 1) { throw "候補が複数あります。-Project で選んでください: $($rel -join ', ')" }
+    if (-not $c.Count) { throw "ルートの直下に .slnx / .sln / CMakeLists.txt / .vcxproj が無く、2 階層下までに C++ のソリューションもありません。-Project で指定してください" }
+    if ($rel[0].Contains('\')) { Write-Host "ルートの直下に無いので、$($c[0]) を使います" }
+    $Project = $c[0]
+}
 $Project = (Resolve-Path $Project).Path
 if (Test-Path -LiteralPath $Project -PathType Container) { $Project = Join-Path $Project 'CMakeLists.txt' }
 

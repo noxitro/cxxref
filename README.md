@@ -141,11 +141,12 @@ Copilot で C++ の呼び出し箇所を探すと、LSP(clangd)を渡しても�
 
 - ltidx.exe が無ければ、リリースから取ってくる(`scripts\get-ltidx.ps1` と同じ)
 - 作業フォルダ(または、親へさかのぼって `.index` のあるフォルダ)の索引を、裏で作る。索引がすでにあれば、変わった TU だけを作り直す。`/cxxref-index <ルート>` でルートを指定できる
+- `compile_commands.json` の作り元(`.slnx`・`.sln`・`CMakeLists.txt`・`.vcxproj`。探し方は `scripts\README.md`)の候補が複数あれば、CLI のダイアログで選ばせる(モデルは呼ばない)。選んだものは作り方の記録(`.index\index.tsv.recipe.json`)に残るので、次からは聞かない。選び直すときは、その記録を消してから実行する
 - 始めたとき・終わったとき(かかった秒数)・失敗したとき(ログの場所)を、セッションに出す。ログは `<ルート>\.index\cxxref-index.log`。同時に 2 つは走らせない
 
 **Copilot CLI の拡張は実験的機能で、機能フラグ `EXTENSIONS` が有効なときだけ読み込まれます。** `%USERPROFILE%\.copilot\settings.json` に `"feature_flags": { "enabled": ["EXTENSIONS"] }` を足す(すでに `feature_flags` があれば、`enabled` の配列に `"EXTENSIONS"` を足す)か、環境変数 `COPILOT_CLI_ENABLED_FEATURE_FLAGS=EXTENSIONS` を設定してから起動します。拡張はセッションが始まってから読み込まれるので、入力欄に `/cx` と打って一覧に出てから実行します(一覧に出る前に送ると、ただの依頼としてモデルに送られます)。
 
-確かめたこと(Copilot CLI 1.0.105 のランタイムを SDK から画面なしで動かした): この形式(Agent Plugins 1.0)のプラグインで拡張が見つかり、`/cxxref-index` が一覧に出ること。小さなプロジェクトで実行すると索引ができ、2 回目は変わった分だけの作り直しになること。どちらもモデルの呼び出しは 0 回(`totalUserRequests` 0、`totalNanoAiu` 0)。Copilot CLI の画面とデスクトップ アプリでは、まだ試していません。
+確かめたこと(Copilot CLI 1.0.105 のランタイムを SDK から画面なしで動かした): この形式(Agent Plugins 1.0)のプラグインで拡張が見つかり、`/cxxref-index` が一覧に出ること。小さなプロジェクトで実行すると索引ができ、2 回目は変わった分だけの作り直しになること。どちらもモデルの呼び出しは 0 回(`totalUserRequests` 0、`totalNanoAiu` 0)。作り元を選ぶダイアログは、Copilot CLI 1.0.107 のランタイムを SDK から画面なしで動かして確かめた(ソリューションが 2 つのプロジェクトで、選択肢が 2 つ出る・やめると何も作らない・選ぶとそれで索引ができ、2 回目は聞かない。どれもモデルの呼び出しは 0 回)。Copilot CLI の画面とデスクトップ アプリでは、まだ試していません。
 
 ### `/cxxref-enable`(使い方の指示を足す・消すスラッシュコマンド)
 

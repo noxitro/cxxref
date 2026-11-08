@@ -1,7 +1,7 @@
 // /cxxref-index・/cxxref-enable の、Copilot の SDK に依らない部分(テストできるように分けた。test は mcp/test/test_plugin.py が node --test で流す)。
 import { execFileSync } from "node:child_process";
-import { existsSync, statSync } from "node:fs";
-import { dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 // プラグインのルート(plugin.json と scripts\index-project.ps1 のあるフォルダ)。start から親へさかのぼる
 export function pluginRoot(start) {
@@ -83,6 +83,22 @@ export function parseEnableArgs(arg) {
 export function enableRoot(arg, cwd) {
   if ((arg ?? "").trim()) return targetRoot(arg, cwd);
   return { root: gitTop(cwd) || resolve(cwd) };
+}
+
+// 前に選んだ compile_commands.json の作り元(index-project が残した作り方の makeCdb.Project)。無い・読めなければ ""
+export function savedProject(root) {
+  try {
+    const r = JSON.parse(readFileSync(join(root, ".index", "index.tsv.recipe.json"), "utf8").replace(/^﻿/, ""));
+    const p = r?.makeCdb?.Project;
+    return typeof p === "string" && p && existsSync(p) ? p : "";
+  } catch {
+    return "";
+  }
+}
+
+// make-cdb.ps1 -ListProjects の出力(1 行に 1 つのフルパス)を、選ぶための { label: ルートからの相対パス, path } にする
+export function projectChoices(root, out) {
+  return out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean).map((path) => ({ label: relative(root, path) || path, path }));
 }
 
 // 索引を作るルート。引数(引用符は外す。相対なら作業フォルダから)、無ければ indexRoot(cwd)。{ root } か { error }

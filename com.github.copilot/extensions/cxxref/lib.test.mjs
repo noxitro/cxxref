@@ -5,7 +5,33 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { enableRoot, escapeMarkdown, findLtidx, gitTop, indexRoot, lastCwd, parseEnableArgs, pluginRoot, targetRoot } from "./lib.mjs";
+import { enableRoot, escapeMarkdown, findLtidx, gitTop, indexRoot, lastCwd, parseEnableArgs, pluginRoot, projectChoices, savedProject, targetRoot } from "./lib.mjs";
+
+test("projectChoices: フルパスの行を、ルートからの相対パスの選択肢にする", () => {
+  const root = join(tmpdir(), "nox");
+  const out = `${join(root, "runtime", "runtime.slnx")}\r\n${join(root, "tools", "t", "q.sln")}\r\n\r\n`;
+  assert.deepEqual(projectChoices(root, out), [
+    { label: join("runtime", "runtime.slnx"), path: join(root, "runtime", "runtime.slnx") },
+    { label: join("tools", "t", "q.sln"), path: join(root, "tools", "t", "q.sln") },
+  ]);
+  assert.deepEqual(projectChoices(root, ""), []);
+});
+
+test("savedProject: 前の作り方に残した -Project(ファイルがあるときだけ)", () => {
+  const d = mkdtempSync(join(tmpdir(), "cri"));
+  try {
+    assert.equal(savedProject(d), "");
+    mkdirSync(join(d, ".index"));
+    const sln = join(d, "a.slnx");
+    const recipe = (p) => writeFileSync(join(d, ".index", "index.tsv.recipe.json"), "﻿" + JSON.stringify({ makeCdb: { Root: d, Project: p } }));
+    recipe(sln);
+    assert.equal(savedProject(d), "");  // ファイルが無い
+    writeFileSync(sln, "<Solution />");
+    assert.equal(savedProject(d), sln);
+    writeFileSync(join(d, ".index", "index.tsv.recipe.json"), JSON.stringify({ makeCdb: null }));
+    assert.equal(savedProject(d), "");  // 手元の compile_commands.json を使った
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
 
 test("escapeMarkdown: 記号の前の \\ だけを二重にする", () => {
   assert.equal(escapeMarkdown("E:\\src\\Nox\\.index\\a.log"), "E:\\src\\Nox\\\\.index\\a.log");

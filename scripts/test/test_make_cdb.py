@@ -127,6 +127,11 @@ class MakeCdbTest(unittest.TestCase):
         self.assertIn('-Project', r.stdout + r.stderr)
         self.assertIn('runtime.slnx', r.stdout + r.stderr)
         self.assertIn('q.sln', r.stdout + r.stderr)
+        # /cxxref-index が選ばせるための一覧(1 行に 1 つのフルパス。C# だけのもの・.vs の中のものは入らない)
+        listed = self.ps('make-cdb.ps1', '-Root', self.root, '-ListProjects').split()
+        self.assertEqual(sorted(listed), sorted([os.path.join(self.root, 'runtime', 'runtime.slnx'),
+                                                 os.path.join(self.root, 'tools', 't', 'q.sln')]))
+        self.assertFalse(os.path.exists(os.path.join(self.root, '.index')))  # 一覧を出すだけで、何も作らない
 
     def test_sln_maps_configuration(self):
         # ソリューションの Debug|x64 を、プロジェクトの Release|x64 に対応づけた .sln

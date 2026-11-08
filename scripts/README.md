@@ -27,7 +27,7 @@
 3. `CMakeLists.txt`
 4. `.vcxproj`(1 つだけのとき)
 
-直下にどれも無ければ、2 階層下までのフォルダから、C++ のプロジェクト(`.vcxproj`)を含む `.slnx`・`.sln` を探して、1 つだけならそれを使います(`runtime\runtime.slnx` と C# の `Editor\Studio.slnx` が並ぶような形)。`.` で始まるフォルダと `node_modules`・`vcpkg_installed`・`packages` は見ません。2 つ以上あれば `-Project` で選びます。
+直下にどれも無ければ、2 階層下までのフォルダから、C++ のプロジェクト(`.vcxproj`)を含む `.slnx`・`.sln` を探して、1 つだけならそれを使います(`runtime\runtime.slnx` と C# の `Editor\Studio.slnx` が並ぶような形)。`.` で始まるフォルダと `node_modules`・`vcpkg_installed`・`packages` は見ません。2 つ以上あれば `-Project` で選びます。(Copilot CLI の `/cxxref-index` は、候補が複数あればダイアログで選ばせます)。
 
 ルートに `compile_commands.json` があれば、それを使います。
 
@@ -60,7 +60,7 @@ index-project.bat -Root D:\src\game -Cdb D:\build\game
 
 解析にエラーのあった TU があっても、索引ができれば終了コード 0 で終わります(どの TU かは `.index\<名前>.tsv.tu.tsv` の ok=0 の行)。索引を作れなかったら 2 です(前の索引は残ります)。
 
-`make-cdb.bat` だけを使うこともできます(引数は `-Root`・`-Project`・`-Configuration`・`-Platform`・`-CMakeArgs`・`-Out`)。
+`make-cdb.bat` だけを使うこともできます(引数は `-Root`・`-Project`・`-Configuration`・`-Platform`・`-CMakeArgs`・`-Out`)。`-ListProjects` を付けると、作らずに、`-Project` を省いたときの候補を 1 行に 1 つ出します。
 
 ### ビルド済みの ltidx を取ってくる(`get-ltidx.bat`)
 
