@@ -155,7 +155,7 @@ Copilot で C++ の呼び出し箇所を探すと、LSP(clangd)を渡しても�
 
 | 打つもの | すること |
 |---|---|
-| `/cxxref-enable` | 今の状態(ローカル・プロジェクトのどちらに入っているか)を出す |
+| `/cxxref-enable` | 今の状態(ローカル・プロジェクトのどちらに入っているか)を出す。続けて、入っていなければ `on` / `on project` を、入っていれば `off` を案内する(拡張のコマンドには引数のヒントを付けられないため) |
 | `/cxxref-enable on` | ローカルに足す。`.github\instructions\cxxref.instructions.md` を置き、`.git\info\exclude` に足して git から外す |
 | `/cxxref-enable on project` | プロジェクトに足す。`.github\copilot-instructions.md` の末尾に、目印で囲んで入れる(目印の外は書き換えない) |
 | `/cxxref-enable off` | 入っている方(両方なら両方)から消す。`off local` / `off project` で片方だけ |

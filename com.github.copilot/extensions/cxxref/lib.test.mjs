@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { enableRoot, escapeMarkdown, findLtidx, gitTop, indexRoot, lastCwd, parseEnableArgs, parseProgress, pluginRoot, progressNote, projectChoices, savedProject, targetRoot } from "./lib.mjs";
+import { enableRoot, escapeMarkdown, findLtidx, gitTop, indexRoot, lastCwd, parseEnableArgs, parseProgress, pluginRoot, progressNote, projectChoices, savedProject, statusHint, targetRoot } from "./lib.mjs";
 
 test("projectChoices: フルパスの行を、ルートからの相対パスの選択肢にする", () => {
   const root = join(tmpdir(), "nox");
@@ -100,6 +100,14 @@ test("parseEnableArgs: on は省くとローカル、off は省くと両方、�
   assert.deepEqual(parseEnableArgs('on "D:\\my src"'), { action: "Add", scope: "Local", root: '"D:\\my src"' });
   assert.deepEqual(parseEnableArgs("status project"), { action: "Status", scope: "", root: "" });
   assert.match(parseEnableArgs("enable").error, /使い方/);
+});
+
+test("statusHint: 入っていなければ on を、入っていれば off を案内する", () => {
+  const state = (p, l) => `プロジェクト(E:\\src\\.github\\copilot-instructions.md): ${p}\r\nローカル(E:\\src\\.github\\instructions\\cxxref.instructions.md): ${l}`;
+  assert.match(statusHint(state("入っていません", "入っていません")), /on project/);
+  assert.match(statusHint(state("入っています", "入っていません")), /off/);
+  assert.match(statusHint(state("入っていません", "入っています")), /off/);
+  assert.equal(statusHint("何か別の出力"), "");
 });
 
 test("enableRoot: 引数が無ければ git のルート、リポジトリでなければ作業フォルダ", () => {

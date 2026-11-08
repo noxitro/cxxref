@@ -79,6 +79,16 @@ export function parseEnableArgs(arg) {
   return { action, scope, root: rest.trim() };
 }
 
+// /cxxref-enable(状態)の出力(setup-instructions.ps1 の Show-State)に添える、次に打つコマンドの案内。読めなければ ""
+//   拡張のコマンドには引数のヒントを付けられない(SDK の CommandDefinition は name・description だけ)ので、ここで教える
+export function statusHint(out) {
+  const project = /^プロジェクト\(.*\): 入っています$/m.test(out);
+  const local = /^ローカル\(.*\): 入っています$/m.test(out);
+  if (project || local) return "消すには: /cxxref-enable off(入っている方から消す)";
+  if (!/^プロジェクト\(.*\): 入っていません$/m.test(out)) return "";
+  return "足すには: /cxxref-enable on(自分だけ。git から外す)か /cxxref-enable on project(コミットするとチームの全員)";
+}
+
 // 指示を足すルート。引数があれば targetRoot と同じ扱い、無ければ git のルート、それも無ければ作業フォルダ
 export function enableRoot(arg, cwd) {
   if ((arg ?? "").trim()) return targetRoot(arg, cwd);

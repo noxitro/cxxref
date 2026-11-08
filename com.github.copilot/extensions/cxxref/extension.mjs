@@ -18,7 +18,7 @@ import { closeSync, existsSync, mkdirSync, openSync, readFileSync, statSync } fr
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { enableRoot, escapeMarkdown, findLtidx, lastCwd, parseEnableArgs, parseProgress, pluginRoot, progressNote, projectChoices, savedProject, targetRoot } from "./lib.mjs";
+import { enableRoot, escapeMarkdown, findLtidx, lastCwd, parseEnableArgs, parseProgress, pluginRoot, progressNote, projectChoices, savedProject, statusHint, targetRoot } from "./lib.mjs";
 
 function run(script, args, log) {
   return new Promise((done) => {
@@ -184,7 +184,8 @@ async function enableCommand(ctx) {
   }
   // 指示はセッションの始めに読まれる(今のセッションの途中から効くかは確かめていない)。変えたときだけ添える
   const changed = /(足し|差し替え|消し)ました/.test(out);
-  const note = changed ? "\n新しいセッションから効きます(copilot instruction list で確かめられます)" : "";
+  const hint = a.action === "Status" ? statusHint(out) : "";
+  const note = changed ? "\n新しいセッションから効きます(copilot instruction list で確かめられます)" : hint ? `\n${hint}` : "";
   await tell(`cxxref: ${out}${note}`);
 }
 
