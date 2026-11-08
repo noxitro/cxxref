@@ -268,6 +268,23 @@ class LtqTest(unittest.TestCase):
         self.assertIn('index: .index/index.tsv (built', out)  # .deps.tsv を 2 つ目の構成として拾わない
         self.assertNotIn('configurations', out)
 
+    def test_deps_list_is_cached_by_size_and_mtime(self):
+        # .deps.tsv の大きさと更新日時が合う間は、隣の .seen.cache の一覧を使う(.deps.tsv は読まない)
+        self.write('src/empty.h', '#pragma once\n// edited\n')  # 索引より新しい
+        self.index('index', self.COMMON, [self.COMMENT], deps={'src/a.cpp': ['src/a.cpp']})
+        dp = os.path.join(self.root, '.index', 'index.tsv.deps.tsv')
+        self.assertEqual(ltq.deps_paths(dp), {b'src/a.cpp'})
+        cache = os.path.join(self.root, '.index', 'index.tsv.seen.cache')
+        with open(cache, 'rb') as f:
+            key = f.readline()
+        with open(cache, 'wb') as f:  # 鍵はそのままで、一覧だけを書き換える
+            f.write(key + b'src/a.cpp\nsrc/empty.h\n')
+        out = self.ltq('refs', 'Run')
+        self.assertIn('1 source files changed after indexing', out)  # 一覧にあるので「新しいファイル」ではない
+        self.assertNotIn('not read by any indexed configuration', out)
+        os.utime(dp, (self.t0 + 1, self.t0 + 1))  # 更新日時が変われば .deps.tsv を読み直す
+        self.assertEqual(ltq.deps_paths(dp), {b'src/a.cpp'})
+
     def test_grep_lines(self):
         # 改行で始まる needle は行頭に当たる。ファイルが改行で始まっても止まらない。CRLF の行も改行を除いて返す
         fp = os.path.join(self.root, 'g.tsv')

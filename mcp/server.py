@@ -130,6 +130,26 @@ class Config:
         self.index = os.path.abspath(index) if index else None
         self.wait = wait  # 自動更新で待つ秒数。None なら自動更新しない
         self.max_bytes = max_bytes  # 結果の大きさの上限(0 なら切らない)
+        self.opened = None  # (鍵, 索引のファイルの状態, ltq.Index)。最後に引いた索引を 1 つだけ保つ
+
+    def open_index(self, paths, root):
+        """索引を開く。前の呼び出しと同じ索引で、索引のファイル(本体と隣のファイル)の大きさと更新日時が変わっていなければ、
+        前に開いた Index を使い回す(TU の記録と、TU が読んだファイルの一覧を読み直さない。UE5 で 1 回 30 秒ほど)。
+        ソースの走査と鮮度の確認は、呼ぶたびにやり直す。"""
+        key = (tuple(os.path.normcase(os.path.abspath(p)) for p in paths), os.path.normcase(os.path.abspath(root)))
+        sig = ltq.index_signature(paths)
+        if self.opened and self.opened[0] == key and self.opened[1] == sig:
+            idx = self.opened[2]
+            idx.renew()
+            return idx
+        idx = ltq.Index(paths, root)
+        self.opened = (key, sig, idx)
+        return idx
+
+    def keep(self, paths, root, idx):
+        """自動更新で開き直した索引を、次の呼び出しで使い回せるように保つ。"""
+        key = (tuple(os.path.normcase(os.path.abspath(p)) for p in paths), os.path.normcase(os.path.abspath(root)))
+        self.opened = (key, ltq.index_signature(paths), idx)
 
     def resolve(self, start=None):
         """(ルート, 注記)。--root が無ければ、start(ツールの引数の root)か作業フォルダ(workspace())から
@@ -149,9 +169,12 @@ def run_ltq(cfg, args, start=None):
     base = ['--root', root] + (['--index', cfg.index] if cfg.index else [])
     paths = [cfg.index] if cfg.index else ltq.find_indexes(root)
     if paths and all(os.path.exists(p) for p in paths):
-        idx = ltq.Index(paths, root)
+        idx = cfg.open_index(paths, root)
         if cfg.wait is not None:
-            idx, up = autoupdate.refresh(idx, paths, root, cfg.wait)
+            new, up = autoupdate.refresh(idx, paths, root, cfg.wait)
+            if new is not idx:
+                cfg.keep(paths, root, new)
+            idx = new
             note += up
     elif not cfg.index:
         plugin = os.environ.get('PLUGIN_ROOT')

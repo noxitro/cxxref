@@ -9,6 +9,7 @@ import argparse
 import bisect
 import codecs
 import collections
+import contextlib
 import mmap
 import os
 import re
@@ -23,6 +24,61 @@ DEFS = ('def', 'decl')
 OVERRIDE = 'override'  # 3 列目は呼び出し元ではなく、上書きされる基底のメソッド
 CP_CODECS = {65001: None, 51932: 'euc_jp', 20932: 'euc_jp', 28591: 'latin-1'}  # ほかは cp<番号>
 SKIP_SCAN_FILES = 64  # 範囲を引くファイルがこれより多ければ、.skip.tsv を 1 つずつ find せず、1 回通して読む
+SIDE = ('.tu.tsv', '.skip.tsv', '.deps.tsv')  # 索引本体の隣に ltidx が書くファイル
+SEEN_CACHE = '.seen.cache'  # .deps.tsv に載るパスの一覧の写し(ltq が書く)
+READ_CHUNK = 64 << 20
+
+
+def index_signature(paths):
+    """索引のファイル(本体と隣のファイル)の (パス, 大きさ, 更新日時)。MCP サーバーが、開いた索引を使い回してよいかを見る。"""
+    out = []
+    for p in paths:
+        for f in (p,) + tuple(p + s for s in SIDE):
+            try:
+                st = os.stat(f)
+                out.append((f, st.st_size, st.st_mtime_ns))
+            except OSError:
+                out.append((f, None, None))
+    return tuple(out)
+
+
+def deps_paths(dp):
+    """.deps.tsv(1 行目は見出し、2 列目が TU の読んだファイル)に載っているパスの集合(bytes)。
+    大きな索引では .deps.tsv が数 GB あり、読むだけで 30 秒近くかかる(UE5 の 6.7 GB で 27 秒)ので、
+    .deps.tsv の大きさと更新日時を鍵にした一覧(<索引>.seen.cache)を隣に書き、次からはそれを読む。
+    書けないフォルダでは書かずに続ける。"""
+    st = os.stat(dp)
+    key = f'cxxref-seen 1 {st.st_size} {st.st_mtime_ns}\n'.encode()
+    cache = dp[:-len('.deps.tsv')] + SEEN_CACHE
+    try:
+        with open(cache, 'rb') as f:
+            data = f.read()
+        if data.startswith(key):
+            return set(data[len(key):].split(b'\n')) - {b''}
+    except OSError:
+        pass
+    raw, rest = set(), b''
+    pat = re.compile(rb'\t([^\t\r\n]+)')
+    with open(dp, 'rb') as f:
+        next(f, None)
+        while True:  # 一度に全部を読むと、大きな索引では数 GB のメモリを使うので、行の切れ目で区切って読む
+            block = f.read(READ_CHUNK)
+            if not block:
+                raw.update(pat.findall(rest))
+                break
+            block = rest + block
+            cut = block.rfind(b'\n') + 1
+            raw.update(pat.findall(block, 0, cut))
+            rest = block[cut:]
+    tmp = f'{cache}.{os.getpid()}.tmp'
+    try:
+        with open(tmp, 'wb') as f:
+            f.write(key + b'\n'.join(sorted(raw)) + b'\n')
+        os.replace(tmp, cache)
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.remove(tmp)
+    return raw
 
 
 def cp_codec(cp):
@@ -138,6 +194,25 @@ class Index:
         self._sources = None
         self._lines = {}
         self._maps = {}  # (構成名, path) -> 行の付け直しの対応。rows() が作り、skips() も使う
+        self._tus = {}
+        self._memo = {}
+
+    def renew(self):
+        """ソースから読んだもの(走査・鮮度・ファイルの行・行の付け直し・問い合わせの途中の結果)を捨てる。
+        索引のファイルから読んだもの(seen・TU の記録・codec)は残す。MCP サーバーが、索引が変わっていない間に
+        Index を使い回すときに呼ぶ。"""
+        self._fresh = None
+        self._sources = None
+        self._lines = {}
+        self._maps = {}
+        self._memo = {}
+
+    def cached(self, key, make):
+        """同じ Index で同じ問い合わせを繰り返すとき(MCP サーバーが結果を短い形で出し直すとき)に、
+        索引の検索とテキスト検索をやり直さない。renew() で捨てる。"""
+        if key not in self._memo:
+            self._memo[key] = make()
+        return self._memo[key]
 
     def _current(self, path):
         if path not in self._lines:
@@ -317,10 +392,7 @@ class Index:
                 raw_paths = set()
                 dp = part.path + '.deps.tsv'
                 if os.path.exists(dp):  # TU が読んだファイルの記録が、索引とコメントのあるファイルをすべて含む
-                    with open(dp, 'rb') as f:
-                        next(f, None)
-                        raw_paths.update(re.findall(rb'\t([^\t\r\n]+)', f.read()))
-                    s.update(p.decode('utf-8', 'replace') for p in raw_paths)
+                    s.update(p.decode('utf-8', 'replace') for p in deps_paths(dp))
                     self._seen[part.name] = s
                     continue
                 with open(part.path, 'rb') as f:
@@ -352,6 +424,11 @@ class Index:
 
     def _tu(self, part):
         """(TU 数, [(エラーのあった TU, 最初のエラー)], TU の主ファイルの集合, {コードページ: TU 数})"""
+        if part.name not in self._tus:
+            self._tus[part.name] = self._read_tu(part)
+        return self._tus[part.name]
+
+    def _read_tu(self, part):
         tp = part.path + '.tu.tsv'
         total, bad, files, cps = 0, [], set(), {}
         if os.path.exists(tp):
@@ -555,17 +632,23 @@ def text_hits(idx, short, excludes):
     pat = re.compile(rb'(?<![A-Za-z0-9_])' + re.escape(sb) + rb'(?![A-Za-z0-9_])')
     hits = []
 
-    def load(item):  # 読むのは並列にする(大きなコードでは読み込みの待ちが大半)
-        rel, fp, mtime = item
-        try:
-            with open(fp, 'rb') as f:
-                data = f.read()
-        except OSError:
-            return None
-        return (rel, mtime, data) if sb in data else None
+    def load(chunk):  # 読むのは並列にする(大きなコードでは読み込みの待ちが大半)
+        out = []
+        for rel, fp, mtime in chunk:
+            try:
+                with open(fp, 'rb') as f:
+                    data = f.read()
+            except OSError:
+                continue
+            if sb in data:
+                out.append((rel, mtime, data))
+        return out
 
+    # ファイルごとに仕事を渡すと、20 万ファイル(UE5)では受け渡しだけで数秒かかるので、続きのファイルをまとめて渡す
+    items = list(walk_sources(idx, excludes))
+    size = max(1, -(-len(items) // 256))
     with ThreadPoolExecutor(max_workers=min(16, os.cpu_count() or 4)) as ex:
-        loaded = [x for x in ex.map(load, walk_sources(idx, excludes)) if x]
+        loaded = [x for part in ex.map(load, (items[i:i + size] for i in range(0, len(items), size))) for x in part]
     for rel, mtime, data in loaded:
         data = to_utf8(data, idx.codec())  # Shift_JIS の 2 バイト目が英字になる偽の一致も、直してから探せば出ない
         stale = mtime > idx.mtime
@@ -650,7 +733,8 @@ def cmd_refs(a, idx):
         return sym == name or sym.endswith('::' + name)
 
     # 記号の列の末尾が short の行だけを読む(`short<TAB>` を含む行。`Loader` などの部分一致の行は読まない)
-    rows = [r for r in idx.rows([sb + b'\t'], lambda raw: True) if r[0].rsplit('::', 1)[-1] == short]
+    rows = idx.cached(('rows', short), lambda: [r for r in idx.rows([sb + b'\t'], lambda raw: True)
+                                                 if r[0].rsplit('::', 1)[-1] == short])
     # 仮想関数の上書き(上書きするメソッド -> 上書きされる基底のメソッド)。同じ名前なので rows に入っている
     up, down, ov_at = {}, {}, {}
     for r in rows:
@@ -756,10 +840,11 @@ def cmd_refs(a, idx):
         print(f'  ... {len(dep_lines) - a.limit} more (raise --limit)')
 
     # テキスト一致のうち、索引に同名の行が無いものの理由
-    hits = text_hits(idx, short, set(a.exclude))
+    hits = idx.cached(('text', short, tuple(sorted(a.exclude))), lambda: text_hits(idx, short, set(a.exclude)))
     known = {r[3] for r in rows}
     loose = [h for h in hits if (h[0], h[1]) not in at]
-    ranges = idx.skips({h[0] for h in loose})
+    want = frozenset(h[0] for h in loose)
+    ranges = idx.cached(('skips', want), lambda: idx.skips(want))
     parsed = known | set(ranges) | idx.tu_status()[2]
     tagged = {r[0] for r in target} | {'?::' + short} | bases | derived
     others = {}
@@ -898,8 +983,7 @@ def find_indexes(root):
     d = os.path.join(root, '.index')
     if not os.path.isdir(d):
         return []
-    side = ('.tu.tsv', '.skip.tsv', '.deps.tsv')
-    main = sorted((f for f in os.listdir(d) if f.endswith('.tsv') and not f.endswith(side)),
+    main = sorted((f for f in os.listdir(d) if f.endswith('.tsv') and not f.endswith(SIDE)),
                   key=lambda f: (f != 'index.tsv', f))
     return [os.path.join(d, f) for f in main]
 

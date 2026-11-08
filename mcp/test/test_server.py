@@ -249,5 +249,75 @@ class ServerTest(unittest.TestCase):
         self.assertIn('call   src/a.cpp:3  [in Main]', text)  # パスはルートからの相対のまま
 
 
+class ReuseTest(unittest.TestCase):
+    """同じプロセスの中で、開いた索引を呼び出しの間で使い回すか(索引が変わったら開き直すか)。"""
+
+    def setUp(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(SERVER)))
+        import server  # noqa: E402  (ltq と autoupdate も入る)
+        self.server = server
+        self.root = tempfile.mkdtemp()
+        os.makedirs(os.path.join(self.root, 'src'))
+        os.makedirs(os.path.join(self.root, '.index'))
+        self.src = os.path.join(self.root, 'src', 'a.cpp')
+        self.base = os.path.join(self.root, '.index', 'index.tsv')
+        with open(self.src, 'w', encoding='utf-8', newline='\n') as f:
+            f.write('void Run();\nvoid Main() {\n  Run();\n  // Run\n}\n')
+        os.utime(self.src, (1000, 1000))
+        with open(self.base, 'w', encoding='utf-8', newline='\n') as f:
+            f.write('Run\tdecl\t\tsrc/a.cpp:1:6\tvoid Run();\nRun\tcall\tMain\tsrc/a.cpp:3:3\tRun();\n')
+        with open(self.base + '.skip.tsv', 'w', encoding='utf-8', newline='\n') as f:
+            f.write('path\tkind\tbegin\tend\nsrc/a.cpp\tcomment\t4:3\t4:9\n')
+        with open(self.base + '.tu.tsv', 'w', encoding='utf-8', newline='\n') as f:
+            f.write(f'file\tok\terrors\tsec\trefs\tfirst_error\n{self.src}\t1\t0\t0.1\t2\t\n')
+        with open(self.base + '.deps.tsv', 'w', encoding='utf-8', newline='\n') as f:
+            f.write(f'tu\tfile\n{self.src}\tsrc/a.cpp\n')
+        for p in ('', '.skip.tsv', '.tu.tsv', '.deps.tsv'):
+            os.utime(self.base + p, (2000, 2000))
+        self.cfg = server.Config(self.root, None, None)  # 自動更新はしない
+
+    def tearDown(self):
+        shutil.rmtree(self.root)
+
+    def refs(self):
+        code, text = self.server.call_tool(self.cfg, 'refs', {'name': 'Run'})
+        self.assertEqual(code, 0, text)
+        return text
+
+    def test_index_is_reused_while_unchanged(self):
+        self.refs()
+        first = self.cfg.opened[2]
+        # ソースを変えても(索引はそのまま)、同じ Index を使い、ソースの状態は読み直す
+        with open(self.src, 'w', encoding='utf-8', newline='\n') as f:
+            f.write('void Run();\nvoid Main() {\n  Run();\n  // Run\n  Run();\n}\n')
+        text = self.refs()
+        self.assertIs(self.cfg.opened[2], first)
+        self.assertIn('1 source files changed after indexing', text)
+        self.assertIn('src/a.cpp:5', text)  # 索引の後に足した行がテキスト一致に出る
+        # 索引が変われば開き直す
+        with open(self.base, 'a', encoding='utf-8', newline='\n') as f:
+            f.write('Run\tcall\tMain\tsrc/a.cpp:5:3\tRun();\n')
+        os.utime(self.base, (3000, 3000))
+        text = self.refs()
+        self.assertIsNot(self.cfg.opened[2], first)
+        self.assertIn('== calls (resolved by clang): 2', text)
+
+    def test_seen_cache_is_written_and_follows_deps(self):
+        self.refs()
+        cache = self.base + '.seen.cache'
+        with open(cache, 'rb') as f:
+            self.assertTrue(f.read().startswith(b'cxxref-seen 1 '))
+        # .deps.tsv が変われば一覧を作り直す: 索引より新しいヘッダーが「変わったファイル」になる
+        h = os.path.join(self.root, 'src', 'a.h')
+        with open(h, 'w', encoding='utf-8') as f:
+            f.write('#pragma once\n')
+        with open(self.base + '.deps.tsv', 'a', encoding='utf-8', newline='\n') as f:
+            f.write(f'{self.src}\tsrc/a.h\n')
+        os.utime(self.base + '.deps.tsv', (2000, 2000))  # 大きさだけが変わる
+        text = self.refs()
+        self.assertIn('    src/a.h\n', text)
+        self.assertNotIn('not read by any indexed configuration', text)
+
+
 if __name__ == '__main__':
     unittest.main()

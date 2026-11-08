@@ -14,6 +14,7 @@ ltidx が作った C++ の参照索引(TSV)を引き、エージェントが 1 �
 
 - Python 3.10 以降(標準ライブラリだけを使います)
 - `../indexer` の ltidx で作った索引一式。`<索引>.tsv` と、同じ場所の `.tu.tsv`・`.skip.tsv`(コメントと無効な `#if` の範囲)。`../scripts/index-project.bat` が `<ルート>\.index\index.tsv` に作ります。構成(Debug/Release、プラットフォームなど)ごとに `-Name` を変えて作ると、`.index\<名前>.tsv` が並びます
+- ltq は、`.deps.tsv` から作った「TU が読んだファイルの一覧」を、同じ場所の `<索引>.tsv.seen.cache` に書き残します。`.deps.tsv` の大きさと更新日時が同じ間はこれを読みます(大きな索引で数十秒かかる読み込みを省くため)。消しても、次の問い合わせで作り直します
 
 ## 起動
 
