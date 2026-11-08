@@ -17,6 +17,9 @@ param(
     [switch]$Update                 # 前回の索引の後に変わった TU だけを解析し直す(初回は全体を作る)
 )
 $ErrorActionPreference = 'Stop'
+# 出力をファイルや別のプロセスへ流すとき(/cxxref-index のログ・MCP サーバーの update.log)は、UTF-8 で色を付けずに書く
+# (既定では OEM のコードページ(日本語なら cp932)になり、エラーに色のエスケープが混じる)
+if ([Console]::IsOutputRedirected) { [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); $PSStyle.OutputRendering = 'PlainText' }
 if (-not $Root) { $Root = Read-Host 'ソースのルート' }
 if ($Name -notmatch '^[A-Za-z0-9_-]+$') { throw "-Name は英数字・_・- のみ: $Name" }
 $Root = (Resolve-Path $Root).Path

@@ -44,6 +44,10 @@ export function indexRoot(start) {
   }
 }
 
+// ふつうの(level の無い)session.log は Markdown として表示され、\ の後ろが記号だと \ が消える
+// (E:\src\Nox\.index が E:\src\Nox.index と出る)。その \ を二重にする。error の表示はそのまま出るので通さない
+export const escapeMarkdown = (s) => s.replace(/\\(?=[!-/:-@[-`{-~])/g, "\\\\");
+
 // 索引を作るルート。引数(引用符は外す。相対なら作業フォルダから)、無ければ indexRoot(cwd)。{ root } か { error }
 export function targetRoot(arg, cwd) {
   const a = (arg ?? "").trim().replace(/^"(.*)"$/, "$1");

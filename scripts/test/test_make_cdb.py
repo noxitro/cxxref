@@ -106,6 +106,28 @@ class MakeCdbTest(unittest.TestCase):
         self.write('p.slnx', '<Solution>\n  <Project Path="p.vcxproj" />\n</Solution>\n')
         self.check_vs('p.slnx')
 
+    def test_solution_in_subfolder(self):
+        # ルートの直下に無ければ、下のフォルダの C++ のソリューションを使う(C# だけのもの・. で始まるフォルダのものは見ない)
+        for rel in ('a.cpp', 'b.cpp', 'inc/h.h', 'vcdir/v.h'):
+            with open(os.path.join(self.root, rel), encoding='utf-8') as f:
+                self.write('runtime/' + rel, f.read())
+        self.write('runtime/p.vcxproj', VCXPROJ)
+        self.write('runtime/runtime.slnx', '<Solution>\n  <Project Path="p.vcxproj" />\n</Solution>\n')
+        self.write('Editor/Studio.slnx', '<Solution>\n  <Project Path="S/S.csproj" />\n</Solution>\n')
+        self.write('runtime/.vs/copy.slnx', '<Solution>\n  <Project Path="../p.vcxproj" />\n</Solution>\n')
+        out = os.path.join(self.root, 'out')
+        log = self.ps('make-cdb.ps1', '-Root', self.root, '-Out', out)
+        self.assertEqual(set(self.cdb(out)), {'a.cpp', 'b.cpp'}, log)
+
+        # 2 つあれば、どちらかを -Project で選ぶよう言って止まる
+        self.write('tools/t/q.sln', 'Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "q", "q.vcxproj", "{1}"\n')
+        r = subprocess.run([PWSH, '-NoProfile', '-File', os.path.join(SCRIPTS, 'make-cdb.ps1'), '-Root', self.root, '-Out', out],
+                           capture_output=True, text=True, encoding='utf-8', errors='replace')
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('-Project', r.stdout + r.stderr)
+        self.assertIn('runtime.slnx', r.stdout + r.stderr)
+        self.assertIn('q.sln', r.stdout + r.stderr)
+
     def test_sln_maps_configuration(self):
         # ソリューションの Debug|x64 を、プロジェクトの Release|x64 に対応づけた .sln
         self.write('p.vcxproj', VCXPROJ)

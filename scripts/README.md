@@ -27,6 +27,8 @@
 3. `CMakeLists.txt`
 4. `.vcxproj`(1 つだけのとき)
 
+直下にどれも無ければ、2 階層下までのフォルダから、C++ のプロジェクト(`.vcxproj`)を含む `.slnx`・`.sln` を探して、1 つだけならそれを使います(`runtime\runtime.slnx` と C# の `Editor\Studio.slnx` が並ぶような形)。`.` で始まるフォルダと `node_modules`・`vcpkg_installed`・`packages` は見ません。2 つ以上あれば `-Project` で選びます。
+
 ルートに `compile_commands.json` があれば、それを使います。
 
 索引は `<ルート>\.index\` にできます。`.index` の中に「全部を無視する」`.gitignore`(中身は `*`)を置くので、索引は git に入りません。プロジェクトの `.gitignore` は書き換えません。

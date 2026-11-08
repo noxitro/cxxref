@@ -4,7 +4,12 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { findLtidx, indexRoot, lastCwd, pluginRoot, targetRoot } from "./lib.mjs";
+import { escapeMarkdown, findLtidx, indexRoot, lastCwd, pluginRoot, targetRoot } from "./lib.mjs";
+
+test("escapeMarkdown: 記号の前の \\ だけを二重にする", () => {
+  assert.equal(escapeMarkdown("E:\\src\\Nox\\.index\\a.log"), "E:\\src\\Nox\\\\.index\\a.log");
+  assert.equal(escapeMarkdown("scripts\\get-ltidx.ps1(C:\\_x)"), "scripts\\get-ltidx.ps1(C:\\\\_x)");
+});
 
 function tree() {
   const d = mkdtempSync(join(tmpdir(), "cri"));

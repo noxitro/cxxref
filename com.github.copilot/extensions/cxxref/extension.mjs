@@ -11,7 +11,7 @@ import { closeSync, existsSync, mkdirSync, openSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { findLtidx, lastCwd, pluginRoot, targetRoot } from "./lib.mjs";
+import { escapeMarkdown, findLtidx, lastCwd, pluginRoot, targetRoot } from "./lib.mjs";
 
 function run(script, args, log) {
   return new Promise((done) => {
@@ -30,7 +30,8 @@ const why = (r) => (r.error ? `pwsh を起動できません(PowerShell 7 が要
 
 let running = null; // 走っている索引づくり(同時に 1 つだけ)
 
-const tell = (message, level) => session.log(message, { ephemeral: true, ...(level ? { level } : {}) });
+const tell = (message, level) =>
+  session.log(level ? message : escapeMarkdown(message), { ephemeral: true, ...(level ? { level } : {}) });
 
 async function indexCommand(ctx) {
   // await の前に印を付ける(続けて呼ばれても、2 つ目は始めない)

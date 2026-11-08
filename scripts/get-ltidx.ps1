@@ -9,6 +9,9 @@ param(
     [string]$Repo = 'noxitro/cxxref'
 )
 $ErrorActionPreference = 'Stop'
+# 出力をファイルや別のプロセスへ流すとき(/cxxref-index のログ・MCP サーバーの update.log)は、UTF-8 で色を付けずに書く
+# (既定では OEM のコードページ(日本語なら cp932)になり、エラーに色のエスケープが混じる)
+if ([Console]::IsOutputRedirected) { [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); $PSStyle.OutputRendering = 'PlainText' }
 $name = 'cxxref-ltidx-win-x64'
 if (-not $Version) { $Version = (Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot '..\plugin.json') | ConvertFrom-Json).version }
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ("cxxref-ltidx-" + [Guid]::NewGuid().ToString('N'))
