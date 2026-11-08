@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { enableRoot, escapeMarkdown, findLtidx, gitTop, indexRoot, lastCwd, parseEnableArgs, pluginRoot, projectChoices, savedProject, targetRoot } from "./lib.mjs";
+import { enableRoot, escapeMarkdown, findLtidx, gitTop, indexRoot, lastCwd, parseEnableArgs, parseProgress, pluginRoot, progressNote, projectChoices, savedProject, targetRoot } from "./lib.mjs";
 
 test("projectChoices: フルパスの行を、ルートからの相対パスの選択肢にする", () => {
   const root = join(tmpdir(), "nox");
@@ -118,4 +118,24 @@ test("enableRoot: 引数が無ければ git のルート、リポジトリでな
     }
     assert.equal(gitTop(join(d, "none")), "");
   } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test("parseProgress: いちばん進んだ TU と、解析エラーの数(前後した行・ほかの行は無視)", () => {
+  const log = "[3/322] ok a.cpp\r\nwarning: something\r\n[9/322] NG b.cpp\r\n[7/322] ok c.cpp\r\n[ 10/322] ok d.cpp\r\n";
+  assert.deepEqual(parseProgress(log), { done: 9, total: 322, ng: 1 });
+  assert.equal(parseProgress("compile_commands.json: x\r\n"), null);
+  assert.equal(parseProgress(""), null);
+});
+
+test("progressNote: 段階が変わったとき・1 割ごと(10 秒あけて)・compile_commands.json は 1 分ごとに出す", () => {
+  let s = {};
+  const step = (snap, now, sec) => { const r = progressNote(s, snap, now, sec); s = r.state; return r.note; };
+  assert.match(step({ phase: "cdb" }, 0, 0), /compile_commands\.json を用意しています$/);
+  assert.equal(step({ phase: "cdb" }, 30000, 30), "");
+  assert.match(step({ phase: "cdb" }, 61000, 61), /\(61 秒\)/);
+  assert.match(step({ phase: "tu", done: 5, total: 100, ng: 0 }, 62000, 62), /5\/100\(5%、62 秒\)/);
+  assert.equal(step({ phase: "tu", done: 9, total: 100, ng: 0 }, 80000, 80), "");      // 1 割に届かない
+  assert.equal(step({ phase: "tu", done: 30, total: 100, ng: 2 }, 65000, 65), "");     // 10 秒たっていない
+  assert.match(step({ phase: "tu", done: 30, total: 100, ng: 2 }, 73000, 73), /30\/100\(30%、解析エラー 2、73 秒\)/);
+  assert.equal(step({ phase: "tu", done: 100, total: 100, ng: 2 }, 99000, 99), "");    // 終わりは別に出す
 });

@@ -2,6 +2,7 @@
 //
 // /cxxref-index [ルート]  作業中のリポジトリの索引を作る。ltidx.exe が無ければ、先に scripts\get-ltidx.ps1 で取ってくる。
 //                         索引がすでにあれば、変わった TU だけを作り直す(-Update)。裏で動かし、終わったらそう出す。
+//                         走っている間は、進み具合(compile_commands.json の用意・解析した TU の数)をときどき出す。
 //                         ルートを省くと、作業フォルダから親へさかのぼって .index のあるフォルダ、無ければ作業フォルダ。
 //                         compile_commands.json の作り元(.slnx など)の候補が複数あれば、ダイアログで選ばせる。
 //                         選んだものは作り方の記録に残り、次からは聞かない。
@@ -13,11 +14,11 @@
 // 拡張は Copilot CLI の実験的機能で、機能フラグ EXTENSIONS が有効なときだけ読み込まれる。
 import { joinSession } from "@github/copilot-sdk/extension";
 import { spawn } from "node:child_process";
-import { closeSync, existsSync, mkdirSync, openSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { enableRoot, escapeMarkdown, findLtidx, lastCwd, parseEnableArgs, pluginRoot, projectChoices, savedProject, targetRoot } from "./lib.mjs";
+import { enableRoot, escapeMarkdown, findLtidx, lastCwd, parseEnableArgs, parseProgress, pluginRoot, progressNote, projectChoices, savedProject, targetRoot } from "./lib.mjs";
 
 function run(script, args, log) {
   return new Promise((done) => {
@@ -82,6 +83,28 @@ async function chooseProject(plugin, root) {
   return { project: choices.find((c) => c.label === picked).path };
 }
 
+// index-project を走らせている間、ltidx のログ(.index\index.log)を数秒おきに見て、進み具合を画面に出す。
+// 出すかどうかは progressNote が決める(段階が変わったとき・TU が 1 割進んだときなど)。止める関数を返す
+function watchProgress(ltLog, t1) {
+  let state = {};
+  const tick = () => {
+    let snap = { phase: "cdb" };
+    try {
+      if (statSync(ltLog).mtimeMs >= t1) {  // 前の実行のログは見ない(ltidx が始まると書き直される)
+        const p = parseProgress(readFileSync(ltLog, "utf8"));
+        if (!p) return;  // ltidx は始まったが、まだ 1 つも終わっていない
+        snap = { phase: "tu", ...p };
+      }
+    } catch { }  // まだ無い(compile_commands.json を用意している)
+    const now = Date.now();
+    const r = progressNote(state, snap, now, Math.round((now - t1) / 1000));
+    state = r.state;
+    if (r.note) tell(r.note).catch(() => { });
+  };
+  const timer = setInterval(tick, 3000);
+  return () => clearInterval(timer);
+}
+
 async function indexCommand(ctx) {
   // await の前に印を付ける(続けて呼ばれても、2 つ目は始めない)
   if (running) {
@@ -126,7 +149,8 @@ async function indexCommand(ctx) {
     await tell(`cxxref: 索引を${update ? "作り直し" : "作り"}始めました(${root})。裏で動かすので、作業を続けてかまいません。ログ: ${log}`);
     // index-project.ps1 は、索引ができたら 0、できなければ 2 で終える(ltidx の失敗や異常終了も 2)
     const args = ["-Root", root, ...(pick.project ? ["-Project", pick.project] : []), ...(update ? ["-Update"] : [])];
-    const r = await run(join(plugin, "scripts", "index-project.ps1"), args, log);
+    const stop = watchProgress(join(dir, "index.log"), Date.now());
+    const r = await run(join(plugin, "scripts", "index-project.ps1"), args, log).finally(stop);
     const sec = Math.round((Date.now() - t0) / 1000);
     if (r.code === 0) {
       await tell(`cxxref: 索引ができました(${sec} 秒、${dir})。以後は MCP サーバーの refs / check がこの索引を使い、コードを変えても自動で作り直します`);

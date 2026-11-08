@@ -108,3 +108,37 @@ export function targetRoot(arg, cwd) {
   if (!existsSync(root) || !statSync(root).isDirectory()) return { error: `フォルダがありません: ${root}` };
   return { root };
 }
+
+// ltidx の進み具合。index-project が .index\index.log に落とす "[n/全体] ok|NG ファイル" の行から、
+// { done, total, ng } を返す(並列で解析するので、行の n は前後する。いちばん大きい n を使う)。行が無ければ null
+export function parseProgress(text) {
+  let done = 0, total = 0, ng = 0;
+  for (const m of text.matchAll(/^\[(\d+)\/(\d+)\] (ok|NG)\b/gm)) {
+    done = Math.max(done, Number(m[1]));
+    total = Number(m[2]);
+    if (m[3] === "NG") ng++;
+  }
+  return total ? { done, total, ng } : null;
+}
+
+// 進み具合を画面に出すか決める。snap は { phase: "cdb" }(compile_commands.json を用意している)か
+// { phase: "tu", done, total, ng }(ltidx が TU を解析している)。prev は前に出したときの { phase, tenth, at }(初めは {})。
+// 出すのは、段階が変わったとき・TU が 1 割進んだとき・compile_commands.json に 1 分以上かかっているとき。
+// どれも前に出してから minGap ms 以上あける(行が増えすぎないように)。{ note(出さなければ ""), state(次の prev) }
+export function progressNote(prev, snap, now, elapsedSec, minGap = 10000) {
+  const quiet = { note: "", state: prev };
+  if (snap.phase === "cdb") {
+    if (prev.phase !== "cdb") return { note: "cxxref: compile_commands.json を用意しています", state: { phase: "cdb", at: now } };
+    if (now - prev.at < 60000) return quiet;
+    return { note: `cxxref: compile_commands.json を用意しています(${elapsedSec} 秒)`, state: { phase: "cdb", at: now } };
+  }
+  const { done, total, ng } = snap;
+  const tenth = Math.floor((done * 10) / total);
+  if (done >= total) return quiet;  // 終わりは、索引ができたメッセージで知らせる
+  if (prev.phase === "tu" && (tenth <= prev.tenth || now - prev.at < minGap)) return quiet;
+  const pct = Math.floor((done * 100) / total);
+  return {
+    note: `cxxref: TU を解析しています ${done}/${total}(${pct}%${ng ? `、解析エラー ${ng}` : ""}、${elapsedSec} 秒)`,
+    state: { phase: "tu", tenth, at: now },
+  };
+}
