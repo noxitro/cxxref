@@ -49,11 +49,11 @@ jobs:
         shell: bash
         run: |
           name=clang+llvm-$LLVM_VERSION-x86_64-pc-windows-msvc
-          curl -fsSL -o llvm.tar.xz "https://github.com/llvm/llvm-project/releases/download/llvmorg-$LLVM_VERSION/$name.tar.xz"
+          curl -fsSL --retry 5 --retry-delay 15 -o llvm.tar.xz "https://github.com/llvm/llvm-project/releases/download/llvmorg-$LLVM_VERSION/$name.tar.xz"
           mkdir -p /c/llvm
           tar -xf llvm.tar.xz -C /c/llvm --strip-components=1 "$name/include" "$name/lib"
           rm llvm.tar.xz
-          curl -fsSL -o /c/llvm/LICENSE.TXT "https://raw.githubusercontent.com/llvm/llvm-project/llvmorg-$LLVM_VERSION/llvm/LICENSE.TXT"
+          curl -fsSL --retry 5 --retry-delay 15 -o /c/llvm/LICENSE.TXT "https://raw.githubusercontent.com/llvm/llvm-project/llvmorg-$LLVM_VERSION/llvm/LICENSE.TXT"
           grep -ho '_IMPORT_PREFIX}/bin/[^"]*' /c/llvm/lib/cmake/*/*.cmake | sed 's|_IMPORT_PREFIX}/||' | sort -u |
             while read -r f; do mkdir -p "/c/llvm/$(dirname "$f")"; touch "/c/llvm/$f"; done
           ls /c/llvm/lib/clang
