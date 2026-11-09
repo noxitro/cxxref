@@ -144,9 +144,12 @@ exit /b 0
 def oem_name(*names):
     """cmd のコードページ(OEM)で表せる最初の名前。日本語版なら日本語、英語版(437)なら é を使う。
     このプロセスのコンソールが OEM と別のコードページ(chcp で変えた・CI のランナーなど)なら、cmd は llvm-root.txt を
-    そのコードページで読むので、ASCII でない名前は確かめられない。そのときは最後の名前(ASCII)を使う。"""
+    そのコードページで読むので、ASCII でない名前は確かめられない。そのときは最後の名前(ASCII)を使う。
+    set /p が使うのは出力側のコードページ。出力を受け取られた pwsh が [Console]::OutputEncoding を UTF-8 にすると、
+    出力側だけが 65001 のまま残る(先に走る SetupFlowTest の index-project.ps1 など)ので、両方を見る。"""
     k = ctypes.windll.kernel32
-    if k.GetConsoleCP() not in (0, k.GetOEMCP()):  # 0 はコンソールが無い(cmd は OEM の新しいコンソールで動く)
+    oem = k.GetOEMCP()
+    if k.GetConsoleCP() not in (0, oem) or k.GetConsoleOutputCP() not in (0, oem):  # 0 はコンソールが無い(cmd は OEM の新しいコンソールで動く)
         return names[-1]
     for n in names:
         try:
