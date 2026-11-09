@@ -226,5 +226,29 @@ class MakeCdbTest(unittest.TestCase):
             self.assertIn('c.cpp', f.read(), ulog)
 
 
+@unittest.skipUnless(os.name == 'nt' and PWSH, 'pwsh on Windows is required')
+class NoProjectTest(unittest.TestCase):
+    # 候補を探すところまでで止まるので、Visual Studio は要らない
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix='cri')
+        os.makedirs(os.path.join(self.root, 'sub'))
+        with open(os.path.join(self.root, 'a.cpp'), 'w') as f:
+            f.write('int main() {}\n')
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def test_no_project_says_so(self):
+        # ルートにも下のフォルダにもプロジェクトが無ければ、-Project で指定するよう言って止まる(null のメソッド呼び出しで落ちない)
+        r = subprocess.run([PWSH, '-NoProfile', '-File', os.path.join(SCRIPTS, 'make-cdb.ps1'), '-Root', self.root],
+                           capture_output=True, text=True, encoding='utf-8', errors='replace')
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('-Project で指定してください', r.stdout + r.stderr)
+        r = subprocess.run([PWSH, '-NoProfile', '-File', os.path.join(SCRIPTS, 'make-cdb.ps1'), '-Root', self.root, '-ListProjects'],
+                           capture_output=True, text=True, encoding='utf-8', errors='replace')
+        self.assertEqual((r.returncode, r.stdout.strip()), (0, ''))
+        self.assertFalse(os.path.exists(os.path.join(self.root, '.index')))
+
+
 if __name__ == '__main__':
     unittest.main()

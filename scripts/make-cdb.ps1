@@ -41,7 +41,7 @@ function Get-ProjectCandidates {
     $sols = @($dirs | ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -File -ErrorAction SilentlyContinue } |
         Where-Object { $_.Name -like '*.slnx' -or $_.Name -like '*.sln' } |
         Where-Object { (Get-Content -LiteralPath $_.FullName -Raw) -match '\.vcxproj' })
-    @($sols.FullName)
+    $sols | ForEach-Object FullName  # @($sols.FullName) だと、0 件のとき $null が 1 つの配列になる
 }
 if ($ListProjects) {
     # /cxxref-index が、候補が複数のときに選ばせるために読む(1 行に 1 つ、フルパス)
