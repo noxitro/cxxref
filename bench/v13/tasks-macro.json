@@ -1,0 +1,99 @@
+[
+  {
+    "id": "MT1-assert-kernel",
+    "repo": "nox",
+    "kind": "マクロそのもの: 定義(#if の両側に 2 つ)と、使っている箇所",
+    "prompt": "このフォルダは C++ のゲームエンジン Nox のソースです。マクロ `NOX_ASSERT_KERNEL` はどこで定義されていて、どこで使われていますか。定義と、使っている箇所をすべて挙げてください。",
+    "note": "正解は rg -w NOX_ASSERT_KERNEL と読解で作った(索引は使っていない)。定義は assertion_kernel.h の #if NOX_DEBUG || NOX_RELEASE の両側の 2 つ。使用は 9 行",
+    "truth": [
+      "runtime/kernel/assertion_kernel.h:63",
+      "runtime/kernel/assertion_kernel.h:68",
+      "runtime/kernel/fixed_vector.h:91",
+      "runtime/kernel/fixed_vector.h:99",
+      "runtime/kernel/fixed_string.h:35",
+      "runtime/kernel/memory/pmr_buffer.h:54",
+      "runtime/kernel/memory/pmr_buffer.h:94",
+      "runtime/kernel/placement_object.h:72",
+      "runtime/kernel/placement_object.h:102",
+      "runtime/kernel/placement_object.h:103",
+      "runtime/kernel/utility.h:30"
+    ]
+  },
+  {
+    "id": "MT2-ignore-reflection",
+    "repo": "nox",
+    "kind": "コンパイルされないマクロの引数(NOX_ATTR はリフレクションの生成器のための印で、引数を捨てる)",
+    "prompt": "このフォルダは C++ のゲームエンジン Nox のソースです。リフレクションの生成から外す属性 `IgnoreReflection()` を、`NOX_ATTR(...)` または `NOX_ATTR_DECLARE(...)` に書いて付けている箇所をすべて挙げてください(マクロ定義の中に書かれたものも含めます。C# のコードは除きます)。",
+    "note": "正解は rg で IgnoreReflection() を含む行のうち NOX_ATTR( か NOX_ATTR_DECLARE( のあるもの(.h/.cpp、reflection_generated を除く)。35 行。reflection_attribute.h の 43・48・51 は nox::reflection::IgnoreReflection()(attr:: が無い)だが、生成器は文字列 IgnoreReflection() で見るので含める。属性クラスの定義(reflection_attribute.h:181)と特殊化(194)は付けている箇所ではない",
+    "truth": [
+      "runtime/core/dev/editor_remote_server.h:127",
+      "runtime/core/entity_logic_legacy.h:310",
+      "runtime/core/object.h:99",
+      "runtime/core/world_legacy.h:329",
+      "runtime/core/world_legacy.h:602",
+      "runtime/core/world_legacy.h:605",
+      "runtime/core/world_legacy.h:608",
+      "runtime/core/world_legacy.h:611",
+      "runtime/core/world_legacy.h:614",
+      "runtime/core/world_legacy.h:624",
+      "runtime/core/world_legacy.h:663",
+      "runtime/core/world_legacy.h:666",
+      "runtime/core/world_legacy.h:669",
+      "runtime/core/world_legacy.h:672",
+      "runtime/core/world_legacy.h:675",
+      "runtime/core/world_legacy.h:678",
+      "runtime/core/world_legacy.h:681",
+      "runtime/core/world_legacy.h:696",
+      "runtime/core/world_legacy.h:699",
+      "runtime/core/world_legacy.h:703",
+      "runtime/core/world_legacy.h:706",
+      "runtime/kernel/memory/nox_memory.h:62",
+      "runtime/kernel/reflection_attribute.h:43",
+      "runtime/kernel/reflection_attribute.h:48",
+      "runtime/kernel/reflection_attribute.h:51",
+      "runtime/kernel/reflection_type.h:716",
+      "runtime/reflection/database.h:39",
+      "runtime/reflection/function_info.h:15",
+      "runtime/reflection/reflection_object.h:39",
+      "runtime/reflection/reflection_object.h:43",
+      "runtime/reflection/reflection_object.h:50",
+      "runtime/reflection/reflection_object.h:54",
+      "runtime/reflection/reflection_object.h:65",
+      "runtime/reflection/reflection_object.h:79",
+      "runtime/reflection/reflection_object.h:93"
+    ]
+  },
+  {
+    "id": "MT3-object-gettype",
+    "repo": "nox",
+    "kind": "マクロが作る定義(NOX_DECLARE_OBJECT_ROOT -> NOX_DECLARE_REFLECTION_OBJECT)と、その呼び出し",
+    "prompt": "このフォルダは C++ のゲームエンジン Nox のソースです。`nox::Object::GetType()` はどこで定義されていますか。また、`nox::Object::GetType()` を呼び出している箇所をすべて挙げてください。派生クラスで定義された `GetType()` や、`ClassInfo` など別のクラスの `GetType()` の呼び出しは含めません。",
+    "note": "定義は object.h:19 の NOX_DECLARE_OBJECT_ROOT(Object)(object_definition.h の NOX_DECLARE_OBJECT_ROOT が reflection_object.h の NOX_DECLARE_REFLECTION_OBJECT に展開される)。呼び出しの 7 行は、受け手の型が nox::Object(nox::Object* / const nox::Object& / this)であることを読んで確かめた。accept は、挙げても誤りにしない行(マクロの本体で GetType を定義している行と、NOX_DECLARE_OBJECT_ROOT の定義)",
+    "truth": [
+      "runtime/core/object.h:19",
+      "runtime/core/dev/remote/remote_system.cpp:282",
+      "runtime/core/dev/remote/remote_system.cpp:343",
+      "runtime/core/dev/socket_stream_utility.cpp:705",
+      "runtime/core/dev/socket_stream_utility.cpp:801",
+      "runtime/core/dev/socket_stream_writer.cpp:153",
+      "runtime/core/object.cpp:21",
+      "runtime/core/object.cpp:54"
+    ],
+    "accept": [
+      "runtime/reflection/reflection_object.h:94",
+      "runtime/core/object_definition.h:29"
+    ]
+  },
+  {
+    "id": "MT4-o3de-comparestring",
+    "repo": "o3de",
+    "kind": "名前を置き換えるマクロ(windows.h の #define CompareString CompareStringW)が、プロジェクトのメソッドの名前も置き換える",
+    "prompt": "このフォルダは C++ のゲームエンジン O3DE(Open 3D Engine)のソースです。`AZ::JsonSerialization::CompareString` の宣言と定義、それを呼び出している箇所をすべて挙げてください。",
+    "note": "正解は rg -w CompareString と読解で作った。宣言 JsonSerialization.h:347、定義 JsonSerialization.cpp:590、呼び出し JsonSerialization.cpp:385。Windows では windows.h のマクロで CompareStringW になる(索引の記号も CompareStringW)",
+    "truth": [
+      "Code/Framework/AzCore/AzCore/Serialization/Json/JsonSerialization.h:347",
+      "Code/Framework/AzCore/AzCore/Serialization/Json/JsonSerialization.cpp:590",
+      "Code/Framework/AzCore/AzCore/Serialization/Json/JsonSerialization.cpp:385"
+    ]
+  }
+]

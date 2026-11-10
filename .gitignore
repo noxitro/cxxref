@@ -11,6 +11,7 @@ __pycache__/
 # 計測のやり取り(セッション ID や会話の全文を含む)
 bench/runs/
 bench/runs13/
+bench/runs-macro/
 # 公開しない計測の問題(別のコードベースの問題と正解・回答の書式)
 bench/local/
 dist/
