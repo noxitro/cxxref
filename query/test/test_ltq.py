@@ -45,7 +45,7 @@ class LtqTest(unittest.TestCase):
         if mtime is not None:
             os.utime(fp, (mtime, mtime))
 
-    def index(self, name, rows, skips, tus=('src/a.cpp',), mtime=None, deps=None, cp=None):
+    def index(self, name, rows, skips, tus=('src/a.cpp',), mtime=None, deps=None, cp=None, alt=None):
         """deps は {TU: [読んだファイル]}(.deps.tsv)、cp は TU ごとに記録するコードページ。省くと古い形式の索引になる。"""
         base = os.path.join(self.root, '.index', name + '.tsv')
         with open(base, 'w', encoding='utf-8', newline='\n') as f:
@@ -68,6 +68,14 @@ class LtqTest(unittest.TestCase):
                     for d in ds:
                         f.write(f'{os.path.join(self.root, t)}\t{d}\n')
             files.append(base + '.deps.tsv')
+        if alt is not None:
+            # 差分パス(無効な #if の中を解析した行)の <索引>.alt.tsv
+            with open(base + '.alt.tsv', 'w', encoding='utf-8', newline='\n') as f:
+                for sym, role, caller, loc, src in alt:
+                    f.write(f'{sym}\t{role}\t{caller}\t{loc}\t{src}\n')
+            files.append(base + '.alt.tsv')
+        elif os.path.exists(base + '.alt.tsv'):
+            os.remove(base + '.alt.tsv')
         t = self.t0 if mtime is None else mtime
         for p in files:
             os.utime(p, (t, t))
@@ -383,19 +391,47 @@ class LtqTest(unittest.TestCase):
         self.assertNotIn('src/a.cpp:7', out)
 
     def test_compact_keeps_lines_that_spell_the_qualified_name(self):
-        # 修飾名で問われたら、無効な #if の中でも `Scope::Name` と書かれた行は短い形で残す(O3DE の
-        # DynamicModuleHandle::Create では正解の 2 つがここにあった)。名前だけの行はフォルダの件数にする
+        # 修飾名で問われたら、無効な #if の中でも `Scope::Name` と書かれた行は、いちばん短い形(--compact を 2 つ)でも残す
+        # (O3DE の DynamicModuleHandle::Create では正解の 2 つがここにあった)。名前だけの行はフォルダの件数にする
         self.write('src/q.cpp', 'void F() {\n#if 0\n  ns::Run();\n  x.Run();\n#endif\n}\n', self.t0 - 10)
         self.index('index', [('ns::Run', 'decl', '', 'src/a.cpp:1:6', 'void Run();'),
                              ('ns::Run', 'call', 'Main', 'src/a.cpp:3:3', 'Run();')],
                    [('src/q.cpp', 'inactive', '2:1', '5:7')], tus=('src/a.cpp', 'src/q.cpp'))
-        out = self.ltq('refs', 'ns::Run', '--compact')
+        out = self.ltq('refs', 'ns::Run', '--compact', '--compact')
         self.assertIn('lines that spell ns::Run are listed in full', out)
-        self.assertIn('inside inactive #if/#ifdef branches -> not compiled in the indexed configuration: 2\n'
-                      '    src/q.cpp:3  [lines 2-5]  | ns::Run();\n    src/  1 matches in 1 files\n', out)
+        self.assertRegex(out, r'inside inactive #if/#ifdef branches -> not compiled in the indexed configuration[^\n]*: 2\n'
+                              r'    \(no index\.tsv\.alt\.tsv[^\n]*\n'
+                              r'    src/q\.cpp:3  \[#if 0\]  \| ns::Run\(\);\n    src/  1 matches in 1 files\n')
         self.assertNotIn('src/q.cpp:4', out)
-        out = self.ltq('refs', 'Run', '--compact')  # 修飾されていない問いでは、どちらも件数
+        self.assertIn('ask again with --path <folder>', out)
+        out = self.ltq('refs', 'Run', '--compact', '--compact')  # 修飾されていない問いでは、どちらも件数
         self.assertNotIn('src/q.cpp:3', out)
+
+    def test_compact_lists_inactive_lines_one_by_one(self):
+        # 短い形の 1 段目(--compact 1 つ)は、無効な #if の中の一致を 1 行ずつ出す。名前や引数を変えるときに直す行なので、
+        # rg で見つかる行が件数に埋もれないようにする。まとめるのはコメントなど、コードでない分類だけ
+        self.write('src/q.cpp', 'void F() {\n#if 0\n  ns::Run();\n  x.Run();\n#endif\n}\n', self.t0 - 10)
+        self.index('index', self.COMMON, [self.COMMENT, ('src/q.cpp', 'inactive', '2:1', '5:7')],
+                   tus=('src/a.cpp', 'src/q.cpp'))
+        out = self.ltq('refs', 'Run', '--compact')
+        self.assertIn('other text matches up to 30 per group', out)
+        self.assertIn('    src/q.cpp:3  [#if 0]  | ns::Run();\n    src/q.cpp:4  [#if 0]  | x.Run();\n', out)
+        self.assertIn('inside comments -> not code; do not report these: 1\n    src/  1 matches in 1 files', out)
+
+    def test_compact_lists_up_to_30_lines_per_group(self):
+        # 1 段目でも、1 つの分類で 30 行を超えた分はフォルダごとの件数にする(--path で出し直せると案内する)
+        self.index('index', self.COMMON, [self.COMMENT])
+        os.makedirs(os.path.join(self.root, 'other'))
+        self.write('other/x.cpp', 'void G() {\n' + '  x.Run();\n' * 40 + '}\n', self.t0 - 10)
+        out = self.ltq('refs', 'Run', '--compact')
+        self.assertIn('in files no indexed TU includes -> not analyzed; read them if they matter: 40\n'
+                      '    other/x.cpp:2  | x.Run();\n', out)
+        self.assertIn('    other/x.cpp:31  | x.Run();\n    other/  10 matches in 1 files\n', out)
+        self.assertNotIn('other/x.cpp:32', out)
+        self.assertIn('ask again with --path <folder>', out)
+        out = self.ltq('refs', 'Run', '--compact', '--path', 'other')  # フォルダを絞れば、残りも並ぶ分だけ減る
+        self.assertIn('(--path: only lines in other are listed and counted)', out)
+        self.assertNotIn('src/a.cpp', out.split('== calls', 1)[1])
 
     def test_compact_lists_only_the_folders_with_most_matches(self):
         # 名前だけの一致は大きなコードでは数百のフォルダに散る(O3DE の Create で 180)。多い順に 10 まで、残りは 1 行
@@ -403,11 +439,168 @@ class LtqTest(unittest.TestCase):
         for i in range(12):
             os.makedirs(os.path.join(self.root, 'other', f'd{i:02}'))
             self.write(f'other/d{i:02}/x.cpp', 'void G() {\n' + '  x.Run();\n' * (20 - i) + '}\n', self.t0 - 10)
-        out = self.ltq('refs', 'Run', '--compact')
+        out = self.ltq('refs', 'Run', '--compact', '--compact')
         self.assertIn('in files no indexed TU includes -> not analyzed; read them if they matter: 174\n'
                       '    other/d00/  20 matches in 1 files\n', out)
-        self.assertIn('    other/d09/  11 matches in 1 files\n    ... 2 more folders (19 matches)\n', out)
-        self.assertNotIn('other/d10/', out)
+        # 残りのフォルダも、上の階層ごとの件数は出す(どこにも名前の出ない行を作らない)
+        self.assertIn('    other/d09/  11 matches in 1 files\n'
+                      '    ... 2 more folders (19 matches) under: other/d10/ 10, other/d11/ 9\n', out)
+        self.assertNotIn('other/d10/  ', out)
+
+    def test_folders_beyond_the_listed_ones_are_counted_by_parent_folder(self):
+        # 並べきれないフォルダは、上の階層でまとめる。--path で絞った先でも、分かれるところまで階層を下りる
+        self.assertEqual(ltq.top_dirs(['a/x/f.cpp', 'a/x/g.cpp', 'a/y/f.cpp', 'b/z/f.cpp', 'c/f.cpp'], 1),
+                         ['a/x/  2 matches in 2 files', '... 3 more folders (3 matches) under: a/ 1, b/ 1, c/ 1'])
+        self.assertEqual(ltq.top_dirs(['a/x/f.cpp', 'a/x/g.cpp', 'a/y/p/f.cpp', 'a/z/f.cpp', 'a/z/q/f.cpp'], 1),
+                         ['a/x/  2 matches in 2 files', '... 3 more folders (3 matches) under: a/z/ 2, a/y/ 1'])
+        many = [f'd{i:02}/f.cpp' for i in range(12)]
+        self.assertTrue(ltq.top_dirs(many, 1)[1].endswith('d08/ 1, ... 3 more'))
+
+    def test_non_source_files_are_searched_by_name(self):
+        # C/C++ でないファイル(生成器・ビルドの定義・文書)の一致も出す。中身は解析しないが、rg なら出る行を無いことにしない
+        self.index('index', self.COMMON, [self.COMMENT])
+        os.makedirs(os.path.join(self.root, 'tools', 'gen'))
+        self.write('tools/gen/Gen.cs', 'class Gen {\n  void Emit() { w.Write("Run();"); }\n}\n', self.t0 - 10)
+        self.write('tools/build.cmake', '# Runner is another word\n' + 'add_step(Run)\n' * 13, self.t0 - 10)
+        with open(os.path.join(self.root, 'tools', 'blob.dat'), 'wb') as f:
+            f.write(b'\0\1\2 Run \0')  # 先頭に NUL のあるファイル(バイナリ)は飛ばす
+        self.write('tools/icon.png', 'Run\n')  # 拡張子でバイナリと分かるものは開かない
+        head = ('== matches of "Run" in files that are not C/C++ sources (scripts, build files, docs, other languages'
+                ' -> not analyzed; update them too when renaming): ')
+        out = self.ltq('refs', 'Run')
+        self.assertIn(head + '14\n', out)
+        self.assertIn('  tools/gen/Gen.cs:2  | void Emit() { w.Write("Run();"); }\n', out)
+        self.assertIn('  tools/build.cmake:14  | add_step(Run)\n', out)
+        self.assertNotIn('tools/build.cmake:1 ', out)
+        self.assertNotIn('blob.dat', out)
+        self.assertNotIn('icon.png', out)
+        self.assertNotIn('matches in', out)
+        # 短い形の 1 段目は 10 行まで並べ、残りはフォルダごとの件数。2 段目は全部フォルダごとの件数
+        sec = self.ltq('refs', 'Run', '--compact').split(head, 1)[1]
+        self.assertEqual(len(re.findall(r'^  tools/\S+:\d+  \| ', sec, re.M)), 10)
+        self.assertEqual(sum(int(n) for n in re.findall(r'/  (\d+) matches in', sec)), 4)
+        self.assertIn('ask again with --path <folder>', sec)
+        sec = self.ltq('refs', 'Run', '--compact', '--compact').split(head, 1)[1]
+        self.assertIn('14\n  tools/  13 matches in 1 files\n  tools/gen/  1 matches in 1 files\n', sec)
+        self.assertNotIn('  | ', sec)
+        # --path で絞れば、短い形でもその先の行が並ぶ
+        sec = self.ltq('refs', 'Run', '--compact', '--compact', '--path', 'tools/gen').split(head, 1)[1]
+        self.assertTrue(sec.startswith('1\n'))
+        out = self.ltq('refs', 'Run', '--compact', '--path', 'tools/gen')
+        self.assertIn('  tools/gen/Gen.cs:2  | ', out)
+        self.assertNotIn('build.cmake', out)
+        # --exclude はこの節にも効く
+        self.assertNotIn(head, self.ltq('refs', 'Run', '--exclude', 'tools'))
+
+    def test_unparsed_files_are_listed_line_by_line_in_the_full_output(self):
+        # どの TU も読まないファイルの一致はコードでありうる。全文では 10 行を超えても 1 行ずつ出す(rg と同じ見え方)
+        self.index('index', self.COMMON, [self.COMMENT])
+        os.makedirs(os.path.join(self.root, 'other'))
+        self.write('other/x.cpp', 'void G() {\n' + '  x.Run();\n' * 15 + '}\n', self.t0 - 10)
+        out = self.ltq('refs', 'Run')
+        self.assertIn('read them if they matter: 15\n    other/x.cpp:2  | x.Run();\n', out)
+        self.assertIn('    other/x.cpp:16  | x.Run();\n', out)
+        self.assertNotIn('matches in', out)
+
+    def test_lines_over_the_limit_are_counted_by_folder(self):
+        # --limit で並べきれない行は、フォルダごとの件数で残す(「あと N 行」だけにして、どこにあるか分からない行を作らない)
+        os.makedirs(os.path.join(self.root, 'lib'))
+        self.write('lib/b.cpp', 'void Use() {\n' + '  Run();\n' * 5 + '}\n', self.t0 - 10)
+        os.makedirs(os.path.join(self.root, 'other'))
+        self.write('other/x.cpp', 'void G() {\n' + '  x.Run();\n' * 6 + '}\n', self.t0 - 10)
+        self.write('other/notes.md', 'Run\n' * 4, self.t0 - 10)
+        self.index('index', self.COMMON + [('Run', 'call', 'Use', f'lib/b.cpp:{n}:3', 'Run();') for n in range(2, 7)],
+                   [self.COMMENT], tus=('src/a.cpp', 'lib/b.cpp'))
+        out = self.ltq('refs', 'Run', '--limit', '2')
+        calls = out.split('== calls (resolved by clang): 6\n', 1)[1].split('\n== ', 1)[0]
+        self.assertEqual(len(re.findall(r'^  call   ', calls, re.M)), 2)
+        self.assertIn('  ... 4 more (raise --limit, or ask with --path <folder>), by folder:\n', calls)
+        self.assertEqual(sum(int(n) for n in re.findall(r'/  (\d+) matches in', calls)), 4)
+        self.assertIn('read them if they matter: 6\n    other/x.cpp:2  | x.Run();\n    other/x.cpp:3  | x.Run();\n'
+                      '    other/  4 matches in 1 files\n', out)
+        self.assertIn('  other/notes.md:2  | Run\n  other/  2 matches in 1 files\n', out)
+        self.assertIn('ask again with --path <folder>', out)
+        # いちばん短い形でも同じ: 上限で切れるのは 1 行ずつの行だけで、フォルダごとの件数は必ず残る
+        out = self.ltq('refs', 'Run', '--compact', '--compact', '--limit', '1')
+        self.assertIn('read them if they matter: 6\n    other/x.cpp:2  | x.Run();\n    other/  5 matches in 1 files\n', out)
+        self.assertNotIn('more (raise --limit)\n', out)
+
+    def test_path_limits_the_lines_but_not_the_symbol(self):
+        # --path は並べる行だけを絞る。記号は索引の全体から決める(絞った先に宣言が無くても、同じ記号として引く)
+        os.makedirs(os.path.join(self.root, 'lib'))
+        self.write('lib/b.cpp', 'void Run();\nvoid Use() {\n  Run();\n}\n', self.t0 - 10)
+        self.index('index', self.COMMON + [('Run', 'call', 'Use', 'lib/b.cpp:3:3', 'Run();')], [self.COMMENT],
+                   tus=('src/a.cpp', 'lib/b.cpp'))
+        out = self.ltq('refs', 'Run', '--path', 'lib')
+        self.assertIn('symbol: Run\n', out)
+        self.assertIn('== calls (resolved by clang): 1\n  call   lib/b.cpp:3  [in Use]  | Run();', out)
+        self.assertNotIn('src/a.cpp:', out)
+        out = self.ltq('refs', 'Run', '--path', '.\\LIB\\b.cpp', '--path', 'src/a.cpp')  # 区切りと大文字小文字は問わない。複数可
+        self.assertIn('lib/b.cpp:3', out)
+        self.assertIn('src/a.cpp:3', out)
+        out = self.ltq('refs', 'Run', '--path', 'li')  # フォルダ名の途中までは一致にしない
+        self.assertNotIn('lib/b.cpp:3', out)
+
+    INACTIVE = ('src/a.cpp', 'inactive', '4:1', '6:7')
+    ALT_ROW = ('Run', 'call', 'Main', 'src/a.cpp:5:3', 'Run();')
+
+    def test_alt_rows_are_listed_with_the_condition(self):
+        # 差分パスが無効な #if の中を解析した行(.alt.tsv)は、解決済みの行として並べ、その条件を付ける
+        self.index('index', self.COMMON, [self.COMMENT, self.INACTIVE], alt=[self.ALT_ROW])
+        out = self.ltq('refs', 'Run')
+        self.assertIn('1 lines below are marked [inactive: #if ...]', out)
+        self.assertIn('== calls (resolved by clang): 2', out)
+        self.assertIn('  call   src/a.cpp:5  [in Main]  [inactive: #if defined(DEBUG_ONLY)]  | Run();', out)
+        self.assertNotIn('inside inactive #if', out)  # 索引の行になったので、テキストの一致には残らない
+        self.assertEqual(self.ltq('refs', 'Run', '--compact').count('src/a.cpp:5'), 1)  # 短い形でも省かない
+        out = self.ltq('check', 'src/a.cpp:5')
+        self.assertIn('indexed: call Run at col 3  [in Main]  [inside an inactive #if, parsed with the condition'
+                      ' forced on: #if defined(DEBUG_ONLY)]', out)
+
+    def test_without_alt_file_the_inactive_group_says_so(self):
+        # .alt.tsv が無い索引(古い索引、-NoAlt)では、無効な #if の中は解析されていないと知らせる
+        self.index('index', self.COMMON, [self.COMMENT, self.INACTIVE])
+        out = self.ltq('refs', 'Run')
+        self.assertIn('(no index.tsv.alt.tsv next to the index, so these branches were not parsed;', out)
+        self.assertIn('    src/a.cpp:5  [#if defined(DEBUG_ONLY)]', out)
+        self.index('index', self.COMMON, [self.COMMENT, self.INACTIVE], alt=[])  # 差分パスは走ったが、この行は解析できなかった
+        out = self.ltq('refs', 'Run')
+        self.assertIn('inside inactive #if/#ifdef branches', out)
+        self.assertNotIn('alt.tsv', out)
+
+    def test_alt_row_does_not_duplicate_an_indexed_row(self):
+        # 同じ位置が本体の索引にもあれば、本体の行だけにする(索引の後で差分だけが古くなっても、二重にしない)
+        self.index('index', self.COMMON + [self.ALT_ROW], [self.COMMENT], alt=[self.ALT_ROW])
+        out = self.ltq('refs', 'Run')
+        self.assertIn('== calls (resolved by clang): 2', out)
+        self.assertIn('  call   src/a.cpp:5  [in Main]  | Run();', out)
+        self.assertNotIn('[inactive', out)
+
+    def test_alt_row_is_dropped_when_another_config_compiles_the_line(self):
+        # release では無効で差分パスが解析した行も、debug がコンパイルしていれば debug の行を使う
+        self.index('index', self.COMMON + [self.ALT_ROW], [self.COMMENT])
+        self.index('release', self.COMMON, [self.COMMENT, self.INACTIVE], alt=[self.ALT_ROW])
+        out = self.ltq('refs', 'Run')
+        self.assertIn('  call   src/a.cpp:5  [in Main]  [only in index]  | Run();', out)
+        self.assertNotIn('[inactive', out)
+        # debug がその行で別の記号に解決しているなら、差分の行(条件を無理に有効にした推定)は出さない
+        self.index('index', self.COMMON + [('Other::Run', 'call', 'Main', 'src/a.cpp:5:3', 'Run();')], [self.COMMENT])
+        out = self.ltq('refs', 'Run')
+        self.assertNotIn('[inactive', out)
+        self.assertNotIn('src/a.cpp:5  [in Main]', out.split('== text matches')[0].replace('Other::Run', ''))
+
+    def test_inactive_condition_names_the_branch(self):
+        # 条件は、その行を無効にしている #if の枝を外側から並べる。インクルードガードのように有効な枝は書かない
+        self.write('src/c.h', '#ifndef C_H\n#define C_H\n#if defined(_WIN32)\nvoid W();\n#elif defined(__linux__)\n'
+                              '#  ifdef USE_X\ninline void L() { Run(); }\n#  else\ninline void M() { Run(); }\n#  endif\n'
+                              '#else\ninline void E() { Run(); }\n#endif\n#endif\n', self.t0 - 10)
+        self.index('index', self.COMMON, [self.COMMENT, ('src/c.h', 'inactive', '5:1', '13:7')],
+                   deps={'src/a.cpp': ['src/c.h']})
+        out = self.ltq('refs', 'Run')
+        self.assertIn('    src/c.h:7  [#if defined(__linux__) [and not: defined(_WIN32)] > #if defined(USE_X)]  | inline void L()', out)
+        self.assertIn('    src/c.h:9  [#if defined(__linux__) [and not: defined(_WIN32)] > #if !(defined(USE_X))]  | inline void M()', out)
+        self.assertIn('    src/c.h:12  [#if !(defined(_WIN32)) && !(defined(__linux__))]  | inline void E()', out)
+        self.assertNotIn('C_H', out)
 
     def test_many_files_read_the_ranges_in_one_pass(self):
         # 一致のあったファイルが SKIP_SCAN_FILES を超えると .skip.tsv を 1 回通して読む。1 つずつ引くときと結果が同じこと

@@ -17,6 +17,9 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # python -I ではスクリプトのフォルダが検索パスに入らない
+import ppcond  # noqa: E402
+
 SRC_EXT = {'.h', '.hh', '.hpp', '.hxx', '.c', '.cc', '.cpp', '.cxx', '.inl', '.ipp', '.inc', '.ixx', '.cppm', '.tpp', '.txx',
            '.m', '.mm', '.def'}  # .def: X マクロの一覧(LLVM の *.def など)。DLL の EXPORTS の一覧も、どの TU も読まないファイルとして出る
 TU_EXT = {'.c', '.cc', '.cpp', '.cxx', '.cppm', '.ixx', '.m', '.mm'}  # 単独でコンパイルされうるもの
@@ -26,7 +29,18 @@ MACRO_ROLES = ('macro', 'expand', 'ifdef', 'undef')
 OVERRIDE = 'override'  # 3 列目は呼び出し元ではなく、上書きされる基底のメソッド
 CP_CODECS = {65001: None, 51932: 'euc_jp', 20932: 'euc_jp', 28591: 'latin-1'}  # ほかは cp<番号>
 SKIP_SCAN_FILES = 64  # 範囲を引くファイルがこれより多ければ、.skip.tsv を 1 つずつ find せず、1 回通して読む
-SIDE = ('.tu.tsv', '.skip.tsv', '.deps.tsv')  # 索引本体の隣に ltidx が書くファイル
+ALT = '.alt.tsv'  # 無効な #if の中を仮に有効にして解析した行(scripts/altpass.py が書く。索引本体と同じ形)
+SIDE = ('.tu.tsv', '.skip.tsv', '.deps.tsv', ALT)  # 索引本体の隣に ltidx と altpass が書くファイル
+# C/C++ のソースでないファイルも、名前の一致だけは探す(rg なら出る行を落とさない: C# の生成器・ビルドの定義・文書など)。
+# 中身がテキストでないと分かっている拡張子は開かない。ほかは先頭に NUL があれば飛ばす(rg と同じ見分け方)
+BIN_EXT = {'.obj', '.o', '.a', '.lib', '.dll', '.exe', '.pdb', '.ilk', '.exp', '.pch', '.so', '.dylib', '.idb', '.ipch',
+           '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tif', '.tiff', '.ico', '.dds', '.tga', '.psd', '.exr', '.hdr', '.ktx',
+           '.fbx', '.blend', '.uasset', '.umap', '.pak', '.zip', '.gz', '.7z', '.xz', '.bz2', '.tar', '.pdf',
+           '.wav', '.mp3', '.ogg', '.mp4', '.ttf', '.otf', '.woff', '.woff2', '.class', '.jar', '.pyc', '.pack'}
+OTHER_MAX = 64 << 20  # これより大きいファイルは読まない
+OTHER_LIST = 10  # 短い出力(--compact 1 つ)で、ソースでないファイルの一致を 1 行ずつ並べる数
+COMPACT_LIST = 30  # 短い出力(--compact 1 つ)で、分類ごとに 1 行ずつ並べる数。残りはフォルダごとの件数にする
+COND_MAX = 100  # 無効な行に添える #if の条件の長さ(1 つあたり)
 SEEN_CACHE = '.seen.cache'  # .deps.tsv に載るパスの一覧の写し(ltq が書く)
 READ_CHUNK = 64 << 20
 
@@ -194,10 +208,12 @@ class Index:
         self._roots = None
         self._codec = False
         self._sources = None
+        self._others = None
         self._lines = {}
         self._maps = {}  # (構成名, path) -> 行の付け直しの対応。rows() が作り、skips() も使う
         self._tus = {}
         self._memo = {}
+        self._groups = {}  # path -> ソースの #if の構造(ppcond)。無効な行に、囲む条件を添えるのに使う
 
     def renew(self):
         """ソースから読んだもの(走査・鮮度・ファイルの行・行の付け直し・問い合わせの途中の結果)を捨てる。
@@ -205,9 +221,11 @@ class Index:
         Index を使い回すときに呼ぶ。"""
         self._fresh = None
         self._sources = None
+        self._others = None
         self._lines = {}
         self._maps = {}
         self._memo = {}
+        self._groups = {}
 
     def cached(self, key, make):
         """同じ Index で同じ問い合わせを繰り返すとき(MCP サーバーが結果を短い形で出し直すとき)に、
@@ -311,8 +329,9 @@ class Index:
 
     def rows(self, needles, keep):
         """needles(bytes)のどれかを含み、keep(bytes の行)が真の行だけを
-        (sym, role, caller, path, line, col, src, note, configs) にして返す。
+        (sym, role, caller, path, line, col, src, note, configs, alt) にして返す。
         note は行の付け直しの注記、configs はその行がある構成名の frozenset。
+        alt は、その構成ではコンパイルされない #if の中の行(<索引>.alt.tsv。altpass が、条件を仮に有効にして解析したもの)なら True。
         索引の後に変わったファイルの行は、索引にあるソース行の文字列で今のファイルから探し直す。"""
         merged = {}
         for part in self.parts:
@@ -320,41 +339,49 @@ class Index:
             sb = {p.encode('utf-8') for p in stale}
             anchors, picked = {}, []
             # 変わったファイルの行は、問い合わせに合わなくても行の付け直しの手がかりとして読む
-            for raw in grep_lines(part.path, list(needles) + [b'\t' + p + b':' for p in sb]):
-                hit = keep(raw)
-                if not hit:
-                    q = raw.split(b'\t', 4)
-                    if len(q) < 5 or q[3].rsplit(b':', 2)[0] not in sb:
+            for alt in (False, True):
+                for raw in grep_lines(part.path + (ALT if alt else ''), list(needles) + [b'\t' + p + b':' for p in sb]):
+                    hit = keep(raw)
+                    if not hit:
+                        q = raw.split(b'\t', 4)
+                        if len(q) < 5 or q[3].rsplit(b':', 2)[0] not in sb:
+                            continue
+                    p = raw.split(b'\t', 4)
+                    if len(p) < 5:
                         continue
-                p = raw.split(b'\t', 4)
-                if len(p) < 5:
-                    continue
-                loc = p[3].rsplit(b':', 2)
-                path, src = loc[0].decode('utf-8', 'replace'), p[4].decode('utf-8', 'replace')
-                if path in stale:
-                    anchors.setdefault(path, []).append((int(loc[1]), src))
-                if hit:
-                    picked.append((p, path, int(loc[1]), int(loc[2]), src))
+                    loc = p[3].rsplit(b':', 2)
+                    if alt and not (len(loc) == 3 and loc[1].isdigit() and loc[2].isdigit()):
+                        continue  # 書きかけの行
+                    path, src = loc[0].decode('utf-8', 'replace'), p[4].decode('utf-8', 'replace')
+                    if path in stale:
+                        anchors.setdefault(path, []).append((int(loc[1]), src))
+                    if hit:
+                        picked.append((p, path, int(loc[1]), int(loc[2]), src, alt))
             for path, a in anchors.items():
                 self._set_map(part, path, self._line_map(path, a))
-            for p, path, line, col, src in picked:
+            for p, path, line, col, src, alt in picked:
                 note = ''
                 if path in stale:
                     line, note = self._relocate(part, path, line)
                 k = (p[0].decode('utf-8', 'replace'), p[1].decode(), p[2].decode('utf-8', 'replace'), path, line, col)
-                if k in merged:
+                if k not in merged or (merged[k][3] and not alt):  # 同じ行がコンパイルされる構成にあれば、そちらを採る
+                    merged[k] = [src, note, {part.name}, alt]
+                elif alt and not merged[k][3]:
+                    continue
+                else:
                     merged[k][2].add(part.name)
                     if merged[k][1] and not note:  # 付け直しの要らない(新しい)構成のソース行を採る
                         merged[k][0:2] = [src, note]
-                else:
-                    merged[k] = [src, note, {part.name}]
         # 古い構成で行を推定した参照は、別の構成に同じ参照(行以外が同じ)の確かな行があれば捨てる
         exact = {}
         for k, v in merged.items():
             if not v[1].startswith('line changed'):
                 exact.setdefault(k[:4] + (k[5],), set()).update(v[2])
-        return [k + (v[0], v[1], frozenset(v[2])) for k, v in merged.items()
-                if not (v[1].startswith('line changed') and exact.get(k[:4] + (k[5],), set()) - v[2])]
+        # 無効な #if の中として解析した行は、その行にどれかの構成でコンパイルされた行があれば捨てる(そちらが確か)
+        live = {(k[3], k[4]) for k, v in merged.items() if not v[3]}
+        return [k + (v[0], v[1], frozenset(v[2]), v[3]) for k, v in merged.items()
+                if not (v[1].startswith('line changed') and exact.get(k[:4] + (k[5],), set()) - v[2])
+                and not (v[3] and (k[3], k[4]) in live)]
 
     def skips(self, paths):
         """paths のファイルについて、コメントと無効な #if の範囲を {path: [(kind, (l,c), (l,c), 構成名)]} で返す。
@@ -419,10 +446,35 @@ class Index:
 
     def partial(self, r):
         """その行が、ファイルを読んだ構成の一部にしか無ければ、ある構成名の並び。全部にあれば ''。"""
-        if len(self.parts) < 2:
+        if len(self.parts) < 2 or r[9]:  # 無効な #if の中の行は、どの構成でもコンパイルされていない
             return ''
         saw = {n for n, s in self.seen().items() if r[3] in s} | set(r[8])
         return '' if saw <= r[8] else ', '.join(sorted(r[8]))
+
+    def inactive_cond(self, path, line, ranges):
+        """無効な #if の中の行に添える、囲む条件(`#if A > #if B`。外側から)。ranges は skips() のそのファイルの分。
+        条件は索引に持たず、今のソースから読む。有効な分岐(インクルードガードなど)は外側から除き、
+        無効な分岐から内側だけを並べる。囲む #if が無ければ ''。"""
+        if path not in self._groups:
+            try:
+                with open(os.path.join(self.root, path), 'rb') as f:
+                    data = to_utf8(f.read(), self.codec())
+            except OSError:
+                data = b''
+            comment = set()  # コメントの中の行(コメントの始まりの行は、前にコードがありうるので除かない)
+            for k, b, e, _ in ranges:
+                if k == 'comment':
+                    comment.update(range(b[0] + 1, e[0] + 1))
+            self._groups[path] = ppcond.parse(data, comment)
+        brs = ppcond.enclosing(self._groups[path], line)
+        if not brs:
+            return ''
+        off = [(b[0], e[0]) for k, b, e, _ in ranges if k == 'inactive']
+        first = next((i for i, br in enumerate(brs) if any(b <= br.line_end + 1 <= e for b, e in off)), len(brs) - 1)
+
+        def cut(s):
+            return s if len(s) <= COND_MAX else s[:COND_MAX - 3] + '...'
+        return ' > '.join('#if ' + cut(ppcond.cond_text(br)) for br in brs[first:])
 
     def _tu(self, part):
         """(TU 数, [(エラーのあった TU, 最初のエラー)], TU の主ファイルの集合, {コードページ: TU 数})"""
@@ -505,7 +557,7 @@ class Index:
         """{ルートからの相対パス: (絶対パス, 更新日時)}。ルート配下の C/C++ のソースすべて(. で始まるフォルダを除く)。
         1 回だけ走査する。Windows では scandir の項目が更新日時を持っているので、ファイルごとの stat が要らない。"""
         if self._sources is None:
-            out, todo, n = {}, [self.root], len(self.root) + 1
+            out, other, todo, n = {}, {}, [self.root], len(self.root) + 1
             while todo:
                 try:
                     it = os.scandir(todo.pop())
@@ -517,12 +569,23 @@ class Index:
                             if e.is_dir(follow_symlinks=False):
                                 if not e.name.startswith('.'):
                                     todo.append(e.path)
-                            elif os.path.splitext(e.name)[1].lower() in SRC_EXT:
-                                out[e.path[n:].replace('\\', '/')] = (e.path, e.stat().st_mtime)
+                            else:
+                                ext = os.path.splitext(e.name)[1].lower()
+                                if ext in SRC_EXT:
+                                    out[e.path[n:].replace('\\', '/')] = (e.path, e.stat().st_mtime)
+                                elif ext not in BIN_EXT:
+                                    st = e.stat()
+                                    if 0 < st.st_size <= OTHER_MAX:
+                                        other[e.path[n:].replace('\\', '/')] = (e.path, st.st_mtime)
                         except OSError:
                             continue
-            self._sources = out
+            self._sources, self._others = out, other
         return self._sources
+
+    def others(self):
+        """{ルートからの相対パス: (絶対パス, 更新日時)}。ルート配下の、C/C++ のソースでないファイル(BIN_EXT と大きすぎるものを除く)。"""
+        self.sources()
+        return self._others
 
     def header(self, focus=None):
         """索引の状態。focus(問い合わせの名前を含むファイルの集合)を渡すと、失敗した TU・変わったファイル・新しいファイルは
@@ -624,8 +687,8 @@ def classify_ranges(ranges, line, col, readers):
     return k, (f'  [lines {b[0]}-{e[0]}]' if b[0] != e[0] else '')
 
 
-def walk_sources(idx, excludes):
-    """ルート配下のソースを (相対パス, 絶対パス, 更新日時) で返す。順はフォルダごとに、ファイルを先、サブフォルダを後にする。
+def walk_sources(idx, excludes, files=None):
+    """ルート配下のソース(files を渡せばそのファイル)を (相対パス, 絶対パス, 更新日時) で返す。順はフォルダごとに、ファイルを先、サブフォルダを後にする。
     excludes はディレクトリ名(どこにあっても除く)か、ルートからの相対パスの接頭辞。"""
     pre = tuple(e.strip('/') + '/' for e in excludes if '/' in e)
     names = {e for e in excludes if '/' not in e}
@@ -634,7 +697,7 @@ def walk_sources(idx, excludes):
         *dirs, name = rel.lower().split('/')
         return tuple((1, d) for d in dirs) + ((0, name),)
 
-    for rel, (fp, m) in sorted(idx.sources().items(), key=lambda kv: order(kv[0])):
+    for rel, (fp, m) in sorted((idx.sources() if files is None else files).items(), key=lambda kv: order(kv[0])):
         if pre and rel.startswith(pre):
             continue
         if names and not names.isdisjoint(rel.split('/')[:-1]):
@@ -702,6 +765,43 @@ def text_hits(idx, short, excludes):
     return hits
 
 
+def other_hits(idx, short, excludes):
+    """C/C++ のソースでないファイルの単語一致を (path, line, src) で返す。中身は解析しない(rg と同じく、行を見せるだけ)。"""
+    sb = short.encode('utf-8')
+    pat = re.compile(rb'(?<![A-Za-z0-9_])' + re.escape(sb) + rb'(?![A-Za-z0-9_])')
+
+    def load(chunk):
+        out = []
+        for rel, fp, _ in chunk:
+            try:
+                with open(fp, 'rb') as f:
+                    head = f.read(8192)
+                    if b'\0' in head and head[:2] not in (b'\xff\xfe', b'\xfe\xff'):
+                        continue  # バイナリ
+                    data = head + f.read()
+            except OSError:
+                continue
+            data = to_utf8(data, idx.codec())
+            if sb not in data:
+                continue
+            ln, last = 1, 0
+            for m in pat.finditer(data):
+                pos = m.start()
+                ln += data.count(b'\n', last, pos)
+                last = pos
+                b = data.rfind(b'\n', 0, pos) + 1
+                e = data.find(b'\n', pos)
+                if out and out[-1][:2] == (rel, ln):
+                    continue  # 同じ行の 2 つ目の一致
+                out.append((rel, ln, data[b:e if e >= 0 else len(data)].strip().decode('utf-8', 'replace')[:200]))
+        return out
+
+    items = list(walk_sources(idx, excludes, idx.others()))
+    size = max(1, -(-len(items) // 256))
+    with ThreadPoolExecutor(max_workers=min(16, os.cpu_count() or 4)) as ex:
+        return [x for part in ex.map(load, (items[i:i + size] for i in range(0, len(items), size))) for x in part]
+
+
 def norm_src(s):
     """ソース行の比べ方: 空白をまとめ、行末のコメントを除く(索引とテキスト検索で切り詰め方が違っても揃う)。"""
     return ' '.join(s.split('//', 1)[0].split())[:150]
@@ -716,20 +816,27 @@ def receiver(src, short):
     return re.sub(r'\s+', '', found[0].group(1)) + short
 
 
-def by_dir(items):
-    """[(path, 行の表示)] をディレクトリごとの件数にまとめる。"""
-    agg = {}
-    for path, _ in items:
-        d = path.rsplit('/', 1)[0] if '/' in path else '.'
-        n, files = agg.get(d, (0, set()))
-        files.add(path)
-        agg[d] = (n + 1, files)
-    return [f'{d}/  {n} matches in {len(fs)} files' for d, (n, fs) in sorted(agg.items())]
+def areas(dirs, n=8):
+    """[(フォルダ, 件数)] を、上の階層でまとめた件数にして、多い順に n 個まで 1 行に並べる。全部が同じ階層の下に
+    あるときは、分かれるところまで階層を下りる(--path で絞り直したときに、同じ 1 つの名前に戻らないように)。"""
+    deepest = max(d.count('/') + 1 for d, _ in dirs)
+    depth = 1
+    while True:
+        groups = {}
+        for d, c in dirs:
+            key = '/'.join(d.split('/')[:depth])
+            groups[key] = groups.get(key, 0) + c
+        if len(groups) > 1 or depth >= deepest:
+            break
+        depth += 1
+    top = sorted(groups.items(), key=lambda kv: (-kv[1], kv[0]))
+    return ', '.join(f'{k}/ {c}' for k, c in top[:n]) + (f', ... {len(top) - n} more' if len(top) > n else '')
 
 
 def top_dirs(paths, n):
     """一致のあったファイルのパスを、ディレクトリごとの件数にまとめ、多い順に n 個まで。残りは 1 行の件数にする。
-    名前だけの一致は大きなコードでは数百のフォルダに散り、全部並べると結果の大半を占める(O3DE の Create で 180 フォルダ)。"""
+    名前だけの一致は大きなコードでは数百のフォルダに散り、全部並べると結果の大半を占める(O3DE の Create で 180 フォルダ)。
+    残りのフォルダも、上の階層ごとの件数は出す(どこにも名前の出ない行を作らない。--path にその階層を渡せば続きが出る)。"""
     agg = {}
     for p in paths:
         d = p.rsplit('/', 1)[0] if '/' in p else '.'
@@ -739,12 +846,29 @@ def top_dirs(paths, n):
     top = sorted(agg.items(), key=lambda kv: (-kv[1][0], kv[0]))
     out = [f'{d}/  {c} matches in {len(fs)} files' for d, (c, fs) in top[:n]]
     if len(top) > n:
-        out.append(f'... {len(top) - n} more folders ({sum(c for _, (c, _) in top[n:])} matches)')
+        out.append(f'... {len(top) - n} more folders ({sum(c for _, (c, _) in top[n:])} matches) under: '
+                   + areas([(d, c) for d, (c, _) in top[n:]]))
     return out
 
 
-def fmt(r, show_sym, idx):
-    sym, role, caller, path, line, col, src, note, _ = r
+def path_filter(prefixes):
+    """--path の指定(ルートからの相対の、フォルダかファイル)に入るパスかを見る関数。指定が無ければ None。"""
+    pre = set()
+    for p in prefixes:
+        p = p.replace('\\', '/')
+        while p.startswith('./'):
+            p = p[2:]
+        p = p.strip('/').lower()
+        if p and p != '.':
+            pre.add(p)
+    if not pre:
+        return None
+    dirs = tuple(p + '/' for p in pre)
+    return lambda path: path.lower() in pre or path.lower().startswith(dirs)
+
+
+def fmt(r, show_sym, idx, ranges=None):
+    sym, role, caller, path, line, col, src, note, _, alt = r
     s = f'{role:<6} {path}:{line}'
     if show_sym:
         s += f'  {sym}'
@@ -752,6 +876,9 @@ def fmt(r, show_sym, idx):
         s += f'  [-> {caller}]'  # 名前 1 つに置き換えるマクロの、置き換え後の名前
     elif caller:
         s += f'  [in {caller}]'
+    if alt:  # その構成ではコンパイルされない #if の中。条件を仮に有効にして解析した行
+        cond = idx.inactive_cond(path, line, (ranges or {}).get(path, ()))
+        s += f'  [inactive: {cond}]' if cond else '  [inactive]'
     if note:
         s += f'  [{note}]'
     only = idx.partial(r)
@@ -771,12 +898,21 @@ def closure(start, edges):
     return seen - set(start)
 
 
-def section(title, items, limit):
+def more_by_folder(paths, indent):
+    """上限(--limit)で省いた行を、フォルダごとの件数で出す。件数だけにして、どこにあるか分からない行を作らない
+    (rg なら 1 行ずつ出る行。フォルダが分かれば --path で 1 行ずつ出し直せる)。"""
+    print(f'{indent}... {len(paths)} more (raise --limit, or ask with --path <folder>), by folder:')
+    for s in top_dirs(paths, 10):
+        print(indent + s)
+
+
+def section(title, items, limit, paths):
+    """paths は items と同じ順の、行のあるファイル。"""
     print(f'\n== {title}: {len(items)}')
     for s in items[:limit]:
         print('  ' + s)
     if len(items) > limit:
-        print(f'  ... {len(items) - limit} more (raise --limit)')
+        more_by_folder(paths[limit:], '  ')
 
 
 def cmd_refs(a, idx):
@@ -828,6 +964,14 @@ def cmd_refs(a, idx):
     deps = [r for r in rows if r[0] == '?::' + short]
     syms = sorted({r[0] for r in target})
     show_sym = len(syms) > 1
+    is_macro = all(r[1] in MACRO_ROLES for r in target)  # --path で絞る前に決める(絞って 0 行になっても変わらないように)
+    # --path: 記号は索引の全体から決め、並べる行(索引の行とテキストの一致)だけを、指定のフォルダ・ファイルに絞る。
+    # 短い出力でフォルダごとの件数にまとめた行を、1 行ずつ出し直すのに使う
+    inpath = path_filter(a.path)
+    if inpath:
+        target = [r for r in target if inpath(r[3])]
+        deps = [r for r in deps if inpath(r[3])]
+        hits = [h for h in hits if inpath(h[0])]
     # 修飾名で問われたら、`Scope::Name` と書かれた行は短い形でも省かない(無効な #if の中の呼び出しなど。O3DE の
     # DynamicModuleHandle::Create では、正解 17 のうち 2 つが無効な #if の中にあり、件数にまとめると消えていた)
     tail = re.compile(r'(?<![\w])' + r'\s*::\s*'.join(map(re.escape, parts[-2:])) + r'(?![\w])') if len(parts) > 1 else None
@@ -839,16 +983,23 @@ def cmd_refs(a, idx):
         focus = {h[0] for h in hits if named(h[3])} | {r[3] for r in target + deps}
     idx.header(focus)
     print(f'query: {a.name}')
+    if inpath:
+        print('  (--path: only lines in ' + ', '.join(a.path) + ' are listed and counted)')
     if a.compact:
-        print('  (compact output: comments, inactive #if, strings, and matches that resolve to other symbols are'
-              ' summarized as counts; calls, likely calls'
-              + (f' and lines that spell {"::".join(parts[-2:])}' if tail else '') + ' are listed in full)')
+        # 1 段目は、コードでありうる分類(無効な #if・マクロの定義・読まれていないファイル・その他)を 1 行ずつ並べる。
+        # 2 段目(--compact を 2 つ)は、それもフォルダごとの件数にする
+        print('  (compact output: comments, strings, local names'
+              + (', inactive #if, macro bodies' if a.compact > 1 else '')
+              + ' and matches that resolve to other symbols are summarized as counts; '
+              + (f'calls, likely calls and lines that spell {"::".join(parts[-2:])}' if tail else 'calls and likely calls')
+              + ' are listed in full'
+              + (f', other text matches up to {COMPACT_LIST} per group' if a.compact == 1 else '') + ')')
     if not syms:
         print('  no symbol in the index matches this name.')
     elif show_sym:
         print('  matched symbols: ' + ', '.join(f'{s} ({sum(1 for r in target if r[0] == s)})' for s in syms))
     else:
-        print(f'  symbol: {syms[0]}' + ('  (a macro)' if all(r[1] in MACRO_ROLES for r in target) else ''))
+        print(f'  symbol: {syms[0]}' + ('  (a macro)' if is_macro else ''))
     if renamed:
         print(f'  the macro {short} renames it to {", ".join(sorted(renamed))}; the results below are for that name')
     if aliased:
@@ -871,35 +1022,51 @@ def cmd_refs(a, idx):
         seen.add((r[0], r[3], r[4], r[5]))
         uniq.append(r)
     target = uniq
+    n_alt = sum(1 for r in target + deps if r[9])
+    if n_alt:
+        print(f'  {n_alt} lines below are marked [inactive: #if ...]: code the indexed configuration does not compile, parsed'
+              ' with that condition forced on (best effort). Still code: include them when renaming or changing a signature')
+    # 行ごとの索引の行(at)。テキストの一致のうち索引に行の無いもの(loose)のファイルと、無効な #if の中として解析した行の
+    # ファイルについて、コメント・無効な #if の範囲を引く(下の「索引に無い一致」の分類と、無効な行に添える条件に使う)
+    at = {}
+    for r in rows:
+        at.setdefault((r[3], r[4]), []).append(r)
+    loose = [h for h in hits if (h[0], h[1]) not in at]
+    want = frozenset({h[0] for h in loose} | {r[3] for r in rows if r[9]})
+    ranges = idx.cached(('skips', want), lambda: idx.skips(want))
+
+    def show(r, with_sym):
+        return fmt(r, with_sym, idx, ranges)
+
     calls = [r for r in target if r[1].startswith('call')]
     expands = [r for r in target if r[1] == 'expand']
     defs = sorted((r for r in target if r[1].startswith(DEFS) or r[1] == 'macro'), key=key)
     uses = sorted((r for r in target if not r[1].startswith(('call',) + DEFS) and r[1] not in ('expand', 'macro')), key=key)
-    section('calls (resolved by clang)', [fmt(r, show_sym, idx) for r in calls], a.limit)
+    section('calls (resolved by clang)', [show(r, show_sym) for r in calls], a.limit, [r[3] for r in calls])
     if calls:
         print('  (exact: clang resolved each call from the real type of its receiver, whatever the variable is named)')
     if any(r[1].endswith('-using') for r in target):
         print('  (call-using: a call through a using-declaration inside a template, resolved from its instantiations)')
     if expands:
-        section('macro expansions (where the macro name is written in the code)', [fmt(r, show_sym, idx) for r in expands],
-                a.limit)
+        section('macro expansions (where the macro name is written in the code)', [show(r, show_sym) for r in expands],
+                a.limit, [r[3] for r in expands])
     section('other references (address taken, template arguments, writes, #ifdef, ...)',
-            [fmt(r, show_sym, idx) for r in uses], a.limit)
-    section('definitions and declarations', [fmt(r, show_sym, idx) for r in defs], a.limit)
+            [show(r, show_sym) for r in uses], a.limit, [r[3] for r in uses])
+    section('definitions and declarations', [show(r, show_sym) for r in defs], a.limit, [r[3] for r in defs])
 
     # 基底のポインタや参照越しの呼び出しは、clang が基底のメソッドに解決する。実行時に上書きへ届くかは型次第
     bases, derived = closure(syms, up), closure(syms, down)
     if bases or derived:
         print('\n== virtual dispatch')
     if bases:
-        via = sorted((r for r in rows if r[0] in bases and r[1].startswith('call')), key=key)
+        via = sorted((r for r in rows if r[0] in bases and r[1].startswith('call') and (not inpath or inpath(r[3]))), key=key)
         print(f'  the query overrides {", ".join(sorted(bases))}. Calls to those may run the query at runtime,'
               ' depending on the dynamic type of the receiver; they are not counted above:'
               f' {len(via)}')
-        for s in [fmt(r, True, idx) for r in via][:a.limit]:
+        for s in [show(r, True) for r in via][:a.limit]:
             print('    ' + s)
         if len(via) > a.limit:
-            print(f'    ... {len(via) - a.limit} more (raise --limit)')
+            more_by_folder([r[3] for r in via[a.limit:]], '    ')
     if derived:
         n = sum(1 for r in rows if r[0] in derived and r[1].startswith('call'))
         print(f'  overridden by (calls through a pointer or reference to the query\'s class may run these instead;'
@@ -914,12 +1081,9 @@ def cmd_refs(a, idx):
             print(f'    ... {len(derived) - cap} more overrides (refs <Class>::{short} for one of them)')
 
     # dep 行: テンプレート本体では未解決。実体化で解決された位置は、その解決先を添える
-    at = {}
-    for r in rows:
-        at.setdefault((r[3], r[4]), []).append(r)
     target_pos = {(r[3], r[4]) for r in target}
     def_files = {r[3] for r in defs}
-    dep_lines, dep_dup, dep_other = [], 0, {}
+    dep_lines, dep_paths, dep_dup, dep_other = [], [], 0, {}
     for r in sorted(deps, key=key):
         if (r[3], r[4]) in target_pos:
             dep_dup += 1  # 実体化で対象に解決済み。上の calls に載っている
@@ -934,7 +1098,8 @@ def cmd_refs(a, idx):
             mark = '  (instantiations resolve it to ' + ', '.join(resolved) + ' -> probably not the query)'
         else:
             mark = '  (never instantiated; unknown target' + (', same file as the definition)' if r[3] in def_files else ')')
-        dep_lines.append(fmt(r, False, idx) + mark)
+        dep_lines.append(show(r, False) + mark)
+        dep_paths.append(r[3])
     n_other = sum(dep_other.values())
     print(f'\n== unresolved template calls named "{short}" (dep): {len(dep_lines) + n_other}'
           + (f' (+{dep_dup} already listed in calls)' if dep_dup else ''))
@@ -948,18 +1113,15 @@ def cmd_refs(a, idx):
     for s in dep_lines[:a.limit]:
         print('  ' + s)
     if len(dep_lines) > a.limit:
-        print(f'  ... {len(dep_lines) - a.limit} more (raise --limit)')
+        more_by_folder(dep_paths[a.limit:], '  ')
 
     # テキスト一致のうち、索引に同名の行が無いものの理由
     known = {r[3] for r in rows}
-    loose = [h for h in hits if (h[0], h[1]) not in at]
-    want = frozenset(h[0] for h in loose)
-    ranges = idx.cached(('skips', want), lambda: idx.skips(want))
     parsed = known | set(ranges) | idx.tu_status()[2]
-    tagged = {r[0] for r in target} | {'?::' + short} | bases | derived | ({short} if renamed else set())
+    tagged = set(syms) | {'?::' + short} | bases | derived | ({short} if renamed else set())
     others = {}
     for r in rows:
-        if r[0] not in tagged:
+        if r[0] not in tagged and (not inpath or inpath(r[3])):
             others[r[0]] = others.get(r[0], 0) + 1
     # 索引に無い一致の手がかり: 同じ文面の行か、同じ受け手の式の呼び出しが索引にあれば、clang がそれを何に解決したか
     # (別プラットフォーム向けの写しのようなファイルでは、同じ形の呼び出しが同じ先に解決されることが多い)
@@ -970,7 +1132,7 @@ def cmd_refs(a, idx):
             k = receiver(r[6], short)
             if k:
                 recv.setdefault(k, set()).add(r[0])
-    query_syms = {r[0] for r in target} | bases
+    query_syms = set(syms) | bases
 
     def resolved_like(src):
         """(注記, 見立て)。見立ては 'call'(問い合わせの呼び出しらしい)・'not'(別の記号らしい)・''(手がかり無し)。
@@ -1000,13 +1162,18 @@ def cmd_refs(a, idx):
             # 短い形でも並べる(修飾名がそのまま書かれている)。読まれていないファイルの呼び出しには上の手がかりが付くので、
             # 手がかりの無い無効な #if だけにする(生成物の u8"Scope::Name" のような文字列の行まで並べない)
             verdict = 'named'
+        if k == 'inactive':  # 行の範囲の代わりに、囲む条件を添える(どの構成で有効になるコードかが分かる)
+            cond = idx.inactive_cond(path, line, ranges.get(path, ()))
+            span = f'  [{cond}]' if cond else span
         cats[k].append((path, f'{path}:{line}{span}{"  [file changed after indexing]" if stale else ""}{like}  | {src}', verdict))
 
     print(f'\n== text matches of "{short}" not in the index: '
           f'{sum(len(v) for v in cats.values())} of {len(hits)} word matches')
+    no_alt = [p for p in idx.parts if not os.path.exists(p.path + ALT)]
     groups = [
         ('comment', 'inside comments -> not code; do not report these', False),
-        ('inactive', 'inside inactive #if/#ifdef branches -> not compiled in the indexed configuration', False),
+        ('inactive', 'inside inactive #if/#ifdef branches -> not compiled in the indexed configuration, not resolved;'
+                     ' still code to update when renaming or changing a signature', False),
         ('dropped', 'inside macro arguments the expansion does not keep as code (a disabled assert or log, an attribute'
                     ' marker, # or ##) -> not compiled here, but still written in the source: report them if the question'
                     ' is about where the name is written', False),
@@ -1014,39 +1181,64 @@ def cmd_refs(a, idx):
         ('macro', 'inside macro definitions -> expansions are indexed at the use site', False),
         ('string', 'inside string literals -> not code', True),
         ('directive', 'in #pragma / #include / #error lines -> not code', True),
-        ('unparsed', 'in files no indexed TU includes -> not analyzed; read them if they matter', True),
+        ('unparsed', 'in files no indexed TU includes -> not analyzed; read them if they matter', False),
         ('other', 'other -> not explained by the index; read them if they matter', False),
     ]
+    folded = False
     for k, title, fold in groups:
         items = cats[k]
         if not items:
             continue
+        # one: 1 行ずつ並べる行、rest: フォルダごとの件数にする行のパス。上限(--limit)で並べきれない行も rest に回す
+        # (件数だけにして、どこにあるか分からない行を作らない。フォルダが分かれば --path で 1 行ずつ出し直せる)
+        one, notes, rest, ndirs = [(p, s) for p, s, _ in items], [], [], 10
         print(f'  {title}: {len(items)}')
-        if a.compact and k in ('comment', 'inactive', 'local', 'macro', 'string', 'directive'):
-            # 短い出力: 報告しない分類は、件数の多いフォルダだけ(修飾名がそのまま書かれた無効な #if の中の行は並べる)
-            for s in [s for _, s, v in items if v == 'named'][:a.limit]:
-                print('    ' + s)
-            for s in top_dirs([p for p, _, v in items if v != 'named'], 5):
-                print('    ' + s)
-            continue
-        if a.compact and k != 'dropped':  # 捨てられた引数の行は答えに入りうるので、短い形でもまとめない(下の else)
-            # 短い出力: 問い合わせの呼び出しらしい行と修飾名の行だけを出し、別の記号らしい行は件数に、残りはフォルダごとにまとめる
+        if k == 'inactive' and no_alt:  # 古い索引か、-NoAlt で作った索引
+            print(f'    (no {os.path.basename(no_alt[0].path)}{ALT} next to the index, so these branches were not parsed;'
+                  ' rebuild the index with index-project to resolve the calls in them)')
+        if a.compact and k != 'dropped':  # 捨てられた引数の行は答えに入りうるので、短い形でもまとめない(下の elif)
+            # 短い出力: 問い合わせの呼び出しらしい行と修飾名の行は並べ、別の記号らしい行は件数にする。残りは、
+            # コードではない分類(コメント・文字列・指令・ローカルの名前)ならフォルダごとの件数に、コードでありうる分類
+            # (無効な #if・マクロの定義・読まれていないファイル・その他)なら 1 段目では COMPACT_LIST 行まで並べる
+            # (rg なら 1 行ずつ出る行を、件数だけにしない)。2 段目ではそれもフォルダごとの件数にする
+            low = k in ('comment', 'local', 'string', 'directive') or (a.compact > 1 and k in ('inactive', 'macro'))
             nots = sum(1 for _, _, v in items if v == 'not')
-            lines = [s for _, s, v in items if v in ('call', 'named')]
+            one = [(p, s) for p, s, v in items if v in ('call', 'named')]
             if nots:
-                lines.append(f'{nots} look like calls to other symbols (the same line or receiver resolves elsewhere)')
-            rest = [(p, s) for p, s, v in items if not v]
-            lines += top_dirs([p for p, _ in rest], 10) if len(items) > 10 else [s for _, s in rest]
+                notes.append(f'{nots} look like calls to other symbols (the same line or receiver resolves elsewhere)')
+            plain = [(p, s) for p, s, v in items if not v]
+            keep = 0 if low else COMPACT_LIST if a.compact == 1 else len(plain) if len(items) <= 10 else 0
+            one += plain[:keep]
+            rest, ndirs = [p for p, _ in plain[keep:]], 5 if low else 10
         elif a.compact:  # 短い形の dropped: 答えに入りうるので並べるが、上限に収まるよう 50 行まで
-            lines = [s for _, s, _ in items[:50]] + (top_dirs([p for p, _, _ in items[50:]], 10) if len(items) > 50 else [])
-        elif fold and len(items) > 10:  # 手がかりの付いた行はまとめずに出す
-            lines = [s for _, s, v in items if v] + by_dir([(p, s) for p, s, v in items if not v])
-        else:
-            lines = [s for _, s, _ in items]
-        for s in lines[:a.limit]:
+            one, rest = one[:50], [p for p, _ in one[50:]]
+        elif fold and len(items) > 10:  # 全文でも、コードでない分類は 10 行を超えたらまとめる。手がかりの付いた行はまとめない
+            one = [(p, s) for p, s, v in items if v]
+            rest = [p for p, _, v in items if not v]
+            ndirs = len(rest)
+        rest = [p for p, _ in one[a.limit:]] + rest
+        for _, s in one[:a.limit]:
             print('    ' + s)
-        if len(lines) > a.limit:
-            print(f'    ... {len(lines) - a.limit} more (raise --limit)')
+        for s in notes + (top_dirs(rest, ndirs) if rest else []):
+            print('    ' + s)
+        folded = folded or bool(rest)
+    # C/C++ のソースでないファイルの一致。索引も ltq も中身を解析しないが、rg なら出る行なので、あることは必ず伝える
+    # (名前を変えるなら、生成器・ビルドの定義・スクリプトも直す先になる)
+    extra = idx.cached(('other', short, tuple(sorted(a.exclude))), lambda: other_hits(idx, short, set(a.exclude)))
+    if inpath:
+        extra = [h for h in extra if inpath(h[0])]
+    if extra:
+        print(f'\n== matches of "{short}" in files that are not C/C++ sources (scripts, build files, docs, other languages'
+              f' -> not analyzed; update them too when renaming): {len(extra)}')
+        keep = min(a.limit, len(extra) if not a.compact else OTHER_LIST if a.compact == 1 else 0)
+        for p, ln, src in extra[:keep]:
+            print(f'  {p}:{ln}  | {src}')
+        if extra[keep:]:
+            for s in top_dirs([p for p, _, _ in extra[keep:]], 10 if not a.compact else 5):
+                print('  ' + s)
+            folded = True
+    if folded:
+        print('  (to list the lines of a folder that is shown as a count, ask again with --path <folder>)')
     if others:
         top = sorted(others.items(), key=lambda kv: -kv[1])
         print(f'\n== other symbols named "{short}" (not the query): ' +
@@ -1082,7 +1274,11 @@ def cmd_check(a, idx):
             only = idx.partial(r)
             rel = (f'  [overrides {r[2]}]' if r[1] == OVERRIDE else f'  [-> {r[2]}]' if r[2] and r[1] in ('expand', 'macro')
                    else f'  [in {r[2]}]' if r[2] else '')
-            print(f'  indexed: {r[1]} {r[0]} at col {r[5]}' + rel
+            off = ''
+            if r[9]:
+                cond = idx.inactive_cond(path, line, ranges.get(path, ()))
+                off = '  [inside an inactive #if, parsed with the condition forced on' + (f': {cond}]' if cond else ']')
+            print(f'  indexed: {r[1]} {r[0]} at col {r[5]}' + rel + off
                   + (f'  [{r[7]}]' if r[7] else '') + (f'  [only in {only}]' if only else ''))
         shown = set()
         for k, b, e, n in ranges.get(path, []):
@@ -1101,7 +1297,7 @@ def cmd_check(a, idx):
 
 
 def find_indexes(root):
-    """<root>/.index の中の索引本体(.tu.tsv・.skip.tsv・.deps.tsv 以外の .tsv)すべて。構成ごとに 1 つ置く。
+    """<root>/.index の中の索引本体(.tu.tsv・.skip.tsv・.deps.tsv・.alt.tsv 以外の .tsv)すべて。構成ごとに 1 つ置く。
     index.tsv を先頭にし、残りは名前順。"""
     d = os.path.join(root, '.index')
     if not os.path.isdir(d):
@@ -1137,9 +1333,13 @@ def main(argv=None, idx=None):
     r.add_argument('name', help='qualified name or its suffix, e.g. a::io::File::Read or File::Read')
     r.add_argument('--limit', type=int, default=200, help='max lines per section (default 200)')
     r.add_argument('--exclude', action='append', default=[], help='directory name to skip in the text search')
-    r.add_argument('--compact', action='store_true',
-                   help='summarize low-value sections (comments, inactive #if, strings, template calls resolved to '
-                        'other symbols, matches resolved elsewhere) into counts')
+    r.add_argument('--path', action='append', default=[],
+                   help='list only lines in this folder or file (relative to the root; repeatable). The symbol is still '
+                        'resolved from the whole index. Use it to list a folder that a compact result shows as a count')
+    r.add_argument('--compact', action='count', default=0,
+                   help='summarize low-value sections (comments, strings, local names, template calls resolved to '
+                        'other symbols, matches resolved elsewhere) into counts per folder. Give it twice to also '
+                        'summarize text matches in inactive #if branches, macro bodies and unparsed files')
     c = sub.add_parser('check', help='how the index treats each path:line[:col]')
     c.add_argument('locs', nargs='+')
     a = ap.parse_args(argv)

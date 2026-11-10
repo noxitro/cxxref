@@ -87,6 +87,16 @@ class AutoUpdateTest(unittest.TestCase):
         text = self.refs('Shared')  # 作り直した後は、もう作り直さない
         self.assertNotIn('auto-update', text)
 
+    def test_inactive_code_is_parsed_by_the_rebuild(self):
+        # 作り直しは差分パス(無効な #if の中の解析)まで流す。足した呼び出しが無効な #if の中でも、解決済みの行として出る
+        self.recipe()
+        self.serve(60)
+        self.write('a.cpp', '#include "h.h"\nvoid A() { Shared(); }\n#ifdef FEATURE\nvoid B() { Shared(); }\n#endif\n')
+        text = self.refs('Shared')
+        self.assertIn('auto-update: rebuilt the index', text)
+        self.assertIn('a.cpp:4  [in B]  [inactive: #if defined(FEATURE)]  | void B() { Shared(); }', text)
+        self.assertTrue(os.path.exists(self.index + '.alt.tsv'))
+
     def test_new_tu_is_picked_up(self):
         self.recipe()
         self.serve(30)
