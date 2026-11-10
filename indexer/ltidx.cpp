@@ -80,6 +80,7 @@ static cl::opt<bool> NoLocal("no-local", cl::desc("関数の中の変数・引�
 static cl::opt<bool> Update("update", cl::desc("前回の索引の後に変わった TU だけを解析し直して差し替える"));
 static cl::opt<unsigned> SourceCp("source-cp", cl::desc("UTF-8 でないソースを読むコードページ(既定はこの PC の ANSI コードページ。"
                                                         "TU の /source-charset が優先)"), cl::init(0));
+static cl::opt<std::string> Overlay("overlay", cl::desc("試作: 読むファイルを差し替える表(元のパス<TAB>代わりのファイル)"));
 static cl::list<std::string> Files(cl::Positional, cl::desc("[対象ファイル...](省略時は全 TU)"));
 
 namespace {
@@ -180,10 +181,42 @@ public:
       if (auto It = Cache.find(Key); It != Cache.end()) return It->second;
     }
     std::shared_ptr<const std::string> R;
-    if (auto Buf = FS.getBufferForFile(Abs, -1, false, /*IsVolatile=*/true)) R = convert((*Buf)->getBuffer(), Cp);
+    std::string From = Abs.str().str();
+    bool Replaced = false;
+    if (!Over.empty()) {
+      if (auto It = Over.find(overKey(Abs)); It != Over.end()) {
+        From = It->second;
+        Replaced = true;
+      }
+    }
+    if (auto Buf = FS.getBufferForFile(From, -1, false, /*IsVolatile=*/true)) {
+      R = convert((*Buf)->getBuffer(), Cp);
+      if (!R && Replaced) R = std::make_shared<const std::string>((*Buf)->getBuffer().str());
+    }
     std::lock_guard<std::mutex> L(M);
     return Cache.try_emplace(Key, R).first->second;
   }
+
+  // 試作: 元のパス -> 代わりに読むファイル(「元のパス<TAB>代わりのファイル」の行)
+  bool loadOverlay(llvm::StringRef File) {
+    auto Buf = llvm::MemoryBuffer::getFile(File);
+    if (!Buf) return false;
+    llvm::SmallVector<llvm::StringRef, 16> Lines;
+    (*Buf)->getBuffer().split(Lines, '\n', -1, false);
+    for (llvm::StringRef L : Lines) {
+      auto [A, B] = L.rtrim("\r").split('\t');
+      if (!A.empty() && !B.empty()) Over[overKey(A)] = B.str();
+    }
+    return true;
+  }
+  static std::string overKey(llvm::StringRef P) {
+    llvm::SmallString<260> S(P);
+    llvm::sys::path::remove_dots(S, /*remove_dot_dot=*/true);
+    std::string K = S.str().lower();
+    std::replace(K.begin(), K.end(), '\\', '/');
+    return K;
+  }
+  std::map<std::string, std::string> Over;
 
 private:
   static std::shared_ptr<const std::string> convert(llvm::StringRef B, unsigned Cp) {
@@ -1088,6 +1121,10 @@ int main(int argc, const char **argv) {
   }
   unsigned DefaultCp = SourceCp ? (unsigned)SourceCp : ansiCodepage();
   Transcoder Trans;
+  if (!Overlay.empty() && !Trans.loadOverlay(Overlay)) {
+    llvm::errs() << "overlay を読めない: " << Overlay << "\n";
+    return 2;
+  }
 
   // 書き終えてから差し替える(作っている途中の索引を ltq が読まないように)
   const std::string Outs[] = {Out, Out + ".tu.tsv", Out + ".skip.tsv", Out + ".deps.tsv", Out + ".own.bin"};
