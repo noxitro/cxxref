@@ -120,6 +120,41 @@ class LtqTest(unittest.TestCase):
         out = self.ltq('refs', 'Run')
         self.assertIn('inside inactive #if/#ifdef branches', out)
 
+    def test_inactive_in_some_configs_keeps_other_kinds(self):
+        # debug では捨てられたマクロの引数、release では無効な #if。どの構成でもコンパイルされないので other に落とさない
+        self.index('index', self.COMMON, [self.COMMENT, ('src/a.cpp', 'dropped', '5:3', '5:6')])
+        self.index('release', self.COMMON, [self.COMMENT, ('src/a.cpp', 'inactive', '4:1', '6:7')])
+        out = self.ltq('refs', 'Run')
+        self.assertNotIn('other ->', out)
+        self.assertIn('inside inactive #if', out)
+        # debug でコンパイルされる(どの理由も無い)なら、release の無効な #if だけでは理由にしない
+        self.index('index', self.COMMON, [self.COMMENT])
+        out = self.ltq('refs', 'Run')
+        self.assertIn('other ->', out)
+        # どちらの構成でも捨てられた引数なら dropped
+        self.index('index', self.COMMON, [self.COMMENT, ('src/a.cpp', 'dropped', '5:3', '5:6')])
+        self.index('release', self.COMMON, [self.COMMENT, ('src/a.cpp', 'dropped', '5:3', '5:6')])
+        out = self.ltq('refs', 'Run')
+        self.assertIn('inside macro arguments the expansion does not keep as code', out)
+        # 片方が local なら、無効な #if を外した残りの local で決める
+        self.index('index', self.COMMON, [self.COMMENT, ('src/a.cpp', 'local', '5:3', '5:6')])
+        self.index('release', self.COMMON, [self.COMMENT, ('src/a.cpp', 'inactive', '4:1', '6:7')])
+        out = self.ltq('refs', 'Run')
+        self.assertIn('local variables, parameters or template parameters with this name', out)
+
+    def test_compact_lists_dropped_lines(self):
+        # 捨てられたマクロの引数(属性やログの引数)は答えに入りうるので、短い形でもフォルダの件数にまとめない
+        self.index('index', self.COMMON, [self.COMMENT])
+        skips = [self.COMMENT]
+        for i in range(12):
+            self.write(f'src/m{i}.cpp', 'ATTR(Run())\n', self.t0 - 10)
+            skips.append((f'src/m{i}.cpp', 'dropped', '1:6', '1:9'))
+        self.index('index', self.COMMON, skips, tus=['src/a.cpp'] + [f'src/m{i}.cpp' for i in range(12)])
+        out = self.ltq('refs', 'Run', '--compact')
+        self.assertIn('inside macro arguments the expansion does not keep as code', out)
+        for i in range(12):
+            self.assertIn(f'src/m{i}.cpp:1  | ATTR(Run())', out)
+
     def test_relocate_after_edit(self):
         self.index('index', self.COMMON + [('Run', 'call', 'Main', 'src/a.cpp:5:3', 'Run();')], [self.COMMENT])
         # 先頭に 2 行足し、5 行目(今は 7 行目)を書き換える

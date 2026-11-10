@@ -466,6 +466,53 @@ class LtidxTest(unittest.TestCase):
         self.assertIn('call   a.cpp:10  [in Main]  | return m.GetMessage() + (s ? 1 : 0);', out)
         self.assertIn('decl   m.h:11', out)
         self.assertIn('expand m.h:11  [-> GetMessageW]', self.ltq('refs', 'GetMessage'))
+        self.assertNotIn('GetMessage (', self.ltq('refs', 'Mail::GetMessage').split('other symbols named')[-1])
+
+    def test_macro_rename_chain_and_directive(self):
+        # 置き換え後の名前もマクロなら辿る(windows.h の CreateWindow -> CreateWindowW -> CreateWindowExW の形)。
+        # 指令の行(#include HDR(x))のマクロの引数は構文解析に渡らないので、捨てられた引数にしない
+        self.write('empty.h', '#pragma once\n')
+        self.write('a.cpp', '#define HDR(x) #x\n'
+                            '#include HDR(empty.h)\n'                              # 2
+                            '#define GetObj GetObjW\n'
+                            '#define GetObjW GetObjExW\n'
+                            '#define MakeIt MakeItW\n'
+                            '#define MakeItW(a) MakeItExW(0, a)\n'
+                            'struct Mail { int GetObj(); };\n'                      # 7
+                            'int MakeItExW(int, int);\n'
+                            'int Use(Mail &m) { return MakeIt(5) + m.GetObj(); }\n', [])  # 9
+        rc, err = self.run_ltidx()
+        self.assertEqual(rc, 0, err)
+        with open(os.path.join(self.root, '.index', 'index.tsv.skip.tsv'), encoding='utf-8') as f:
+            self.assertNotIn('\tdropped\t', f.read())
+        self.assertTrue(self.has('GetObj', 'expand', 'a.cpp:7:19', caller='GetObjExW'))
+        self.assertTrue(self.has('MakeIt', 'expand', 'a.cpp:9:27', caller='MakeItExW'))
+        out = self.ltq('refs', 'Mail::GetObj')
+        self.assertIn('the macro GetObj renames it to Mail::GetObjExW', out)
+        self.assertIn('call   a.cpp:9  [in Use]', out)
+        self.assertIn('where the macro MakeIt is expanded, clang sees: MakeItExW (call 1)', self.ltq('refs', 'MakeIt'))
+
+    def test_macro_parameter_is_not_a_rename(self):
+        # 本体の先頭がマクロの引数名(X マクロの X(int)、CALL(fn) の fn(42))なら、置き換え後の名前にしない。
+        # `\` で続く指令の行の中のマクロの引数も、捨てられた引数にしない
+        self.write('empty.h', '#pragma once\n')
+        self.write('a.cpp', '#define CALL(fn) fn(42)\n'
+                            '#define FOR_EACH(X) X(1) X(2)\n'
+                            '#define ID(x) x\n'
+                            'int F(int);\n'
+                            '#define G(v) F(v)\n'
+                            'int Use() { return CALL(F) + G(3); }\n'           # 6
+                            '#define HDR(x) #x\n'
+                            '#include \\\n'
+                            '  HDR(empty.h)\n', [])                            # 9: 指令の続きの行
+        rc, err = self.run_ltidx()
+        self.assertEqual(rc, 0, err)
+        self.assertTrue(self.has('CALL', 'expand', 'a.cpp:6:20', caller=''))
+        self.assertTrue(self.has('CALL', 'macro', 'a.cpp:1:9', caller=''))
+        self.assertTrue(self.has('FOR_EACH', 'macro', 'a.cpp:2:9', caller=''))
+        self.assertTrue(self.has('G', 'expand', 'a.cpp:6:30', caller='F'))  # 引数名でない先頭は置き換え後の名前
+        with open(os.path.join(self.root, '.index', 'index.tsv.skip.tsv'), encoding='utf-8') as f:
+            self.assertNotIn('\tdropped\t', f.read())
 
     def test_macro_edge_cases(self):
         # 関数形式のマクロの本体の呼び出しは「置き換え」ではない。引数に書いたマクロの名前は捨てられた引数にしない。

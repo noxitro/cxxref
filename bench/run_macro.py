@@ -74,9 +74,19 @@ def o3de_restore():
 
 
 def undo_o3de(ws, before):
-    """回の前に無かった変更だけを戻す: 変えられた追跡ファイルは git checkout、増えたファイルは消す"""
+    """回の前に無かった変更だけを戻す: 変えられた追跡ファイルは git checkout、増えたファイルは消す。
+    名前の変更(`R  old -> new`。git mv したもの)は、索引から両方を外して old を戻し、new を消す"""
     for line in status(ws) - before:
-        code, rel = line[:2], line[3:].strip().strip('"')
+        code, rel = line[:2], line[3:].strip()
+        if ' -> ' in rel:
+            old, new = (x.strip().strip('"') for x in rel.split(' -> ', 1))
+            git(ws, 'reset', '-q', '--', old, new)
+            git(ws, 'checkout', '-q', '--', old)
+            fp = os.path.join(ws, new)
+            if os.path.isfile(fp):
+                os.remove(fp)
+            continue
+        rel = rel.strip('"')
         fp = os.path.join(ws, rel)
         if code == '??':
             if os.path.isdir(fp):

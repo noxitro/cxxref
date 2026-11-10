@@ -613,8 +613,11 @@ def classify_ranges(ranges, line, col, readers):
     hit = [(k, b, e, n) for k, b, e, n in ranges
            if in_range((line, col), b, e) or (k == 'inactive' and b[0] <= line <= e[0])]
     hit.sort(key=lambda x: (x[0] != 'comment', x[0] != 'inactive'))
-    if hit and hit[0][0] in ('inactive', 'dropped') and not readers <= {n for k, _, _, n in hit if k == hit[0][0]}:
-        hit = []  # 他の構成ではコンパイルされる(Release でだけ消える assert など)
+    # 無効な #if と捨てられた引数は、そのファイルを読んだすべての構成で、どちらかの理由でコンパイルされないときだけ
+    # (Release でだけ消える assert などは他の構成でコンパイルされる)。そうでなければ両方を外し、残りの種類(local など)で決める
+    off = {n for k, _, _, n in hit if k in ('inactive', 'dropped')}
+    if off and not readers <= off:
+        hit = [h for h in hit if h[0] not in ('inactive', 'dropped')]
     if not hit:
         return None, ''
     k, b, e, _ = hit[0]
@@ -850,10 +853,11 @@ def cmd_refs(a, idx):
         print(f'  the macro {short} renames it to {", ".join(sorted(renamed))}; the results below are for that name')
     if aliased:
         cnt = collections.Counter((r[0], r[1]) for r in aliased)
+        per = collections.Counter(r[0] for r in aliased)
         by = {}
         for (s, role), n in cnt.items():
             by.setdefault(s, []).append(f'{role} {n}')
-        top = sorted(by.items(), key=lambda kv: -sum(int(x.split()[1]) for x in kv[1]))
+        top = sorted(by.items(), key=lambda kv: -per[kv[0]])
         print(f'  where the macro {short} is expanded, clang sees: '
               + ', '.join(f'{s} ({", ".join(v)})' for s, v in top[:10]) + (' ...' if len(top) > 10 else ''))
 
@@ -952,7 +956,7 @@ def cmd_refs(a, idx):
     want = frozenset(h[0] for h in loose)
     ranges = idx.cached(('skips', want), lambda: idx.skips(want))
     parsed = known | set(ranges) | idx.tu_status()[2]
-    tagged = {r[0] for r in target} | {'?::' + short} | bases | derived
+    tagged = {r[0] for r in target} | {'?::' + short} | bases | derived | ({short} if renamed else set())
     others = {}
     for r in rows:
         if r[0] not in tagged:
@@ -1003,8 +1007,9 @@ def cmd_refs(a, idx):
     groups = [
         ('comment', 'inside comments -> not code; do not report these', False),
         ('inactive', 'inside inactive #if/#ifdef branches -> not compiled in the indexed configuration', False),
-        ('dropped', 'inside macro arguments the expansion does not keep as code (a disabled assert or log, # or ##)'
-                    ' -> not compiled as this name in the indexed configuration', False),
+        ('dropped', 'inside macro arguments the expansion does not keep as code (a disabled assert or log, an attribute'
+                    ' marker, # or ##) -> not compiled here, but still written in the source: report them if the question'
+                    ' is about where the name is written', False),
         ('local', 'local variables, parameters or template parameters with this name -> other symbols, not the query', False),
         ('macro', 'inside macro definitions -> expansions are indexed at the use site', False),
         ('string', 'inside string literals -> not code', True),
@@ -1017,14 +1022,14 @@ def cmd_refs(a, idx):
         if not items:
             continue
         print(f'  {title}: {len(items)}')
-        if a.compact and k in ('comment', 'inactive', 'dropped', 'local', 'macro', 'string', 'directive'):
+        if a.compact and k in ('comment', 'inactive', 'local', 'macro', 'string', 'directive'):
             # 短い出力: 報告しない分類は、件数の多いフォルダだけ(修飾名がそのまま書かれた無効な #if の中の行は並べる)
             for s in [s for _, s, v in items if v == 'named'][:a.limit]:
                 print('    ' + s)
             for s in top_dirs([p for p, _, v in items if v != 'named'], 5):
                 print('    ' + s)
             continue
-        if a.compact:
+        if a.compact and k != 'dropped':  # 捨てられた引数の行は答えに入りうるので、短い形でもまとめない(下の else)
             # 短い出力: 問い合わせの呼び出しらしい行と修飾名の行だけを出し、別の記号らしい行は件数に、残りはフォルダごとにまとめる
             nots = sum(1 for _, _, v in items if v == 'not')
             lines = [s for _, s, v in items if v in ('call', 'named')]
@@ -1032,6 +1037,8 @@ def cmd_refs(a, idx):
                 lines.append(f'{nots} look like calls to other symbols (the same line or receiver resolves elsewhere)')
             rest = [(p, s) for p, s, v in items if not v]
             lines += top_dirs([p for p, _ in rest], 10) if len(items) > 10 else [s for _, s in rest]
+        elif a.compact:  # 短い形の dropped: 答えに入りうるので並べるが、上限に収まるよう 50 行まで
+            lines = [s for _, s, _ in items[:50]] + (top_dirs([p for p, _, _ in items[50:]], 10) if len(items) > 50 else [])
         elif fold and len(items) > 10:  # 手がかりの付いた行はまとめずに出す
             lines = [s for _, s, v in items if v] + by_dir([(p, s) for p, s, v in items if not v])
         else:

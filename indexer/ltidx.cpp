@@ -403,7 +403,7 @@ public:
       }
     }
     // 引数の行き先を見るのは、ファイルに書かれた一番外の呼び出しだけ(中の呼び出しの引数は、外の引数のトークンでもある)
-    if (!Args || !Range.getBegin().isFileID() || PP.isParsingIfOrElifDirective()) return;
+    if (!Args || !Range.getBegin().isFileID() || PP.isParsingIfOrElifDirective() || inDirective(Range.getBegin())) return;
     FileID F = SM.getFileID(Range.getBegin());
     if (!W.inRoot(SM, F)) return;
     for (unsigned I = 0, N = Args->getNumMacroArguments(); I < N; ++I) {
@@ -416,6 +416,23 @@ public:
         Pending.push_back(std::move(A));
       }
     }
+  }
+
+  // その位置の行が指令(# で始まる行。#include MACRO(x)・#pragma など)か
+  bool inDirective(SourceLocation L) const {
+    bool Bad = false;
+    llvm::StringRef Buf = SM.getBufferData(SM.getFileID(L), &Bad);
+    if (Bad) return false;
+    unsigned Off = SM.getFileOffset(L);
+    size_t B = Buf.rfind('\n', Off);
+    B = B == llvm::StringRef::npos ? 0 : B + 1;
+    while (B > 0) {  // 前の行が `\` で終わっていれば、その行の続き
+      size_t P = Buf.rfind('\n', B - 1);
+      P = P == llvm::StringRef::npos ? 0 : P + 1;
+      if (!Buf.slice(P, B - 1).rtrim("\r").ends_with("\\")) break;
+      B = P;
+    }
+    return Buf.substr(B, Off - B).ltrim(" \t").starts_with("#");
   }
 
   // 構文解析に渡ったトークンのうち、マクロの引数から来たものの元の位置を覚える(Preprocessor::setTokenWatcher から呼ぶ)
@@ -454,10 +471,21 @@ private:
   };
   static uint64_t key(FileID F, unsigned Off) { return (uint64_t)(unsigned)F.getHashValue() << 32 | Off; }
   // 名前 1 つに置き換えるオブジェクト形式のマクロ(windows.h の #define GetMessage GetMessageW)の、置き換え後の名前
-  static std::string renameOf(const MacroInfo *MI) {
-    if (!MI || !MI->isObjectLike() || MI->getNumTokens() != 1) return "";
-    const Token &T = MI->getReplacementToken(0);
-    return T.is(tok::identifier) && T.getIdentifierInfo() ? T.getIdentifierInfo()->getName().str() : "";
+  // 名前 1 つに置き換えるオブジェクト形式のマクロ、または本体が `別の名前(` で始まる関数形式のマクロ(`#define Foo(x) Foo_impl(x)`)の、
+  // 置き換え後の名前。置き換え後の名前もマクロなら辿る(windows.h の CreateWindow -> CreateWindowW -> CreateWindowExW)。
+  // 関数形式は、置き換え後の名前を呼ぶもの(`Logger::Error(m)` のように :: で始まらない)だけ
+  std::string renameOf(const MacroInfo *MI) const {
+    std::string To;
+    for (int Hop = 0; MI && Hop < 4; ++Hop) {
+      unsigned N = MI->getNumTokens();
+      if (N == 0) break;
+      const Token &T = MI->getReplacementToken(0);
+      if (!T.is(tok::identifier) || !T.getIdentifierInfo() || MI->getParameterNum(T.getIdentifierInfo()) != -1) break;
+      if (MI->isObjectLike() ? N != 1 : !(N >= 2 && MI->getReplacementToken(1).is(tok::l_paren))) break;
+      To = T.getIdentifierInfo()->getName().str();
+      MI = PP.getMacroInfo(T.getIdentifierInfo());
+    }
+    return To;
   }
   void add(const Token &Name, const char *Role, const std::string &To = "") {
     SourceLocation L = Name.getLocation();
