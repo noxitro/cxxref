@@ -4,6 +4,7 @@
 # 構成(Debug/Release、プラットフォームなど)ごとに -Name を変えて作ると、ltq と MCP サーバーはすべてをまとめて引く。
 # -Update を付けると、前回の後に変わったファイルを読む TU・新しい TU・コマンドの変わった TU だけを解析し直す。
 # 作り方を <Name>.tsv.recipe.json に残す。MCP サーバーはそれを使って、ソースが変わると自動で作り直す。
+# 索引ができたら、この構成では無効な #if の中を仮に有効にして解析し、差分を <Name>.tsv.alt.tsv に置く(altpass.py。Python が要る)。
 [CmdletBinding()]  # 知らない引数をエラーにする(黙って捨てない)
 param(
     [string]$Root,                  # ソースのルート(索引のパスの起点。MCP サーバーもここで動かす)
@@ -14,7 +15,8 @@ param(
     [string]$CMakeArgs = '',      # CMake の構成に足す引数。複数は空白で区切って 1 つの文字列に(例: "-DA=1 -DB=2")
     [string]$Name = 'index',        # 索引の名前(構成名)。英数字・_・- のみ
     [int]$Jobs = [Math]::Max(1, [int]([Environment]::ProcessorCount / 2)),
-    [switch]$Update                 # 前回の索引の後に変わった TU だけを解析し直す(初回は全体を作る)
+    [switch]$Update,                # 前回の索引の後に変わった TU だけを解析し直す(初回は全体を作る)
+    [switch]$NoAlt                  # 無効な #if の中の解析(差分パス。altpass.py)をしない
 )
 $ErrorActionPreference = 'Stop'
 # 出力をファイルや別のプロセスへ流すとき(/cxxref-index のログ・MCP サーバーの update.log)は、UTF-8 で色を付けずに書く
@@ -56,7 +58,7 @@ if (-not (Test-Path -LiteralPath "$Root\.index\.gitignore")) {
 $out = "$Root\.index\$Name.tsv"
 # MCP サーバーが、ソースの変更を見つけたときに同じやり方で作り直すための記録(mcp\autoupdate.py が読む)。
 # makeCdb は compile_commands.json を作ったときの make-cdb.ps1 の引数。手元のものを使ったときは null(作り直さない)
-$recipe = [ordered]@{ version = 1; root = $Root; cdb = $Cdb; out = $out; jobs = $Jobs; makeCdb = $mk }
+$recipe = [ordered]@{ version = 1; root = $Root; cdb = $Cdb; out = $out; jobs = $Jobs; makeCdb = $mk; alt = -not $NoAlt }
 $recipe | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath "$out.recipe.json" -Encoding utf8NoBOM
 $t0 = Get-Date
 $ltidxArgs = @('-p', "`"$Cdb`"", '-root', "`"$Root`"", '-o', "`"$out`"", '-j', $Jobs)
@@ -77,5 +79,17 @@ if ($p.ExitCode -eq 1) {
 } elseif ($p.ExitCode -ne 0) {
     "索引を作れませんでした(ltidx の終了コード $($p.ExitCode)。.index\$Name.log を見てください)。前の索引はそのまま残っています"
     exit 2
+}
+# 差分パス: 無効な #if の中の呼び出しや定義を、索引の差分にする。失敗しても索引はできているので、知らせるだけ
+if (-not $NoAlt) {
+    $py = @('python', 'py') | Where-Object { Get-Command $_ -ErrorAction SilentlyContinue } | Select-Object -First 1
+    if (-not $py) {
+        "Python が見つからないので、無効な #if の中の解析(差分パス)を飛ばしました。無効な行は、文字列の一致としてだけ出ます"
+    } else {
+        $t1 = Get-Date
+        & $py -I (Join-Path $PSScriptRoot 'altpass.py') --index $out --ltidx (Resolve-Path -LiteralPath $exe).Path
+        if ($LASTEXITCODE -ne 0) { "無効な #if の中の解析(差分パス)に失敗しました(終了コード $LASTEXITCODE)。索引はできています" }
+        else { "差分パス {0} 秒" -f [int]((Get-Date) - $t1).TotalSeconds }
+    }
 }
 exit 0

@@ -18,6 +18,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.normpath(os.path.join(HERE, '..', 'scripts'))
 MAKE_CDB = os.path.join(SCRIPTS, 'make-cdb.ps1')
+ALTPASS = os.path.join(SCRIPTS, 'altpass.py')
 RECIPE = '.recipe.json'
 
 
@@ -183,6 +184,16 @@ def run_recipe(rec, full, log):
     rc = subprocess.run(args, stdin=subprocess.DEVNULL, stdout=log, stderr=log).returncode
     if rc not in (0, 1):  # 1 は解析にエラーのあった TU がある(索引はできている)
         return f'ltidx exit {rc}'
+    if rec.get('alt', True):
+        # 差分パス(無効な #if の中の解析)。失敗しても索引はできているので、記録に残すだけ
+        log.flush()
+        try:
+            rc = subprocess.run([sys.executable, '-I', ALTPASS, '--index', out, '--ltidx', ltidx],
+                                stdin=subprocess.DEVNULL, stdout=log, stderr=log).returncode
+            if rc != 0:
+                log.write(f'alt pass: exit {rc}\n')
+        except OSError as e:
+            log.write(f'alt pass: {e}\n')
     return None
 
 
