@@ -18,9 +18,11 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 SRC_EXT = {'.h', '.hh', '.hpp', '.hxx', '.c', '.cc', '.cpp', '.cxx', '.inl', '.ipp', '.inc', '.ixx', '.cppm', '.tpp', '.txx',
-           '.m', '.mm'}
+           '.m', '.mm', '.def'}  # .def: X マクロの一覧(LLVM の *.def など)。DLL の EXPORTS の一覧も、どの TU も読まないファイルとして出る
 TU_EXT = {'.c', '.cc', '.cpp', '.cxx', '.cppm', '.ixx', '.m', '.mm'}  # 単独でコンパイルされうるもの
 DEFS = ('def', 'decl')
+# マクロそのものの行(ltidx の役割): #define・展開(名前がファイルに書かれた場所)・#ifdef と defined()・#undef
+MACRO_ROLES = ('macro', 'expand', 'ifdef', 'undef')
 OVERRIDE = 'override'  # 3 列目は呼び出し元ではなく、上書きされる基底のメソッド
 CP_CODECS = {65001: None, 51932: 'euc_jp', 20932: 'euc_jp', 28591: 'latin-1'}  # ほかは cp<番号>
 SKIP_SCAN_FILES = 64  # 範囲を引くファイルがこれより多ければ、.skip.tsv を 1 つずつ find せず、1 回通して読む
@@ -610,9 +612,9 @@ def classify_ranges(ranges, line, col, readers):
     無効な #if は、そのファイルを読んだ構成(readers)のすべてで無効なときだけ inactive にする。"""
     hit = [(k, b, e, n) for k, b, e, n in ranges
            if in_range((line, col), b, e) or (k == 'inactive' and b[0] <= line <= e[0])]
-    hit.sort(key=lambda x: x[0] != 'comment')
-    if hit and hit[0][0] == 'inactive' and not readers <= {n for k, _, _, n in hit if k == 'inactive'}:
-        hit = []  # 他の構成ではコンパイルされる
+    hit.sort(key=lambda x: (x[0] != 'comment', x[0] != 'inactive'))
+    if hit and hit[0][0] in ('inactive', 'dropped') and not readers <= {n for k, _, _, n in hit if k == hit[0][0]}:
+        hit = []  # 他の構成ではコンパイルされる(Release でだけ消える assert など)
     if not hit:
         return None, ''
     k, b, e, _ = hit[0]
@@ -638,6 +640,7 @@ def walk_sources(idx, excludes):
 
 
 DEFINE = re.compile(rb'[ \t]*#[ \t]*define\b')
+DIRECTIVE = re.compile(rb'[ \t]*#[ \t]*(?:pragma|include|include_next|import|error|warning|line|region|endregion)\b')
 
 
 def lexical_hint(data, b, col):
@@ -652,6 +655,8 @@ def lexical_hint(data, b, col):
         b = p
     if DEFINE.match(data, b):
         return 'macro'
+    if DIRECTIVE.match(data, b):  # #pragma region Foo・#include "foo.h"・#error の文など
+        return 'directive'
     return None
 
 
@@ -740,7 +745,9 @@ def fmt(r, show_sym, idx):
     s = f'{role:<6} {path}:{line}'
     if show_sym:
         s += f'  {sym}'
-    if caller:
+    if caller and role in ('expand', 'macro'):
+        s += f'  [-> {caller}]'  # 名前 1 つに置き換えるマクロの、置き換え後の名前
+    elif caller:
         s += f'  [in {caller}]'
     if note:
         s += f'  [{note}]'
@@ -791,13 +798,35 @@ def cmd_refs(a, idx):
             down.setdefault(r[2], set()).add(r[0])
             ov_at.setdefault(r[0], (r[3], r[4]))
     rows = [r for r in rows if r[1] != OVERRIDE]
-    target = [r for r in rows if match(r[0])]
+    parts = [p for p in name.split('::') if p]
+    # 名前を置き換えるマクロ(windows.h の GetMessage -> GetMessageW など)。マクロ short の展開の位置にある、別の名前の行を引く。
+    # 修飾名で問われてその記号が無ければ、同じ修飾の置き換え後の名前の記号を答えにする(Mail::GetMessage -> Mail::GetMessageW)
+    # ltidx は、名前 1 つに置き換えるオブジェクト形式のマクロの展開の行の 3 列目に、置き換え後の名前を書く。その名前で 1 回だけ引き、
+    # 展開の位置にある行を突き合わせる(関数形式のマクロの本体の呼び出しは置き換えではないので見ない)
+    exp_pos = {(r[3], r[4], r[5]) for r in rows if r[0] == short and r[1] == 'expand' and r[2]}
+    to = sorted({r[2] for r in rows if r[0] == short and r[1] == 'expand' and r[2]} - {short})
+    aliased, renamed = [], set()
+    for s in to:
+        b = s.encode('utf-8')
+        got = idx.cached(('rows', s), lambda: [r for r in idx.rows([b + b'\t'], lambda raw: True)
+                                               if r[0].rsplit('::', 1)[-1] == s])
+        aliased += [r for r in got if (r[3], r[4], r[5]) in exp_pos and r[1] not in MACRO_ROLES + (OVERRIDE,)]
+        if len(parts) > 1 and not any(match(r[0]) for r in rows if r[1] not in MACRO_ROLES):
+            scope = '::'.join(parts[:-1])
+            hit = {r[0] for r in got if r[0].rsplit('::', 1)[0] == scope or r[0].rsplit('::', 1)[0].endswith('::' + scope)}
+            renamed |= hit
+            rows += [r for r in got if r[0] in hit and r[1] != OVERRIDE]
+            for r in got:
+                if r[0] in hit and r[1] == OVERRIDE:
+                    up.setdefault(r[0], set()).add(r[2])
+                    down.setdefault(r[2], set()).add(r[0])
+                    ov_at.setdefault(r[0], (r[3], r[4]))
+    target = [r for r in rows if match(r[0]) or r[0] in renamed]
     deps = [r for r in rows if r[0] == '?::' + short]
     syms = sorted({r[0] for r in target})
     show_sym = len(syms) > 1
     # 修飾名で問われたら、`Scope::Name` と書かれた行は短い形でも省かない(無効な #if の中の呼び出しなど。O3DE の
     # DynamicModuleHandle::Create では、正解 17 のうち 2 つが無効な #if の中にあり、件数にまとめると消えていた)
-    parts = [p for p in name.split('::') if p]
     tail = re.compile(r'(?<![\w])' + r'\s*::\s*'.join(map(re.escape, parts[-2:])) + r'(?![\w])') if len(parts) > 1 else None
 
     def named(src):
@@ -816,7 +845,17 @@ def cmd_refs(a, idx):
     elif show_sym:
         print('  matched symbols: ' + ', '.join(f'{s} ({sum(1 for r in target if r[0] == s)})' for s in syms))
     else:
-        print(f'  symbol: {syms[0]}')
+        print(f'  symbol: {syms[0]}' + ('  (a macro)' if all(r[1] in MACRO_ROLES for r in target) else ''))
+    if renamed:
+        print(f'  the macro {short} renames it to {", ".join(sorted(renamed))}; the results below are for that name')
+    if aliased:
+        cnt = collections.Counter((r[0], r[1]) for r in aliased)
+        by = {}
+        for (s, role), n in cnt.items():
+            by.setdefault(s, []).append(f'{role} {n}')
+        top = sorted(by.items(), key=lambda kv: -sum(int(x.split()[1]) for x in kv[1]))
+        print(f'  where the macro {short} is expanded, clang sees: '
+              + ', '.join(f'{s} ({", ".join(v)})' for s, v in top[:10]) + (' ...' if len(top) > 10 else ''))
 
     key = lambda r: (r[3], r[4], r[5], r[1].endswith('-using'))
     # 同じ位置に直接の解決と using 越しの解決があれば、直接のほうだけ残す
@@ -829,14 +868,18 @@ def cmd_refs(a, idx):
         uniq.append(r)
     target = uniq
     calls = [r for r in target if r[1].startswith('call')]
-    uses = sorted((r for r in target if not r[1].startswith(('call',) + DEFS)), key=key)
-    defs = sorted((r for r in target if r[1].startswith(DEFS)), key=key)
+    expands = [r for r in target if r[1] == 'expand']
+    defs = sorted((r for r in target if r[1].startswith(DEFS) or r[1] == 'macro'), key=key)
+    uses = sorted((r for r in target if not r[1].startswith(('call',) + DEFS) and r[1] not in ('expand', 'macro')), key=key)
     section('calls (resolved by clang)', [fmt(r, show_sym, idx) for r in calls], a.limit)
     if calls:
         print('  (exact: clang resolved each call from the real type of its receiver, whatever the variable is named)')
     if any(r[1].endswith('-using') for r in target):
         print('  (call-using: a call through a using-declaration inside a template, resolved from its instantiations)')
-    section('other references (address taken, template arguments, writes, ...)',
+    if expands:
+        section('macro expansions (where the macro name is written in the code)', [fmt(r, show_sym, idx) for r in expands],
+                a.limit)
+    section('other references (address taken, template arguments, writes, #ifdef, ...)',
             [fmt(r, show_sym, idx) for r in uses], a.limit)
     section('definitions and declarations', [fmt(r, show_sym, idx) for r in defs], a.limit)
 
@@ -857,9 +900,14 @@ def cmd_refs(a, idx):
         n = sum(1 for r in rows if r[0] in derived and r[1].startswith('call'))
         print(f'  overridden by (calls through a pointer or reference to the query\'s class may run these instead;'
               f' calls resolved to these, {n}, call the override, not the query):')
-        for d in sorted(derived):
+        # 上書きの一覧は、呼び出し元を聞かれたときには要らないことが多く、大きな階層では結果の大半を占める
+        # (Nox の Object::GetType で 74 行・結果 22 KB の半分)。既定では 10 まで、--limit を下げればそれまで
+        cap = min(a.limit, 10)
+        for d in sorted(derived)[:cap]:
             p, ln = ov_at.get(d, ('?', 0))
             print(f'    {d}  {p}:{ln}')
+        if len(derived) > cap:
+            print(f'    ... {len(derived) - cap} more overrides (refs <Class>::{short} for one of them)')
 
     # dep 行: テンプレート本体では未解決。実体化で解決された位置は、その解決先を添える
     at = {}
@@ -872,7 +920,8 @@ def cmd_refs(a, idx):
         if (r[3], r[4]) in target_pos:
             dep_dup += 1  # 実体化で対象に解決済み。上の calls に載っている
             continue
-        resolved = sorted({x[0] for x in at[(r[3], r[4])] if x[0] != r[0] and not x[1].startswith(DEFS + (OVERRIDE,))})
+        resolved = sorted({x[0] for x in at[(r[3], r[4])]
+                           if x[0] != r[0] and not x[1].startswith(DEFS + (OVERRIDE,)) and x[1] not in MACRO_ROLES})
         if resolved and a.compact:  # 短い出力では、別の記号に解決された行は件数だけにする
             for s in resolved:
                 dep_other[s] = dep_other.get(s, 0) + 1
@@ -936,14 +985,14 @@ def cmd_refs(a, idx):
                 return f'  (`{k}` elsewhere resolves to {s} -> may be a call to the query; check the receiver type)', 'call'
             return f'  (`{k}` elsewhere resolves to {s} -> probably not the query; check the receiver type)', 'not'
         return '', ''
-    cats = {k: [] for k in ('comment', 'inactive', 'unparsed', 'string', 'macro', 'other')}
+    cats = {k: [] for k in ('comment', 'inactive', 'dropped', 'local', 'unparsed', 'string', 'macro', 'directive', 'other')}
     for path, line, col, src, stale, hint in loose:
         readers = {n for n, s in idx.seen().items() if path in s}
         k, span = classify_ranges(ranges.get(path, []), line, col, readers)
         if k is None:
             k = (hint or 'other') if path in parsed else 'unparsed'
         like, verdict = resolved_like(src) if k in ('unparsed', 'other') else ('', '')
-        if k == 'inactive' and named(src):
+        if k in ('inactive', 'dropped') and named(src):
             # 短い形でも並べる(修飾名がそのまま書かれている)。読まれていないファイルの呼び出しには上の手がかりが付くので、
             # 手がかりの無い無効な #if だけにする(生成物の u8"Scope::Name" のような文字列の行まで並べない)
             verdict = 'named'
@@ -954,8 +1003,12 @@ def cmd_refs(a, idx):
     groups = [
         ('comment', 'inside comments -> not code; do not report these', False),
         ('inactive', 'inside inactive #if/#ifdef branches -> not compiled in the indexed configuration', False),
+        ('dropped', 'inside macro arguments the expansion does not keep as code (a disabled assert or log, # or ##)'
+                    ' -> not compiled as this name in the indexed configuration', False),
+        ('local', 'local variables, parameters or template parameters with this name -> other symbols, not the query', False),
         ('macro', 'inside macro definitions -> expansions are indexed at the use site', False),
         ('string', 'inside string literals -> not code', True),
+        ('directive', 'in #pragma / #include / #error lines -> not code', True),
         ('unparsed', 'in files no indexed TU includes -> not analyzed; read them if they matter', True),
         ('other', 'other -> not explained by the index; read them if they matter', False),
     ]
@@ -964,7 +1017,7 @@ def cmd_refs(a, idx):
         if not items:
             continue
         print(f'  {title}: {len(items)}')
-        if a.compact and k in ('comment', 'inactive', 'macro', 'string'):
+        if a.compact and k in ('comment', 'inactive', 'dropped', 'local', 'macro', 'string', 'directive'):
             # 短い出力: 報告しない分類は、件数の多いフォルダだけ(修飾名がそのまま書かれた無効な #if の中の行は並べる)
             for s in [s for _, s, v in items if v == 'named'][:a.limit]:
                 print('    ' + s)
@@ -1020,13 +1073,15 @@ def cmd_check(a, idx):
         multi = len(idx.parts) > 1
         for r in sorted(here, key=lambda r: r[5]):
             only = idx.partial(r)
-            rel = f'  [overrides {r[2]}]' if r[1] == OVERRIDE else f'  [in {r[2]}]' if r[2] else ''
+            rel = (f'  [overrides {r[2]}]' if r[1] == OVERRIDE else f'  [-> {r[2]}]' if r[2] and r[1] in ('expand', 'macro')
+                   else f'  [in {r[2]}]' if r[2] else '')
             print(f'  indexed: {r[1]} {r[0]} at col {r[5]}' + rel
                   + (f'  [{r[7]}]' if r[7] else '') + (f'  [only in {only}]' if only else ''))
         shown = set()
         for k, b, e, n in ranges.get(path, []):
             if (col is not None and in_range((line, col), b, e)) or (col is None and b[0] <= line <= e[0]):
-                what = 'comment' if k == 'comment' else 'inactive #if branch'
+                what = {'comment': 'comment', 'dropped': 'macro argument the expansion does not keep',
+                        'local': 'name of a local variable, parameter or template parameter'}.get(k, 'inactive #if branch')
                 s = f'  inside {what} {b[0]}:{b[1]}-{e[0]}:{e[1]}'
                 s += f'  [{n}]' if multi and k != 'comment' else ''
                 if s not in shown:

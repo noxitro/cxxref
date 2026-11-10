@@ -40,6 +40,9 @@ ltq --index D:\idx\game.tsv --root D:\src\game refs Renderer::Draw
   - `unresolved template calls (dep)`: テンプレート内で解決先が決まらない、同じ名前の呼び出し。実体化で別の記号に解決されている位置には、その解決先を添えます
   - `text matches ... not in the index`: ソースの同じ単語の一致のうち、索引に同名の行が無いもの。理由ごとに分けます(コメント内・無効な `#if`・マクロ定義・文字列・どの TU も含まないファイル・その他)。件数の多い分類はディレクトリごとにまとめます
     - どの TU も含まないファイル(別プラットフォーム向けのコードなど)と「その他」の一致には、索引の中に同じ形の呼び出しがあれば、clang がそれを何に解決したかを添えます。同じ文面の行なら `(the same line text elsewhere ...)`、文面は違うが受け手の式(`g->` など)が同じなら、弱い手がかりとして `` (`g->CreateTexture` elsewhere resolves to ... ; check the receiver type) `` です。解決先が 1 つに揃うときだけ出し、手がかりの付いた行はディレクトリごとにまとめずに出します
+    - 分類に、`dropped`(マクロの展開がコードとして残さない引数。無効にした assert やログ、`#`・`##`)、`local`(同じ名前の関数の中の変数・引数・テンプレートの引数)、`directive`(`#pragma`・`#include`・`#error` の行)があります。`dropped` は `inactive` と同じく、そのファイルを読んだすべての構成で捨てられているときだけそう分類します
+  - マクロの名前で問うと(`ltq refs NOX_ASSERT`)、`#define` を定義の節に、展開(名前が書かれた場所)を `macro expansions` の節に、`#ifdef`・`defined()`・`#undef` をそれ以外の参照の節に出します
+  - 名前を置き換えるマクロ(`windows.h` の `#define GetMessage GetMessageW`)があると、`Mail::GetMessage` のように問われても記号は `Mail::GetMessageW` です。そのときは置き換え後の記号を答え、`the macro GetMessage renames it to Mail::GetMessageW` と添えます
   - `other symbols named ...`: 同じ短い名前の別の記号と件数
   - `--limit N` で 1 節の上限(既定 200)、`--exclude <ディレクトリ名か相対パス>` でテキスト検索から外す場所を指定します
 - `ltq refs <名前> --compact` … 短い形です。呼び出しと「probably a call」の一致はすべて出し、報告しない一致(コメント内・無効な `#if`・文字列・マクロ定義)はフォルダごとの件数に、別の記号に解決されたテンプレートの呼び出しと「probably not the query」の一致は件数にまとめます。MCP サーバーは、結果がクライアントの上限を超えそうなときにこれを使います

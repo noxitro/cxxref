@@ -5,12 +5,15 @@
 // 役割の接尾辞 -using は、テンプレート内の using 宣言越しの参照を、実体化から引いた宣言の先で出したもの。
 // 役割 override は仮想関数の上書き。3 列目は呼び出し元ではなく、上書きされる基底のメソッド。
 // TU ごとの成否は別ファイル(<out>.tu.tsv)に、TU が読んだルート配下のファイルは <out>.deps.tsv に出す。
-// コメントと無効な #if の範囲も別ファイル(<out>.skip.tsv)に出す。テキスト検索の一致が
+// 役割 macro・expand・ifdef・undef は、マクロの #define・展開・#ifdef と defined()・#undef(記号はマクロの名前)。
+// コメントと無効な #if の範囲、展開で捨てられたマクロの引数の範囲(dropped)、関数の中の変数・引数とテンプレートの引数の
+// 名前の位置(local)も別ファイル(<out>.skip.tsv)に出す。テキスト検索の一致が
 // 索引に無い理由を、問い合わせ側(ltq)が答えるのに使う。
 // -update は、前回の索引の後に変わったファイルを読む TU・コマンドの変わった TU・新しい TU だけを解析し直して差し替える。
 // 複数の TU が読むファイルの行の出どころは <out>.own.bin に出す(-update で、解析し直す TU だけが出していた行を消すのに使う)。
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Decl.h"
+#include "clang/AST/DeclTemplate.h"
 #include "clang/AST/ExprCXX.h"
 #include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/Basic/SourceManager.h"
@@ -20,11 +23,13 @@
 #include "clang/Index/IndexDataConsumer.h"
 #include "clang/Index/IndexingAction.h"
 #include "clang/Index/IndexSymbol.h"
+#include "clang/Lex/MacroArgs.h"
 #include "clang/Lex/PPCallbacks.h"
 #include "clang/Lex/Preprocessor.h"
 #include "clang/Tooling/ArgumentsAdjusters.h"
 #include "clang/Tooling/CompilationDatabase.h"
 #include "clang/Tooling/Tooling.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/ConvertUTF.h"
@@ -71,6 +76,7 @@ static cl::opt<bool> NoInst("no-inst", cl::desc("テンプレートの暗黙の�
 static cl::opt<bool> Delayed("delayed", cl::desc("MSVC 向けの既定の遅延テンプレート解析のままにする"
                                                  "(/Zc:twoPhase や -fno-delayed-template-parsing を足さない)"));
 static cl::opt<bool> NoDep("no-dep", cl::desc("テンプレート内の解決できない呼び出し(dep 行)を出さない"));
+static cl::opt<bool> NoLocal("no-local", cl::desc("関数の中の変数・引数とテンプレートの引数の名前の位置(local の範囲)を出さない"));
 static cl::opt<bool> Update("update", cl::desc("前回の索引の後に変わった TU だけを解析し直して差し替える"));
 static cl::opt<unsigned> SourceCp("source-cp", cl::desc("UTF-8 でないソースを読むコードページ(既定はこの PC の ANSI コードページ。"
                                                         "TU の /source-charset が優先)"), cl::init(0));
@@ -318,6 +324,13 @@ public:
   }
 
   // コメント(comment)と無効な #if(inactive)の範囲。path <TAB> 種類 <TAB> line:col <TAB> line:col
+  // 名前のトークン 1 つの範囲。名前がファイルに書かれた位置そのもののときだけ(マクロの本体から来た名前は、使った行に無い)
+  void addName(const SourceManager &SM, SourceLocation Loc, unsigned Len, const char *Kind) {
+    SourceLocation FL = SM.getFileLoc(Loc);
+    if (FL.isInvalid() || FL != SM.getSpellingLoc(Loc)) return;
+    addRange(SM, SourceRange(FL, FL.getLocWithOffset(Len)), Kind);
+  }
+
   void addRange(const SourceManager &SM, SourceRange R, const char *Kind) {
     SourceLocation B = SM.getFileLoc(R.getBegin()), E = SM.getFileLoc(R.getEnd());
     FileID FID = SM.getFileID(B);
@@ -329,6 +342,8 @@ public:
                     std::to_string(SM.getSpellingLineNumber(E)) + ":" +
                     std::to_string(SM.getSpellingColumnNumber(E)));
   }
+
+  bool inRoot(const SourceManager &SM, FileID FID) { return !relPath(SM, FID).empty(); }
 
 private:
   // ルート配下ならルートからの相対パス、それ以外は空
@@ -357,6 +372,110 @@ private:
   RowWriter &W;
 };
 
+// マクロそのものの行: #define(macro)・展開(expand)・#ifdef / defined()(ifdef)・#undef(undef)。記号はマクロの名前。
+// 展開は、名前がファイルに書かれているもの(マクロの引数に書かれたものを含む)だけ。別のマクロの本体の中の展開は、
+// 使った行に名前が無いので出さない(本体の行はテキスト検索が「マクロ定義の中」と分類する)。
+// あわせて、ファイルに書かれた関数形式のマクロの引数のうち、展開後のトークンに残らなかった名前の範囲を
+// dropped として出す(無効にした assert やログの引数、# で文字列にされた・## で貼り合わされた名前)。
+class MacroRefs : public PPCallbacks {
+public:
+  MacroRefs(Preprocessor &PP, RowWriter &W) : PP(PP), SM(PP.getSourceManager()), W(W) {}
+
+  void MacroDefined(const Token &Name, const MacroDirective *MD) override {
+    add(Name, "macro", renameOf(MD ? MD->getMacroInfo() : nullptr));
+  }
+  void MacroUndefined(const Token &Name, const MacroDefinition &, const MacroDirective *) override { add(Name, "undef"); }
+  void Defined(const Token &Name, const MacroDefinition &, SourceRange) override { add(Name, "ifdef"); }
+  void Ifdef(SourceLocation, const Token &Name, const MacroDefinition &) override { add(Name, "ifdef"); }
+  void Ifndef(SourceLocation, const Token &Name, const MacroDefinition &) override { add(Name, "ifdef"); }
+  void Elifdef(SourceLocation, const Token &Name, const MacroDefinition &) override { add(Name, "ifdef"); }
+  void Elifndef(SourceLocation, const Token &Name, const MacroDefinition &) override { add(Name, "ifdef"); }
+
+  void MacroExpands(const Token &Name, const MacroDefinition &MD, SourceRange Range, const MacroArgs *Args) override {
+    add(Name, "expand", renameOf(MD.getMacroInfo()));
+    // 引数に書かれたマクロの名前は、展開されると別のトークンになるので、展開されたこと自体を「引数が使われた」の印にする
+    // (WRAP(ONE) の ONE は残り、引数を捨てる LOG(ERR_CODE) の ERR_CODE は展開されないので捨てられたまま)
+    if (!Pending.empty()) {
+      SourceLocation NL = Name.getLocation(), FL = SM.getFileLoc(NL);
+      if (FL == SM.getSpellingLoc(NL)) {
+        std::pair<FileID, unsigned> D = SM.getDecomposedLoc(FL);
+        if (Files.count(D.first)) Survived.insert(key(D.first, D.second));
+      }
+    }
+    // 引数の行き先を見るのは、ファイルに書かれた一番外の呼び出しだけ(中の呼び出しの引数は、外の引数のトークンでもある)
+    if (!Args || !Range.getBegin().isFileID() || PP.isParsingIfOrElifDirective()) return;
+    FileID F = SM.getFileID(Range.getBegin());
+    if (!W.inRoot(SM, F)) return;
+    for (unsigned I = 0, N = Args->getNumMacroArguments(); I < N; ++I) {
+      Arg A{F, {}};
+      for (const Token *T = Args->getUnexpArgument(I); T->isNot(tok::eof); ++T)
+        if (T->is(tok::identifier) && T->getLocation().isFileID())
+          A.Toks.push_back({SM.getFileOffset(T->getLocation()), T->getLength()});
+      if (!A.Toks.empty()) {
+        Files.insert(F);
+        Pending.push_back(std::move(A));
+      }
+    }
+  }
+
+  // 構文解析に渡ったトークンのうち、マクロの引数から来たものの元の位置を覚える(Preprocessor::setTokenWatcher から呼ぶ)
+  void onToken(const Token &T) {
+    SourceLocation L = T.getLocation();
+    if (Pending.empty() || !L.isMacroID() || !SM.isMacroArgExpansion(L)) return;
+    SourceLocation F = SM.getFileLoc(L);
+    if (F != SM.getSpellingLoc(L)) return;
+    std::pair<FileID, unsigned> D = SM.getDecomposedLoc(F);
+    if (Files.count(D.first)) Survived.insert(key(D.first, D.second));
+  }
+
+  // TU の終わりに、残らなかった名前を、引数ごとに続いている範囲にまとめて出す
+  void flush() {
+    for (const Arg &A : Pending) {
+      size_t I = 0;
+      while (I < A.Toks.size()) {
+        if (Survived.count(key(A.F, A.Toks[I].first))) { ++I; continue; }
+        size_t J = I;
+        while (J + 1 < A.Toks.size() && !Survived.count(key(A.F, A.Toks[J + 1].first))) ++J;
+        SourceLocation B = SM.getComposedLoc(A.F, A.Toks[I].first);
+        SourceLocation E = SM.getComposedLoc(A.F, A.Toks[J].first + A.Toks[J].second);
+        W.addRange(SM, SourceRange(B, E), "dropped");
+        I = J + 1;
+      }
+    }
+    Pending.clear();
+    Survived.clear();
+    Files.clear();
+  }
+
+private:
+  struct Arg {
+    FileID F;
+    std::vector<std::pair<unsigned, unsigned>> Toks;  // 名前のトークンの (ファイル内の位置, 長さ)
+  };
+  static uint64_t key(FileID F, unsigned Off) { return (uint64_t)(unsigned)F.getHashValue() << 32 | Off; }
+  // 名前 1 つに置き換えるオブジェクト形式のマクロ(windows.h の #define GetMessage GetMessageW)の、置き換え後の名前
+  static std::string renameOf(const MacroInfo *MI) {
+    if (!MI || !MI->isObjectLike() || MI->getNumTokens() != 1) return "";
+    const Token &T = MI->getReplacementToken(0);
+    return T.is(tok::identifier) && T.getIdentifierInfo() ? T.getIdentifierInfo()->getName().str() : "";
+  }
+  void add(const Token &Name, const char *Role, const std::string &To = "") {
+    SourceLocation L = Name.getLocation();
+    const IdentifierInfo *II = Name.getIdentifierInfo();
+    // 名前がファイルに書かれた位置そのものだけ(引数として渡されたマクロの名前でも、書かれた場所が別のマクロの本体なら出さない。
+    // gtest の EXPECT_EQ の本体が GTEST_NONFATAL_FAILURE_ を内側のマクロの引数に渡すので、EXPECT_EQ の行に載ってしまう)
+    if (!II || L.isInvalid() || SM.getFileLoc(L) != SM.getSpellingLoc(L)) return;
+    W.add(SM, L, II->getName().str(), Role, To);
+  }
+
+  Preprocessor &PP;
+  const SourceManager &SM;
+  RowWriter &W;
+  std::vector<Arg> Pending;
+  llvm::DenseSet<uint64_t> Survived;
+  llvm::DenseSet<FileID> Files;  // Pending の引数が書かれたファイル
+};
+
 class Comments : public CommentHandler {
 public:
   explicit Comments(RowWriter &W) : W(W) {}
@@ -378,12 +497,22 @@ public:
                             llvm::ArrayRef<index::SymbolRelation> Rels, SourceLocation Loc,
                             ASTNodeInfo) override {
     if (isa<NamespaceDecl>(D) || isa<NamespaceAliasDecl>(D)) return true;  // 雑音なので出さない
+    // 関数の中の変数・引数と、テンプレートの引数は行にせず、名前の位置だけを local の範囲にする。テキスト検索で同じ名前が
+    // 当たったとき(ローカル変数 begin と std::vector::begin など)、ltq が「別の記号」と言えるように(Nox で、理由の付かない
+    // 一致の大半がこれだった)。.skip.tsv は大きくなる(O3DE で 28 MB -> 139 MB)。要らなければ -no-local。
+    // 同じ名前の記号が TU に出てくるものだけに絞ると、ヘッダーの範囲が TU ごとに変わって .own.bin が大きくなり、
+    // 合計ではかえって大きかった(Nox で .skip.tsv 6.9 -> 5.6 MB、.own.bin 1.2 -> 3.6 MB)
+    if (index::isFunctionLocalSymbol(D) || isa<TemplateTypeParmDecl, NonTypeTemplateParmDecl, TemplateTemplateParmDecl>(D)) {
+      if (const auto *ND = dyn_cast<NamedDecl>(D); ND && ND->getIdentifier() && !(Roles & (unsigned)index::SymbolRole::Implicit))
+        W.addName(Ctx->getSourceManager(), Loc, ND->getName().size(), "local");
+      return true;
+    }
     std::string Caller;
     for (const auto &Rel : Rels)
-      if (Rel.Roles & (unsigned)index::SymbolRole::RelationCalledBy) { Caller = qname(Rel.RelatedSymbol); break; }
+      if (Rel.Roles & (unsigned)index::SymbolRole::RelationCalledBy) { Caller = callerName(Rel.RelatedSymbol); break; }
     if (Caller.empty())
       for (const auto &Rel : Rels)
-        if (Rel.Roles & (unsigned)index::SymbolRole::RelationContainedBy) { Caller = qname(Rel.RelatedSymbol); break; }
+        if (Rel.Roles & (unsigned)index::SymbolRole::RelationContainedBy) { Caller = callerName(Rel.RelatedSymbol); break; }
     std::string Role = roleOf(Roles);
     W.add(Ctx->getSourceManager(), Loc, qname(D), Role, Caller);
     // 仮想関数の上書き。基底のポインタ越しの呼び出しは基底のメソッドに解決されるので、ltq が上書きの関係から辿る
@@ -396,12 +525,23 @@ public:
     return true;
   }
 
+  // 呼び出し元の名前。関数の中の変数(static constexpr の定数・gtest の一時変数など)に含まれる参照は、それを囲む関数にする
+  // (関数の中の記号は索引に載らないので、呼び出し元に名前を出しても引けない)
+  static std::string callerName(const Decl *R) {
+    while (R && index::isFunctionLocalSymbol(R) && !isa<FunctionDecl>(R)) {
+      const DeclContext *DC = R->getParentFunctionOrMethod();
+      R = DC ? dyn_cast<Decl>(DC) : nullptr;
+    }
+    return R ? qname(R) : std::string();
+  }
+
   struct Using {
     const UnresolvedUsingValueDecl *U;
     SourceLocation Loc;
     std::string Role, Caller;
   };
   std::vector<Using> Pending;
+
 
 private:
   RowWriter &W;
@@ -500,12 +640,19 @@ public:
   bool BeginSourceFileAction(CompilerInstance &CI) override {
     Preprocessor &PP = CI.getPreprocessor();
     PP.addPPCallbacks(std::make_unique<SkippedRanges>(CI.getSourceManager(), W));
+    auto M = std::make_unique<MacroRefs>(PP, W);
+    Macros = M.get();
+    PP.addPPCallbacks(std::move(M));
+    PP.setTokenWatcher([this](const Token &T) { Macros->onToken(T); });
     PP.addCommentHandler(&C);
     return true;
   }
   void EndSourceFileAction() override {
     CompilerInstance &CI = getCompilerInstance();
     CI.getPreprocessor().removeCommentHandler(&C);
+    CI.getPreprocessor().setTokenWatcher(nullptr);
+    if (Macros) Macros->flush();
+    Macros = nullptr;
     const SourceManager &SM = CI.getSourceManager();
     for (auto It = SM.fileinfo_begin(); It != SM.fileinfo_end(); ++It) {
       std::string Rel;
@@ -516,7 +663,9 @@ public:
   std::unique_ptr<ASTConsumer> CreateASTConsumer(CompilerInstance &CI, llvm::StringRef) override {
     index::IndexingOptions O;
     O.SystemSymbolFilter = index::IndexingOptions::SystemSymbolFilterKind::None;
-    O.IndexFunctionLocals = false;
+    O.IndexFunctionLocals = !NoLocal;  // 行にはせず、local の範囲だけを出す(Consumer)
+    O.IndexParametersInDeclarations = true;
+    O.IndexTemplateParameters = !NoLocal;
     O.IndexImplicitInstantiation = !NoInst;  // DeferIndexingToEndOfTranslationUnit は指定しない
     std::vector<std::unique_ptr<ASTConsumer>> Cs;
     auto C = std::make_shared<Consumer>(W);
@@ -531,6 +680,7 @@ private:
   Output &O;
   RowWriter W;
   Comments C;
+  MacroRefs *Macros = nullptr;  // Preprocessor が持つ
 };
 
 class Factory : public tooling::FrontendActionFactory {
@@ -565,9 +715,13 @@ std::string pathKey(llvm::StringRef P) { return llvm::StringRef(normalize(P)).lo
 
 // TU のコンパイルのコマンド(ディレクトリと引数)と、索引の中身を変える ltidx のオプションのハッシュ。
 // -update で、コマンドの変わった TU を見つける。オプションを変えて -update すると、全 TU を解析し直す
+// 出力の形式の版。行の種類や範囲の種類を足したら上げる(-update が、前の形式で作った TU を解析し直すように)
+// 2: マクロの行(macro・expand・ifdef・undef)と、dropped・local の範囲
+static const char *const FormatVersion = "2";
+
 std::string commandHash(const tooling::CompilationDatabase &Cdb, const std::string &F) {
-  std::string S = pathKey(Root) + '\x1f' + ResourceDir + '\x1f' + std::to_string(SourceCp) + '\x1f' + (NoInst ? "i" : "") +
-                  (Delayed ? "d" : "") + (NoDep ? "n" : "") + '\x1e';
+  std::string S = std::string(FormatVersion) + '\x1f' + pathKey(Root) + '\x1f' + ResourceDir + '\x1f' + std::to_string(SourceCp) + '\x1f' + (NoInst ? "i" : "") +
+                  (Delayed ? "d" : "") + (NoDep ? "n" : "") + (NoLocal ? "l" : "") + '\x1e';
   for (const auto &C : Cdb.getCompileCommands(F)) {
     S += C.Directory + '\x1f';
     for (const auto &A : C.CommandLine) S += A + '\x1f';

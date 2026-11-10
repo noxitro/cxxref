@@ -43,7 +43,8 @@ TOOLS = [
             'translation units (template instantiations included). Use it instead of grep for C++ symbols. Sections: '
             'calls (with the enclosing function; no need to re-check them with grep), other references, definitions, '
             'virtual overrides, unresolved template calls (decide from the line), and text matches of the name that '
-            'are not in the index, with the reason (comment, inactive #if, macro, string, file not analyzed).'),
+            'are not in the index, with the reason (comment, inactive #if, dropped macro argument, local name, macro, '
+            'string, file not analyzed). Macros (#define and expansions) are symbols too.'),
         'inputSchema': {
             'type': 'object',
             'properties': {

@@ -410,6 +410,105 @@ class LtidxTest(unittest.TestCase):
         self.assertTrue(self.has('B', 'def', 'a.cpp:2:6'))
         self.assertEqual(sorted(os.listdir(d)), sorted(names))
 
+    def test_macros(self):
+        # マクロそのもの(#define・展開・#ifdef・#undef)と、展開で捨てられた引数の範囲(dropped)
+        self.write('m.h', '#pragma once\n'
+                          '#define LOG(x) ((void)0)\n'                          # 2: 引数を捨てる
+                          '#define STR(x) #x\n'                                 # 3: 文字列にする
+                          '#define WRAP(x) x\n'                                 # 4: そのまま残す
+                          '#define DECLARE_GETTER(name) int Get##name();\n'     # 5: 貼り合わせる
+                          '#define INNER(v, k) k(v)\n'                          # 6
+                          '#define NESTED(v) Run()\n'                           # 7
+                          '#define OUTER(v) INNER(v, NESTED)\n'                 # 8: 本体が NESTED を内側の引数に渡す
+                          '#define GetMessage GetMessageW\n'                    # 9: 名前を置き換える(windows.h の形)
+                          'void Run();\n'                                       # 10
+                          'struct Mail { int GetMessage(); DECLARE_GETTER(Size) };\n')  # 11
+        self.write('a.cpp', '#include "m.h"\n'
+                            'void Run() {}\n'
+                            'int Main(Mail &m) {\n'
+                            '  LOG(Run());\n'                                   # 4
+                            '  const char *s = STR(Run);\n'                     # 5
+                            '  WRAP(Run());\n'                                  # 6
+                            '  OUTER(1);\n'                                     # 7
+                            '#ifdef LOG\n'                                      # 8
+                            '#endif\n'
+                            '  return m.GetMessage() + (s ? 1 : 0);\n'          # 10
+                            '}\n'
+                            '#undef WRAP\n', [])                                # 12
+        rc, err = self.run_ltidx()
+        self.assertEqual(rc, 0, err)
+        self.assertTrue(self.has('LOG', 'macro', 'm.h:2:9'))
+        self.assertTrue(self.has('LOG', 'expand', 'a.cpp:4:3'))
+        self.assertTrue(self.has('LOG', 'ifdef', 'a.cpp:8:8'))
+        self.assertTrue(self.has('WRAP', 'undef', 'a.cpp:12:8'))
+        self.assertTrue(self.has('OUTER', 'expand', 'a.cpp:7:3'))
+        self.assertFalse(any(r[0] in ('INNER', 'NESTED') and r[1] == 'expand' for r in self.rows()))  # 書かれていない行に載せない
+        self.assertTrue(self.has('Run', 'call', 'a.cpp:7:3'))  # NESTED の本体の呼び出しは、OUTER を使った行
+        self.assertTrue(self.has('Run', 'call', 'a.cpp:6:8'))
+        self.assertTrue(self.has('GetMessage', 'expand', 'm.h:11:19'))
+        self.assertTrue(self.has('Mail::GetMessageW', 'decl', 'm.h:11:19'))
+        with open(os.path.join(self.root, '.index', 'index.tsv.skip.tsv'), encoding='utf-8') as f:
+            dropped = {tuple(l.rstrip('\n').split('\t')) for l in f if '\tdropped\t' in l}
+        # LOG と STR の引数の Run、貼り合わされた Size。WRAP の引数は残るので出さない
+        self.assertEqual(dropped, {('a.cpp', 'dropped', '4:7', '4:10'), ('a.cpp', 'dropped', '5:23', '5:26'),
+                                   ('m.h', 'dropped', '11:48', '11:52')})
+        out = self.ltq('refs', 'Run')
+        self.assertIn('inside macro arguments the expansion does not keep as code', out)
+        self.assertIn('a.cpp:4  | LOG(Run());', out)
+        self.assertNotIn('other ->', out)
+        out = self.ltq('refs', 'LOG')
+        self.assertIn('symbol: LOG  (a macro)', out)
+        self.assertIn('macro  m.h:2  | #define LOG(x) ((void)0)', out)
+        self.assertIn('expand a.cpp:4  | LOG(Run());', out)
+        self.assertIn('ifdef  a.cpp:8  | #ifdef LOG', out)
+        out = self.ltq('refs', 'Mail::GetMessage')  # 置き換え後の Mail::GetMessageW を答える
+        self.assertIn('the macro GetMessage renames it to Mail::GetMessageW', out)
+        self.assertIn('call   a.cpp:10  [in Main]  | return m.GetMessage() + (s ? 1 : 0);', out)
+        self.assertIn('decl   m.h:11', out)
+        self.assertIn('expand m.h:11  [-> GetMessageW]', self.ltq('refs', 'GetMessage'))
+
+    def test_macro_edge_cases(self):
+        # 関数形式のマクロの本体の呼び出しは「置き換え」ではない。引数に書いたマクロの名前は捨てられた引数にしない。
+        # 関数の中の変数・引数・テンプレートの引数は行にせず local の範囲にし、呼び出し元は囲む関数にする
+        self.write('a.cpp', '#define LOG_ERROR(m) Logger::Error(m)\n'
+                            '#define WRAP(x) x\n'
+                            '#define ONE 1\n'
+                            'struct Logger { static void Error(int); };\n'
+                            'struct Box { int v; };\n'
+                            'void begin();\n'
+                            'template <class Compare> int Pick(Compare c) { return c(1); }\n'   # 7
+                            'int Main() {\n'
+                            '  LOG_ERROR(WRAP(ONE));\n'                                          # 9
+                            '  int begin = 2;\n'                                                 # 10
+                            '  static constexpr Box k_box{3};\n'                                 # 11
+                            '  return begin + k_box.v;\n'                                        # 12
+                            '}\n'
+                            '#define DROP(x) ((void)0)\n'
+                            '#define ERR_CODE 5\n'
+                            'void Quiet() { DROP(ERR_CODE); }\n', [])                            # 16
+        rc, err = self.run_ltidx()
+        self.assertEqual(rc, 0, err)
+        with open(os.path.join(self.root, '.index', 'index.tsv.skip.tsv'), encoding='utf-8') as f:
+            skips = [l.rstrip('\n').split('\t') for l in f][1:]
+        # ONE は展開されて 1 になる(捨てられていない)。引数を捨てる DROP の中の ERR_CODE は展開されないので捨てられた引数
+        self.assertEqual([s for s in skips if s[1] == 'dropped'], [['a.cpp', 'dropped', '16:21', '16:29']])
+        self.assertIn(['a.cpp', 'local', '10:7', '10:12'], skips)
+        self.assertIn(['a.cpp', 'local', '12:10', '12:15'], skips)
+        self.assertIn(['a.cpp', 'local', '7:17', '7:24'], skips)  # テンプレートの引数
+        self.assertFalse(any(r[2].endswith('k_box') for r in self.rows()))  # 呼び出し元は関数の中の変数ではなく Main
+        self.assertTrue(self.has('Box', 'ref', 'a.cpp:11:20', caller='Main'))
+        out = self.ltq('refs', 'Logger::LOG_ERROR')
+        self.assertIn('no symbol in the index matches this name', out)
+        self.assertNotIn('renames it', out)
+        out = self.ltq('refs', 'begin')
+        self.assertIn('local variables, parameters or template parameters with this name -> other symbols, not the query: 2', out)
+        self.assertNotIn('other ->', out)
+        self.assertIn('local variables, parameters or template parameters', self.ltq('refs', 'Compare'))
+        rc, err = self.run_ltidx('-no-local')  # 出さないこともできる(.skip.tsv を小さくしたい大きなコード向け)
+        self.assertEqual(rc, 0, err)
+        with open(os.path.join(self.root, '.index', 'index.tsv.skip.tsv'), encoding='utf-8') as f:
+            self.assertNotIn('\tlocal\t', f.read())
+
     def test_sources_stay_writable_while_indexing(self):
         # LLVM は大きいファイルを mmap で読み、Windows ではマップされている間そのファイルに書けない(1224)。
         # 自動更新はエージェントがソースを書き換えている最中にも走るので、解析中もソースへ書けること
