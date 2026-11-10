@@ -14,12 +14,12 @@ param(
     [int]$Rep = 1,
     [string]$Model = 'gpt-6-luna',
     [string]$Round = 'v1',          # 計測の回(v2: dep 行と指示の改善後、v3: ltq)
-    [string]$Index = 'nox.tsv',     # 条件 C・E・F・G で使う索引($IndexDir 配下のファイル名)
+    [string]$Index = 'index.tsv',   # 条件 C・E・F・G で使う索引($IndexDir 配下のファイル名)
     [string]$Workspace = $env:CRI_BENCH_WORKSPACE,  # 解析対象のソースのコピー(.github と .index を書き換える)
     [string]$IndexDir = $env:CRI_BENCH_INDEXDIR,    # ltidx で作った索引の置き場所
     [string]$Cdb = '',              # 条件 F・G・H の自動更新が使う compile_commands.json のフォルダ(既定 <作業フォルダ>\.cdb)
     [string]$Clangd = 'clangd',     # 条件 B・D の clangd
-    [string]$Tasks = 'tasks.json',          # 問題と正解(bench 配下。公開しない別のコードベースの問題は local\tasks-<名前>.json に置く)
+    [string]$Tasks = 'local\tasks-a.json',  # 問題と正解(bench 配下。公開しないコードベースの問題は local\tasks-<名前>.json に置く)
     [string]$Format = 'answer-format.md',   # 回答の書式(bench 配下。local\ に置いたものも指定できる)
     [string]$Serena = $env:CRI_BENCH_SERENA, # 条件 S: Serena を入れたフォルダ(bin\serena.exe と、設定の home\ がある)
     # 'anthropic' で、Copilot の経路ではなく Anthropic API を直接使う(BYOK。従量課金)。$Model は API のモデル名(claude-haiku-5-5 など)。
@@ -29,7 +29,7 @@ param(
     # 条件 I・K・M・N: ほかのツールを入れたフォルダ(ext\*.json の ${TOOLS})、LLVM(${LLVM})、コードベースの名前(${CB}。索引の置き場の名前に使う)
     [string]$ToolsDir = $env:CRI_BENCH_TOOLS,
     [string]$Llvm = $env:CRI_BENCH_LLVM,
-    [string]$Codebase = 'nox',
+    [string]$Codebase = 'a',
     [switch]$DryRun                 # 作業フォルダに条件の設定を置いて、その中身を出すだけ(Copilot は呼ばない)
 )
 $ErrorActionPreference = 'Stop'
@@ -123,10 +123,10 @@ switch ($Cond) {
     'C' {
         New-Item -ItemType Directory "$ws\.github", "$ws\.index" | Out-Null
         Copy-Item "$bench\index-instructions.md" "$ws\.github\copilot-instructions.md"
-        Copy-Item "$IndexDir\$Index" "$ws\.index\nox.tsv"
-        Copy-Item "$IndexDir\$Index.tu.tsv" "$ws\.index\nox.tsv.tu.tsv"
+        Copy-Item "$IndexDir\$Index" "$ws\.index\index.tsv"
+        Copy-Item "$IndexDir\$Index.tu.tsv" "$ws\.index\index.tsv.tu.tsv"
         # コピー直後は読めないことがあった(T4-C-r1 で rg が一致なし)。一度読み切ってから始める
-        Get-FileHash "$ws\.index\nox.tsv" | Out-Null
+        Get-FileHash "$ws\.index\index.tsv" | Out-Null
     }
     'D' {
         # B に「LSP を使え」という指示を足した条件(C と指示の有無をそろえる)
@@ -138,8 +138,8 @@ switch ($Cond) {
         # 段階 2 の CLI。索引(本体・TU・コメントと無効領域)を置き、ltq だけを実行可にする
         New-Item -ItemType Directory "$ws\.github", "$ws\.index" | Out-Null
         Copy-Item "$bench\cli-instructions.md" "$ws\.github\copilot-instructions.md"
-        foreach ($s in '', '.tu.tsv', '.skip.tsv') { Copy-Item "$IndexDir\$Index$s" "$ws\.index\nox.tsv$s" }
-        Get-FileHash "$ws\.index\nox.tsv" | Out-Null
+        foreach ($s in '', '.tu.tsv', '.skip.tsv') { Copy-Item "$IndexDir\$Index$s" "$ws\.index\index.tsv$s" }
+        Get-FileHash "$ws\.index\index.tsv" | Out-Null
         $tools = 'view', 'rg', 'grep', 'glob', 'powershell'
         $allow = 'view', 'rg', 'grep', 'glob', 'shell(ltq)', 'shell(ltq:*)'
     }

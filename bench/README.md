@@ -27,7 +27,7 @@
 
 結果と考察は `../docs/design.md` にあります。問題は 2 つのコードベースで用意しています。
 
-- `tasks.json`: C++ のゲームエンジン [Nox](https://github.com/noxitro/Nox) の問題。回答の書式は `answer-format.md`
+- `tasks.json`: C++ のゲームエンジン [コードベース A](https://github.com/noxitro/コードベース A) の問題。回答の書式は `answer-format.md`
   - T1〜T4: C++ の記号の参照を探す問題
   - R1〜R3: rg のほうが向く問題(プリプロセッサのマクロ、文字列リテラル、`.vcxproj` の設定)。索引を渡したときに、かえって悪くならないかを見ます
   - U1・U2: 索引を作った後にコードを変えてから聞く問題。`edit` に書いた変更を `run.ps1` が実行の前に当て、後で中身と更新日時を元に戻します。U1 は .cpp を 2 つ変え(呼び出しを 1 つ足し、別のファイルで 1 つ消す)、U2 は多くの TU が読むヘッダーの先頭に 2 行足します
@@ -37,7 +37,7 @@
 ## 前提
 
 - Copilot CLI(`copilot`)にサインイン済みであること。既定のモデルは gpt-6-luna です
-- 解析対象の Nox の写し(作業フォルダ)と、その `.cdb\compile_commands.json`。`run.ps1` は作業フォルダの `.github\` と `.index\` を書き換えるので、元のリポジトリではなく写しを使います(下の「計測に使うソースの写し」)
+- 解析対象のコードベース A の写し(作業フォルダ)と、その `.cdb\compile_commands.json`。`run.ps1` は作業フォルダの `.github\` と `.index\` を書き換えるので、元のリポジトリではなく写しを使います(下の「計測に使うソースの写し」)
 - 条件 C・E は、ltidx で作った索引(`<名前>.tsv` と `.tu.tsv`・`.skip.tsv`)
 - 条件 B・D は clangd(`-Clangd` でパスを指定。既定は PATH 上の `clangd`。`batch.ps1` にも同じ `-Clangd` があります)
   - clangd の索引(`<作業フォルダ>\.cdb\.cache\clangd\index`)を、計測の前にそろえておきます。`python -I clangd_warm.py <clangd.exe> <写し>` が `re-indexed TUs: 0 (ready)` と出るまで流します(初回は数分。索引がそろっていないと、Copilot の clangd が計測の途中で索引を作り直し、参照が欠けます)
@@ -45,17 +45,17 @@
 ## 使い方
 
 ```powershell
-$env:CRI_BENCH_WORKSPACE = 'D:\work\nox-copy'   # 作業フォルダ
+$env:CRI_BENCH_WORKSPACE = 'D:\work\a-copy'   # 作業フォルダ
 $env:CRI_BENCH_INDEXDIR  = 'D:\work\index'      # 索引の置き場所
 pwsh -File run.ps1 -Cond A -TaskId T3 -Rep 1
-pwsh -File run.ps1 -Cond E -TaskId T3 -Rep 1 -Round v3 -Index nox-v3.tsv
+pwsh -File run.ps1 -Cond E -TaskId T3 -Rep 1 -Round v3 -Index a-v3.tsv
 python -I collect.py .
 # 別のコードベースの問題は、問題ファイルと書式を指定する(local\ に置いたもの)
 pwsh -File run.ps1 -Cond G -TaskId E2 -Rep 1 -Round v5 -Index b-v5.tsv -Tasks local\tasks-b.json -Format local\answer-format-b.md
 # 問題 × 条件 × 回数をまとめて流す(終わった回は飛ばすので、止まっても同じコマンドで続きから流せる)
-pwsh -File batch.ps1 -Round v6 -TaskIds T1,T2,T3,T4 -Conds A,F,G -Reps 5 -Index nox-v6.tsv -Digest <指紋>
+pwsh -File batch.ps1 -Round v6 -TaskIds T1,T2,T3,T4 -Conds A,F,G -Reps 5 -Index a-v6.tsv -Digest <指紋>
 # 自動更新だけを、Copilot を使わずに測る(MCP サーバーを直接起動して、edit を当ててから refs を呼ぶ)
-python -I autoupdate_bench.py --workspace <写し> --index <索引.tsv> --reps 5 U1=nox::JobSystem::Initialize U2=nox::detail::IDelegateBase::Reset
+python -I autoupdate_bench.py --workspace <写し> --index <索引.tsv> --reps 5 U1=a::JobSystem::Initialize U2=a::detail::IDelegateBase::Reset
 ```
 
 - `run.ps1` は、条件ごとの `.github\`(と `.index\`)を作業フォルダに置き直してから、1 問を実行します
@@ -76,16 +76,16 @@ v13 は、`run.ps1` とは別の台本(`run13.py`・`batch13.py`・`score13.py`)
 
 - 条件は A(なし)・P(マーケットプレイスから入れた v0.5.1)・M(MCP だけを `--additional-mcp-config` で渡し、rule は無し)・X(P に `v13\adverse-instructions.md` を足したもの)です。どれも空の `COPILOT_HOME` から始め、道具は既定の一式(編集と shell を含む)を渡します。パッケージの導入・ビルド・ネットワークのコマンドだけを `--deny-tool` で止めます
 - 作業フォルダは git で管理した写しで、各回の前に `git checkout`・`git clean` で元に戻し、変更は差分(`runs13\<名前>.diff`)に残します
-- 問題は `v13\tasks-stage1.json`(Python・C#・TypeScript と索引の無い Nox、各 3 問)と `v13\tasks-stage2.json`(Nox の 8 問)です。対象は `v13\sample.py`・`v13\sample2.py` が乱数で選びます。段階 2 の正解は、宣言と定義に引数を足した中身を VFS の overlay で差し替えて `clang-cl /Zs` にかけ、新しく出たエラーの位置から作ります(`v13\cxxcheck.py`)
+- 問題は `v13\tasks-stage1.json`(Python・C#・TypeScript、各 3 問)と、公開していない `local\v13-tasks-stage1-a.json`(索引の無いコードベース A の 3 問)・`local\v13-tasks-stage2-a.json`(コードベース A の 8 問)です。対象は `v13\sample.py`・`v13\sample2.py` が乱数で選びます。段階 2 の正解は、宣言と定義に引数を足した中身を VFS の overlay で差し替えて `clang-cl /Zs` にかけ、新しく出たエラーの位置から作ります(`v13\cxxcheck.py`)
 - 条件 Q は、P の rule と ltidx だけを直した版に差し替えたものです(`run13.py` の冒頭)。段階 2 の測り直し(`--round v13q`)で使いました
-- 採点は `python -I score13.py --tasks v13\tasks-stage2.json --compile` です。`--compile` は、差分を当てた中身で同じ構文チェックをかけ、元には無いエラーが出ないかを見ます(最低の優先度・4 並列)。`batch13.py` は、終わった回を飛ばし、`runs13\STOP` があれば次の回の前に止まります
+- 採点は `python -I score13.py --tasks local\v13-tasks-stage2-a.json --compile` です。`--compile` は、差分を当てた中身で同じ構文チェックをかけ、元には無いエラーが出ないかを見ます(最低の優先度・4 並列)。`batch13.py` は、終わった回を飛ばし、`runs13\STOP` があれば次の回の前に止まります
 - 入力トークンの比と信頼区間は `ratio13.py` で出します(問題ごとに平均どうしの比を取り、幾何平均と中央値にまとめ、問題と回を引き直す 2 段の bootstrap)
 - `trace13.py <回の名前>` は、1 回の実行で使った道具を、モデルの呼び出しごとの 1 行にして出します(`../docs/benchmarks.md` の「動きの例」)
 
 ```powershell
-python -I batch13.py --tasks v13/tasks-stage2.json --conds A,P,M,X --reps 5 --round v13
-python -I score13.py --tasks v13/tasks-stage2.json --compile
-python -I ratio13.py --round v13 --tasks v13/tasks-stage2.json --conds A,P,M,X
+python -I batch13.py --tasks local/v13-tasks-stage2-a.json --conds A,P,M,X --reps 5 --round v13
+python -I score13.py --tasks local/v13-tasks-stage2-a.json --compile
+python -I ratio13.py --round v13 --tasks local/v13-tasks-stage2-a.json --conds A,P,M,X
 python -I trace13.py v13q-C2-createinstance-Q-r4
 ```
 
@@ -95,7 +95,7 @@ python -I trace13.py v13q-C2-createinstance-Q-r4
 
 | 写し | 場所(手元) | 指紋(SHA-256) |
 |---|---|---|
-| Nox(2026-11-03 の作業ツリー。未コミットの変更を含む) | `E:\dev\bench-data\cxxref\nox-20261103` | `d15d190d64f53034e5312f6d669708b9a3b6a44b5650cd43687759b8d6598e6a`(1,764 ファイル) |
+| コードベース A(2026-11-03 の作業ツリー。未コミットの変更を含む) | `E:\dev\bench-data\cxxref\` の下(フォルダ名は伏せます。`local\codebase-a.json` に書く) | `d15d190d64f53034e5312f6d669708b9a3b6a44b5650cd43687759b8d6598e6a`(1,764 ファイル) |
 | コードベース B | `E:\dev\bench-data\cxxref\b` | `58c865fb54c9a4c1d3a01cd500bba354c32c0b2b8371f7966becddcc02f3d805`(1,667 ファイル) |
 | コードベース C(X86 だけを、アサーションありの Release で構成) | `E:\dev\bench-data\cxxref\` の下(フォルダ名は伏せます) | `bbacd634c6ad35de17a2f16becc3f5822bfbf4c206ad9a04359a035636338bb1`(10,338 ファイル) |
 | O3DE 2605.0(`3db6943`。Ninja・profile・unity build なし・テストなしで構成。`build/` は `.snapshot-exclude` で指紋から除く) | `E:\dev\bench-data\cxxref\o3de-src` | `d26eea97d767cecd8a24c030e1cc8833f1ef269b8e03ef0d210cb134ac50254a`(29,950 ファイル) |
@@ -114,4 +114,4 @@ UE5 5.8.4(`5.8.4-release`、`f45729c0b`)の写しは、Epic のアカウント�
 ## 注意
 
 - 実行のたびに Copilot の credits を消費します(gpt-6-luna で 1 問 0.1〜0.7 credits)
-- 正解の行番号は、上の写しに対するものです。今の Nox では行がずれています
+- 正解の行番号は、上の写しに対するものです。今のコードベース A では行がずれています

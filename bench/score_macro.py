@@ -1,6 +1,6 @@
 """run_macro.py の回を採点してまとめる。回答の中の path:line を正解と突き合わせる(行は完全一致)。
 
-usage: python -I score_macro.py [--round mac1] [--tasks v13/tasks-macro.json]
+usage: python -I score_macro.py [--round mac1] [--tasks v13/tasks-macro.json --tasks local/v13-tasks-macro-a.json]
 """
 import argparse
 import collections
@@ -23,9 +23,10 @@ def locs(text):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--round', default='mac1')
-    ap.add_argument('--tasks', default='v13/tasks-macro.json')
+    ap.add_argument('--tasks', action='append', help='問題のファイル(繰り返せる。既定は v13/tasks-macro.json と、あれば local の分)')
     a = ap.parse_args()
-    tasks = {t['id']: t for t in json.load(open(os.path.join(BENCH, a.tasks), encoding='utf-8'))}
+    files = [f for f in (a.tasks or ['v13/tasks-macro.json', 'local/v13-tasks-macro-a.json']) if os.path.exists(os.path.join(BENCH, f))]
+    tasks = {t['id']: t for f in files for t in json.load(open(os.path.join(BENCH, f), encoding='utf-8'))}
     recs = [json.loads(l) for l in open(os.path.join(BENCH, 'runs-macro', 'index.jsonl'), encoding='utf-8')]
     recs = [r for r in recs if r['round'] == a.round and r['task'] in tasks]
     by = collections.defaultdict(list)

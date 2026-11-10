@@ -7,7 +7,7 @@ import collections, json, os, re, sqlite3, statistics, sys
 
 bench = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else os.path.dirname(__file__))
 home = os.path.expanduser("~/.copilot")
-# tasks.json(Nox)と tasks-<名前>.json(別のコードベース。公開しないものは local\ に置く)。id はファイルをまたいで一意にする
+# tasks.json と tasks-<名前>.json(公開しないコードベースのものは local\ に置く)。id はファイルをまたいで一意にする
 tasks, task_src = {}, {}
 for d in (bench, os.path.join(bench, "local")):
     for fn in sorted(os.listdir(d)) if os.path.isdir(d) else []:

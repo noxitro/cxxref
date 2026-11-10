@@ -527,7 +527,7 @@ class Index:
     def header(self, focus=None):
         """索引の状態。focus(問い合わせの名前を含むファイルの集合)を渡すと、失敗した TU・変わったファイル・新しいファイルは
         focus に入るものだけを並べ、残りは件数にする。refs のたびに出るので、関係の無いファイルまで並べると結果の多くを占める
-        (Nox で 4.6 KB のうち 1.9 KB)。結果の行はどれも focus のファイルにあるので、残りは結果に関わらない。"""
+        (コードベース A で 4.6 KB のうち 1.9 KB)。結果の行はどれも focus のファイルにあるので、残りは結果に関わらない。"""
         def split(items, path_of):
             if focus is None:
                 return items, []
@@ -905,7 +905,7 @@ def cmd_refs(a, idx):
         print(f'  overridden by (calls through a pointer or reference to the query\'s class may run these instead;'
               f' calls resolved to these, {n}, call the override, not the query):')
         # 上書きの一覧は、呼び出し元を聞かれたときには要らないことが多く、大きな階層では結果の大半を占める
-        # (Nox の Object::GetType で 74 行・結果 22 KB の半分)。既定では 10 まで、--limit を下げればそれまで
+        # (コードベース A の Object::GetType で 74 行・結果 22 KB の半分)。既定では 10 まで、--limit を下げればそれまで
         cap = min(a.limit, 10)
         for d in sorted(derived)[:cap]:
             p, ln = ov_at.get(d, ('?', 0))
@@ -1134,7 +1134,7 @@ def main(argv=None, idx=None):
                                    '(default: the nearest folder with .index, from . upward)')
     sub = ap.add_subparsers(dest='cmd', required=True)
     r = sub.add_parser('refs', help='references, definitions, unresolved template calls, and why text matches are missing')
-    r.add_argument('name', help='qualified name or its suffix, e.g. nox::io::File::Read or File::Read')
+    r.add_argument('name', help='qualified name or its suffix, e.g. a::io::File::Read or File::Read')
     r.add_argument('--limit', type=int, default=200, help='max lines per section (default 200)')
     r.add_argument('--exclude', action='append', default=[], help='directory name to skip in the text search')
     r.add_argument('--compact', action='store_true',

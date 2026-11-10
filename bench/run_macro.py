@@ -12,7 +12,7 @@ usage: python -I run_macro.py --task MT1-assert-kernel --cond N --rep 1 [--round
   サーバーには索引の場所を直接渡し(--index)、自動更新は切る(問題はどれも読むだけ)。
 
 作業フォルダ
-  nox: git で管理した写し。前と後に git checkout と git clean で戻す(run13.py と同じ)
+  a: コードベース A(bench/local/codebase-a.json の場所)。git で管理した写し。前と後に git checkout と git clean で戻す(run13.py と同じ)
   o3de: 前の計測が残した設定(.github/copilot-instructions.md・.mcp.json・.serena)を、最初の回で o3de-aside に退避する
         (--restore-o3de で戻す)。回の後は、回の前に無かった変更だけを戻す(元の写しは .github の一部を消してある)
 """
@@ -36,15 +36,18 @@ RUNS = os.path.join(BENCH, 'runs-macro')
 OLD_REPO = os.path.join(V13, 'repo-ecd4819')
 LTIDX = {'O': os.path.join(V13, 'ltidx-ecd4819', 'ltidx.exe'), 'N': os.path.join(V13, 'ltidx-macro', 'ltidx.exe')}
 WS = {
-    'nox': {'path': os.path.join(DATA, 'nox-20261103'), 'clean': ['.github', '.mcp.json', '.serena'],
-            'index': {'O': os.path.join(DATA, 'index', 'nox-m-old.tsv'), 'N': os.path.join(DATA, 'index', 'nox-m-fin.tsv')},
-            'format': 'answer-format.md'},
     'o3de': {'path': os.path.join(DATA, 'o3de-src'),
              'aside': ['.github/copilot-instructions.md', '.mcp.json', '.serena'],
              'index': {'O': os.path.join(DATA, 'index', 'o3de-v1.tsv'), 'N': os.path.join(DATA, 'index', 'o3de-m.tsv')},
              'format': 'answer-format-o3de.md'},
 }
 ASIDE = os.path.join(DATA, 'o3de-aside')
+_A = run13.local_codebase()
+if _A:
+    WS['a'] = {'path': _A['path'], 'clean': ['.github', '.mcp.json', '.serena'],
+               'index': {'O': _A['macro_old'], 'N': _A['macro_new']}, 'format': 'answer-format.md'}
+# 問題のファイル。公開しないコードベース A の問題は bench/local に置く
+TASKS = ['v13/tasks-macro.json', 'local/v13-tasks-macro-a.json']
 
 
 def git(ws, *a):
@@ -102,7 +105,7 @@ def undo_o3de(ws, before):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--tasks', default='v13/tasks-macro.json')
+    ap.add_argument('--tasks', action='append', help='問題のファイル(繰り返せる。既定は TASKS のうち有るもの)')
     ap.add_argument('--task')
     ap.add_argument('--cond', choices=['A', 'O', 'N'])
     ap.add_argument('--rep', type=int, default=1)
@@ -117,13 +120,14 @@ def main():
         o3de_restore()
         return
 
-    task = next(t for t in json.load(open(os.path.join(BENCH, a.tasks), encoding='utf-8')) if t['id'] == a.task)
+    files = [f for f in (a.tasks or TASKS) if os.path.exists(os.path.join(BENCH, f))]
+    task = next(t for f in files for t in json.load(open(os.path.join(BENCH, f), encoding='utf-8')) if t['id'] == a.task)
     w = WS[task['repo']]
     ws = w['path']
     name = f'{a.round}-{a.task}-{a.cond}-r{a.rep}'
     os.makedirs(RUNS, exist_ok=True)
 
-    if task['repo'] == 'nox':
+    if task['repo'] == 'a':
         run13.reset_ws({'path': ws, 'clean': w['clean']})
     else:
         o3de_aside()
@@ -188,7 +192,7 @@ def main():
     gi = os.path.join(ws, '.github', 'copilot-instructions.md')
     if a.cond in ('O', 'N') and os.path.exists(gi):
         os.remove(gi)
-    if task['repo'] == 'nox':
+    if task['repo'] == 'a':
         run13.reset_ws({'path': ws, 'clean': w['clean']})
     else:
         undo_o3de(ws, before)

@@ -46,7 +46,7 @@ export function indexRoot(start) {
 }
 
 // ふつうの(level の無い)session.log は Markdown として表示され、\ の後ろが記号だと \ が消える
-// (E:\src\Nox\.index が E:\src\Nox.index と出る)。その \ を二重にする。error の表示はそのまま出るので通さない
+// (E:\src\Proj\.index が E:\src\Proj.index と出る)。その \ を二重にする。error の表示はそのまま出るので通さない
 export const escapeMarkdown = (s) => s.replace(/\\(?=[!-/:-@[-`{-~])/g, "\\\\");
 
 // git のリポジトリのルート(start の上で)。git が無い・リポジトリでなければ ""

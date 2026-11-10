@@ -23,15 +23,26 @@ DATA = os.environ.get('CRI_BENCH_DATA', r'E:\dev\bench-data\cxxref')
 V13 = os.path.join(DATA, 'v13')
 RUNS = os.path.join(BENCH, 'runs13')
 
+
+
+def local_codebase():
+    """公開しないコードベース A の写しと索引の場所(bench/local/codebase-a.json。git に入れない)。無ければ None。"""
+    p = os.path.join(BENCH, 'local', 'codebase-a.json')
+    return json.load(open(p, encoding='utf-8')) if os.path.exists(p) else None
+
+
 # 写しの置き場と、C++ のものは索引(ltidx の出力)と compile_commands.json のフォルダ
 WORKSPACES = {
-    'nox': {'path': os.path.join(DATA, 'nox-20261103'), 'index': os.path.join(DATA, 'index', 'nox-v6.tsv'), 'cdb': '.cdb',
-            'clean': ['.github', '.mcp.json', '.serena']},  # 前の計測が置いた設定(元の Nox には無い)
     'requests': {'path': os.path.join(V13, 'requests')},
     'newtonsoft': {'path': os.path.join(V13, 'newtonsoft')},
     'zod': {'path': os.path.join(V13, 'zod')},
-    'nox-noindex': {'path': os.path.join(DATA, 'nox-20261103'), 'clean': ['.github', '.mcp.json', '.serena']},
 }
+_A = local_codebase()
+if _A:
+    # .github などは前の計測が置いた設定(元のコードには無い)
+    WORKSPACES['a'] = {'path': _A['path'], 'index': _A['index'], 'cdb': _A.get('cdb', '.cdb'),
+                       'clean': ['.github', '.mcp.json', '.serena']}
+    WORKSPACES['a-noindex'] = {'path': _A['path'], 'clean': ['.github', '.mcp.json', '.serena']}
 LTIDX = os.path.join(V13, 'ltidx-0.5.1', 'ltidx.exe')
 LTIDX_NEXT = os.path.join(V13, 'ltidx-next', 'ltidx.exe')
 # copilot は .exe を直接起動する(npm の copilot.CMD を経ると、cmd が問題文の記号を解釈しうる)
@@ -124,7 +135,7 @@ def stash_index(w):
 
 
 def diff_of(ws):
-    git(ws, 'add', '-A')  # 無視しているもの(.index・.index-keep・Nox の .github など)は入らない
+    git(ws, 'add', '-A')  # 無視しているもの(.index・.index-keep・コードベース A の .github など)は入らない
     d = git(ws, 'diff', '--cached', '--no-color')
     git(ws, 'reset', '-q')
     return d
