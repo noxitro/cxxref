@@ -174,8 +174,10 @@ def run_ltq(cfg, args, start=None):
             cfg.told_ltidx = True
             old = autoupdate.stale_ltidx()
             if old:
+                get = os.path.join(autoupdate.SCRIPTS, 'get-ltidx.bat')
                 note += (f'ltidx {old[0]} is older than this plugin ({old[1]}): the index lacks newer kinds of rows. '
-                         'Ask the user to run /cxxref-index (it fetches the new ltidx and rebuilds the index).\n')
+                         'Ask the user to run /cxxref-index in Copilot CLI (it fetches the new ltidx and rebuilds the index), '
+                         f'or "{get}" and then rebuild the index.\n')
     elif not cfg.index:
         plugin = os.environ.get('PLUGIN_ROOT')
         if not start and plugin and os.path.normcase(root) == os.path.normcase(os.path.abspath(plugin)):

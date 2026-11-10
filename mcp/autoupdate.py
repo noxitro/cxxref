@@ -52,8 +52,8 @@ def stale_ltidx():
     p = find_ltidx()
     if not p or os.environ.get('LTIDX') or not os.environ.get('LOCALAPPDATA'):
         return None
-    got = os.path.normcase(os.path.join(os.environ['LOCALAPPDATA'], 'cxxref', 'ltidx', 'ltidx.exe'))
-    if os.path.normcase(os.path.abspath(p)) != got:
+    got = os.path.normcase(os.path.normpath(os.path.join(os.environ['LOCALAPPDATA'], 'cxxref', 'ltidx', 'ltidx.exe')))
+    if os.path.normcase(os.path.normpath(os.path.abspath(p))) != got:
         return None
     want = plugin_version()
     try:

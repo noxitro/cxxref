@@ -15,8 +15,11 @@ import collections, json, os, random, re, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cxxcheck
 
-# 写しと索引の場所は bench/local/codebase-a.json(公開しない)
-_A = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'local', 'codebase-a.json'), encoding='utf-8'))
+# 写しと索引の場所は bench/local/codebase-a.json(公開しない)。無ければ使えない
+_A_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'local', 'codebase-a.json')
+if not os.path.exists(_A_PATH):
+    raise SystemExit(f'コードベース A の場所がありません: {_A_PATH}(公開しないコードベースの台本です)')
+_A = json.load(open(_A_PATH, encoding='utf-8'))
 WS, IDX = _A['path'], _A['index']
 GEN = re.compile(r'(^|/)(reflection_generated|gen)/')
 TEST = re.compile(r'(^|/)(test|tests|bench)/')

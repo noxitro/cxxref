@@ -21,13 +21,13 @@
   - L: [mcp-language-server](https://github.com/isaacphi/mcp-language-server)(LSP の仲立ち。Go 1.27.3 で `go build`。Windows の手直しと、起動の直後に 1 ファイルを開く `MLS_SEED_FILE` を `ext\mcp-language-server.patch` に置きました。`edit_file`・`rename_symbol` は渡しません)
   - M: [clangd-mcp](https://github.com/schuay/clangd-mcp)(clangd。`--seed-file` が要ります)
   - N: [clangd-mcp-server](https://github.com/felipeerias/clangd-mcp-server)(clangd。Windows の手直しを `ext\clangd-mcp-server.patch` に置きました。背景索引を `CLANGD_ARGS` で入れます)
-  - L・M・N の clangd の索引は、`${TOOLS}\clangd-cdb-<名前>\.cache` に前もって作って共用します。どのツールも索引ができあがるのを待たずに答えるので、索引を作り終えてから流します
+  - L・M・N の clangd の索引は、`${TOOLS}\clangd-cdb-<名前>\.cache` に前もって作って共用します(`<名前>` は `-Codebase`。コードベース A は `a`)。どのツールも索引ができあがるのを待たずに答えるので、索引を作り終えてから流します
 
 モデルは `-Model` で選びます(既定 gpt-6-luna。Copilot の契約の中のモデルは `claude-haiku-5.5` のように点で区切ります)。`-Provider anthropic` を付けると、Copilot の経路ではなく Anthropic API を直接使います(BYOK。従量課金)。このとき `-Model` は API のモデル名(`claude-haiku-5-5`)で、キーは `COPILOT_PROVIDER_API_KEY_COMMAND`(キーを出すコマンド)か `COPILOT_PROVIDER_API_KEY` を、このプロセスかユーザーの環境変数に置きます。BYOK の環境変数は 1 回の実行の間だけ置き、終わったら元に戻します。`-DryRun` は、条件の設定を作業フォルダに置いて中身を出し、片付けるだけです(Copilot は呼びません)。
 
 結果と考察は `../docs/design.md` にあります。問題は 2 つのコードベースで用意しています。
 
-- `tasks.json`: C++ のゲームエンジン [コードベース A](https://github.com/noxitro/コードベース A) の問題。回答の書式は `answer-format.md`
+- `local\tasks-a.json`(公開しない): C++ のゲームエンジン、コードベース A の問題。回答の書式は `answer-format.md`
   - T1〜T4: C++ の記号の参照を探す問題
   - R1〜R3: rg のほうが向く問題(プリプロセッサのマクロ、文字列リテラル、`.vcxproj` の設定)。索引を渡したときに、かえって悪くならないかを見ます
   - U1・U2: 索引を作った後にコードを変えてから聞く問題。`edit` に書いた変更を `run.ps1` が実行の前に当て、後で中身と更新日時を元に戻します。U1 は .cpp を 2 つ変え(呼び出しを 1 つ足し、別のファイルで 1 つ消す)、U2 は多くの TU が読むヘッダーの先頭に 2 行足します
@@ -68,7 +68,7 @@ python -I autoupdate_bench.py --workspace <写し> --index <索引.tsv> --reps 5
 - 自動更新の作り直しが Copilot の終了後も続いているときは、終わるのを待ってから次に進みます
 - 条件 F・G の `.mcp.json` は、Copilot CLI が信頼済みのフォルダでしか読みません。`run.ps1` は `--trust-folder` を付けて実行します
 - `collect.py` は `~/.copilot/session-store.db` と、各セッションの `events.jsonl` を読み取り専用で開き、`runs\summary.tsv` と条件ごとの平均を出します。`rep=0` は試運転として集計から外します
-- 問題と正解は `tasks.json`(と `tasks-<名前>.json`。`collect.py` はすべて読むので、id はファイルをまたいで重ねません)、回答の書式は `answer-format.md` です。指示は、索引用が `index-instructions.md`(v1 の計測で使ったものは `index-instructions-v1.md`)、LSP 用が `lsp-instructions.md`(v1 の計測で使ったものは `lsp-instructions-v1.md`)、ltq 用が `cli-instructions.md` です
+- 問題と正解は `tasks-<名前>.json`(公開しないものは `local\` に置く。`collect.py` はすべて読むので、id はファイルをまたいで重ねません)、回答の書式は `answer-format.md` です。指示は、索引用が `index-instructions.md`(v1 の計測で使ったものは `index-instructions-v1.md`)、LSP 用が `lsp-instructions.md`(v1 の計測で使ったものは `lsp-instructions-v1.md`)、ltq 用が `cli-instructions.md` です
 
 ## v13: ふだんの作業に近い問題での計測
 
