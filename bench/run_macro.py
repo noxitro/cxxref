@@ -41,7 +41,7 @@ WS = {
             'format': 'answer-format.md'},
     'o3de': {'path': os.path.join(DATA, 'o3de-src'),
              'aside': ['.github/copilot-instructions.md', '.mcp.json', '.serena'],
-             'index': {'O': os.path.join(DATA, 'index', 'o3de-orig.tsv'), 'N': os.path.join(DATA, 'index', 'o3de-m.tsv')},
+             'index': {'O': os.path.join(DATA, 'index', 'o3de-v1.tsv'), 'N': os.path.join(DATA, 'index', 'o3de-m.tsv')},
              'format': 'answer-format-o3de.md'},
 }
 ASIDE = os.path.join(DATA, 'o3de-aside')
