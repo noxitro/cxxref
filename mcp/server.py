@@ -28,35 +28,30 @@ PROTOCOL = '2025-06-18'
 # 計測で 21.2 KB 以上が退かされ、18,000 バイト以下は退かされなかった】。少し下回らせる
 MAX_BYTES = 18000
 
+# 定義は、モデルを呼ぶたびに毎回送られる(C++ でないリポジトリでも)。言っていることは変えずに短く保つ
+ROOT_ARG = {'type': 'string', 'description': 'Absolute path of your working folder (the server may run elsewhere)'}
 INSTRUCTIONS = (
-    'C++ reference index built by clang for this workspace. Before grepping C++ sources for callers, '
-    'references or definitions, call `refs`. Its `calls` section can be used as the answer directly; '
-    'matches it reports as inside comments are not code. Use `check` for lines found by other searches.')
+    'Clang-built C++ reference index. For callers, references or definitions of a C++ symbol, call `refs` before '
+    'grepping; its `calls` section is the answer as is. Use `check` for lines found by other searches.')
 
 TOOLS = [
     {
         'name': 'refs',
         'title': 'C++ references',
         'description': (
-            'Find every call site, reference, definition and declaration of a C++ symbol, resolved by clang '
-            'over all translation units (including template instantiations). Use this instead of grep for C++ '
-            'symbol searches. One call returns: calls (with the enclosing function), other references, '
-            'definitions, virtual overrides (calls through a base class that may dispatch to the symbol), '
-            'unresolved calls inside templates with the same name (decide those from the source '
-            'line), and every text match of the name that is NOT in the index with the reason '
-            '(comment, inactive #if, macro definition, string literal, file not analyzed). '
-            'The calls section needs no re-verification with grep.'),
+            'Every call site, reference, definition and declaration of a C++ symbol, resolved by clang over all '
+            'translation units (template instantiations included). Use it instead of grep for C++ symbols. Sections: '
+            'calls (with the enclosing function; no need to re-check them with grep), other references, definitions, '
+            'virtual overrides, unresolved template calls (decide from the line), and text matches of the name that '
+            'are not in the index, with the reason (comment, inactive #if, macro, string, file not analyzed).'),
         'inputSchema': {
             'type': 'object',
             'properties': {
-                'name': {'type': 'string',
-                         'description': 'Qualified name or a suffix of it, e.g. "nox::io::File::Read" or "File::Read"'},
+                'name': {'type': 'string', 'description': 'Qualified name or its suffix, e.g. "ns::File::Read" or "File::Read"'},
                 'limit': {'type': 'integer', 'description': 'Max lines per section (default 200)'},
                 'exclude': {'type': 'array', 'items': {'type': 'string'},
-                            'description': 'Directory names or root-relative path prefixes to skip in the text search'},
-                'root': {'type': 'string',
-                         'description': 'Absolute path of the folder you are working in. Pass it: the server may run '
-                                        'outside your workspace (for example when installed as a plugin)'},
+                            'description': 'Folders or root-relative path prefixes to skip in the text search'},
+                'root': ROOT_ARG,
             },
             'required': ['name'],
         },
@@ -66,17 +61,14 @@ TOOLS = [
         'name': 'check',
         'title': 'C++ index check',
         'description': (
-            'For each path:line[:col], report the C++ references the clang index has on that line, and whether '
-            'the line is inside a comment or an inactive #if branch. Use it for lines found by grep or other '
-            'searches before reporting them.'),
+            'For each path:line[:col], what the clang index has on that line, and whether it is in a comment or an '
+            'inactive #if. Use it on lines found by grep before reporting them.'),
         'inputSchema': {
             'type': 'object',
             'properties': {
                 'locations': {'type': 'array', 'items': {'type': 'string'},
-                              'description': 'Root-relative locations such as "src/a.cpp:42" or "src/a.cpp:42:7"'},
-                'root': {'type': 'string',
-                         'description': 'Absolute path of the folder you are working in. Pass it: the server may run '
-                                        'outside your workspace (for example when installed as a plugin)'},
+                              'description': 'Root-relative "path:line" or "path:line:col"'},
+                'root': ROOT_ARG,
             },
             'required': ['locations'],
         },

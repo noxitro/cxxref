@@ -315,7 +315,7 @@ class ReuseTest(unittest.TestCase):
             f.write(f'{self.src}\tsrc/a.h\n')
         os.utime(self.base + '.deps.tsv', (2000, 2000))  # 大きさだけが変わる
         text = self.refs()
-        self.assertIn('    src/a.h\n', text)
+        self.assertIn('1 source files changed after indexing', text)
         self.assertNotIn('not read by any indexed configuration', text)
 
 

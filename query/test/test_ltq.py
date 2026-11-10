@@ -5,6 +5,7 @@ usage: python -I -m unittest discover -s query/test   (リポジトリのルー�
 import contextlib
 import io
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -186,8 +187,15 @@ class LtqTest(unittest.TestCase):
         os.remove(os.path.join(self.root, 'src', 'b.cpp'))
         self.write('src/c.cpp', 'void Other() {}\n')
         out = self.ltq('refs', 'Run')
-        self.assertIn('1 source files modified after indexing are not read by any indexed configuration', out)
-        self.assertIn('src/c.cpp', out)
+        # 名前を含まない新しいファイルは件数だけ(refs のたびに関係の無いファイルを並べない)
+        self.assertIn('1 source files modified after indexing are not read by any indexed configuration;'
+                      ' none of them contains the name', out)
+        self.assertNotIn('src/c.cpp', out)
+        self.write('src/d.cpp', 'void G() { Run(); }\n')
+        out = self.ltq('refs', 'Run')
+        self.assertIn('2 source files modified after indexing are not read by any indexed configuration'
+                      ' (new files? rebuild the index if they are compiled). Those that contain the name (1):\n'
+                      '    src/d.cpp\n    ... 1 more that do not contain the name', out)
         self.assertIn('1 indexed TU files no longer exist: src/b.cpp', out)
         self.assertIn('src/b.cpp:1  [file deleted after indexing]', out)
 
@@ -262,7 +270,9 @@ class LtqTest(unittest.TestCase):
         self.index('index', self.COMMON, [self.COMMENT], deps={'src/a.cpp': ['src/a.cpp', 'src/empty.h']})
         self.write('src/empty.h', '#pragma once\n// edited\n')
         out = self.ltq('refs', 'Run')
-        self.assertIn('1 source files changed after indexing', out)
+        self.assertIn('1 source files changed after indexing, none of them contains the name', out)
+        self.assertNotIn('not read by any indexed configuration', out)
+        out = self.ltq('check', 'src/empty.h:1')  # 問われたファイルは並べる
         self.assertIn('    src/empty.h\n', out)
         self.assertNotIn('not read by any indexed configuration', out)
         self.assertIn('index: .index/index.tsv (built', out)  # .deps.tsv を 2 つ目の構成として拾わない
@@ -337,6 +347,33 @@ class LtqTest(unittest.TestCase):
         self.assertIn('inside comments -> not code; do not report these: 1\n    src/  1 matches in 1 files', out)
         self.assertNotIn('src/a.cpp:7', out)
 
+    def test_compact_keeps_lines_that_spell_the_qualified_name(self):
+        # 修飾名で問われたら、無効な #if の中でも `Scope::Name` と書かれた行は短い形で残す(O3DE の
+        # DynamicModuleHandle::Create では正解の 2 つがここにあった)。名前だけの行はフォルダの件数にする
+        self.write('src/q.cpp', 'void F() {\n#if 0\n  ns::Run();\n  x.Run();\n#endif\n}\n', self.t0 - 10)
+        self.index('index', [('ns::Run', 'decl', '', 'src/a.cpp:1:6', 'void Run();'),
+                             ('ns::Run', 'call', 'Main', 'src/a.cpp:3:3', 'Run();')],
+                   [('src/q.cpp', 'inactive', '2:1', '5:7')], tus=('src/a.cpp', 'src/q.cpp'))
+        out = self.ltq('refs', 'ns::Run', '--compact')
+        self.assertIn('lines that spell ns::Run are listed in full', out)
+        self.assertIn('inside inactive #if/#ifdef branches -> not compiled in the indexed configuration: 2\n'
+                      '    src/q.cpp:3  [lines 2-5]  | ns::Run();\n    src/  1 matches in 1 files\n', out)
+        self.assertNotIn('src/q.cpp:4', out)
+        out = self.ltq('refs', 'Run', '--compact')  # 修飾されていない問いでは、どちらも件数
+        self.assertNotIn('src/q.cpp:3', out)
+
+    def test_compact_lists_only_the_folders_with_most_matches(self):
+        # 名前だけの一致は大きなコードでは数百のフォルダに散る(O3DE の Create で 180)。多い順に 10 まで、残りは 1 行
+        self.index('index', self.COMMON, [self.COMMENT])
+        for i in range(12):
+            os.makedirs(os.path.join(self.root, 'other', f'd{i:02}'))
+            self.write(f'other/d{i:02}/x.cpp', 'void G() {\n' + '  x.Run();\n' * (20 - i) + '}\n', self.t0 - 10)
+        out = self.ltq('refs', 'Run', '--compact')
+        self.assertIn('in files no indexed TU includes -> not analyzed; read them if they matter: 174\n'
+                      '    other/d00/  20 matches in 1 files\n', out)
+        self.assertIn('    other/d09/  11 matches in 1 files\n    ... 2 more folders (19 matches)\n', out)
+        self.assertNotIn('other/d10/', out)
+
     def test_many_files_read_the_ranges_in_one_pass(self):
         # 一致のあったファイルが SKIP_SCAN_FILES を超えると .skip.tsv を 1 回通して読む。1 つずつ引くときと結果が同じこと
         names = [f'src/f{i}.cpp' for i in range(70)]  # f1 と f10 のように、別のファイルの名前を頭に含むものもある
@@ -375,8 +412,16 @@ class LtqTest(unittest.TestCase):
                 f.write(f'{os.path.join(self.root, "src", f"bad{i}.cpp")}\t0\t1\t0.1\t0\t{why}\n')
         os.utime(tu, (self.t0, self.t0))
         out = self.ltq('refs', 'Run')
-        self.assertIn('12 TU had parse errors', out)
-        self.assertEqual(len([l for l in out.splitlines() if l.startswith('    src/bad')]), 10)
+        # 名前を含むファイルの TU が無ければ、1 行の件数だけ
+        self.assertIn("12 TU had parse errors, none in a file that contains the name (all in .index/index.tsv.tu.tsv):"
+                      " 8 x x.h file not found; 4 x type '__m128' is not a structure", out)
+        self.assertNotIn('    src/bad', out)
+        for i in range(12):  # 名前を含むファイルの TU は 10 件まで並べる
+            self.write(f'src/bad{i}.cpp', 'void G() { Run(); }\n', self.t0 - 10)
+        out = self.ltq('refs', 'Run')
+        self.assertIn('12 TU had parse errors; references only in those TUs may be missing.'
+                      ' In files that contain the name (12):', out)
+        self.assertEqual(len([l for l in out.splitlines() if re.match(r'    src/bad\d+\.cpp  \(', l)]), 10)
         self.assertIn('... 2 more (all in .index/index.tsv.tu.tsv)', out)
         # 構成が複数なら、最初の構成の .tu.tsv だけを挙げない
         self.index('release', self.COMMON, [self.COMMENT])

@@ -522,7 +522,15 @@ class Index:
             self._sources = out
         return self._sources
 
-    def header(self):
+    def header(self, focus=None):
+        """索引の状態。focus(問い合わせの名前を含むファイルの集合)を渡すと、失敗した TU・変わったファイル・新しいファイルは
+        focus に入るものだけを並べ、残りは件数にする。refs のたびに出るので、関係の無いファイルまで並べると結果の多くを占める
+        (Nox で 4.6 KB のうち 1.9 KB)。結果の行はどれも focus のファイルにあるので、残りは結果に関わらない。"""
+        def split(items, path_of):
+            if focus is None:
+                return items, []
+            return [x for x in items if path_of(x) in focus], [x for x in items if path_of(x) not in focus]
+
         def built(part):
             return time.strftime('%Y-%m-%d %H:%M', time.localtime(part.mtime))
 
@@ -540,34 +548,55 @@ class Index:
         bad = {}
         for p, e, n in self.tu_status()[1]:
             bad.setdefault((p, e), []).append(n)
+        no_name = ' that do not contain the name'
         if bad:
             # 大きなリポジトリでは失敗した TU が数百になり、並べるだけでクライアントの出力の上限を超える(O3DE で 180 TU・100 KB)。
             # 10 件までにし、残りは理由ごとの件数にまとめる
-            print(f'  {len(bad)} TU had parse errors; references only in those TUs may be missing:')
-            items = list(bad.items())
-            for (p, e), ns in items[:10]:
-                print(f'    {p}  ({e})' + (f'  [{", ".join(ns)}]' if multi else ''))
-            if len(items) > 10:
-                why = collections.Counter(e for (p, e), ns in items[10:])
-                where = ', '.join(f'{self.rel(part.path)}.tu.tsv' for part in self.parts)  # 構成ごとに 1 つ
-                print(f'    ... {len(items) - 10} more (all in {where}): '
-                      + '; '.join(f'{n} x {e[:80]}' for e, n in why.most_common(3))
-                      + ('; ...' if len(why) > 3 else ''))
+            items, rest = split(list(bad.items()), lambda x: x[0][0])
+            where = ', '.join(f'{self.rel(part.path)}.tu.tsv' for part in self.parts)  # 構成ごとに 1 つ
+
+            def reasons(xs):
+                why = collections.Counter(e for (p, e), ns in xs)
+                return '; '.join(f'{n} x {e[:80]}' for e, n in why.most_common(3)) + ('; ...' if len(why) > 3 else '')
+            if focus is not None and not items:
+                print(f'  {len(bad)} TU had parse errors, none in a file that contains the name (all in {where}): '
+                      + reasons(rest))
+            else:
+                print(f'  {len(bad)} TU had parse errors; references only in those TUs may be missing'
+                      + (':' if focus is None else f'. In files that contain the name ({len(items)}):'))
+                for (p, e), ns in items[:10]:
+                    print(f'    {p}  ({e})' + (f'  [{", ".join(ns)}]' if multi else ''))
+                more = items[10:] + rest
+                if more:
+                    print(f'    ... {len(more)} more{no_name if not items[10:] and rest else ""} (all in {where}): '
+                          + reasons(more))
         changed, new, missing = self.freshness()
         if changed:
-            print(f'  {len(changed)} source files changed after indexing. Indexed lines in them are re-located by their'
-                  ' source text ([moved from line N] / [line changed or removed after indexing]); rebuild the index for exact results:')
-            for p in changed[:10]:
-                print(f'    {p}')
-            if len(changed) > 10:
-                print(f'    ... {len(changed) - 10} more')
+            shown, rest = split(changed, lambda p: p)
+            if focus is not None and not shown:
+                print(f'  {len(changed)} source files changed after indexing, none of them contains the name'
+                      ' (this result is not affected)')
+            else:
+                print(f'  {len(changed)} source files changed after indexing. Indexed lines in them are re-located by their'
+                      ' source text ([moved from line N] / [line changed or removed after indexing]); rebuild the index'
+                      ' for exact results' + (':' if focus is None else f'. Those that contain the name ({len(shown)}):'))
+                for p in shown[:10]:
+                    print(f'    {p}')
+                if len(shown) > 10 or rest:
+                    print(f'    ... {len(shown[10:]) + len(rest)} more' + (no_name if rest and not shown[10:] else ''))
         if new:
-            print(f'  {len(new)} source files modified after indexing are not read by any indexed configuration'
-                  ' (new files? rebuild the index if they are compiled):')
-            for p in new[:10]:
-                print(f'    {p}')
-            if len(new) > 10:
-                print(f'    ... {len(new) - 10} more')
+            shown, rest = split(new, lambda p: p)
+            if focus is not None and not shown:
+                print(f'  {len(new)} source files modified after indexing are not read by any indexed configuration;'
+                      ' none of them contains the name')
+            else:
+                print(f'  {len(new)} source files modified after indexing are not read by any indexed configuration'
+                      ' (new files? rebuild the index if they are compiled)'
+                      + (':' if focus is None else f'. Those that contain the name ({len(shown)}):'))
+                for p in shown[:10]:
+                    print(f'    {p}')
+                if len(shown) > 10 or rest:
+                    print(f'    ... {len(shown[10:]) + len(rest)} more' + (no_name if rest and not shown[10:] else ''))
         if missing:
             print(f'  {len(missing)} indexed TU files no longer exist: ' + ', '.join(missing[:10]))
 
@@ -690,6 +719,22 @@ def by_dir(items):
     return [f'{d}/  {n} matches in {len(fs)} files' for d, (n, fs) in sorted(agg.items())]
 
 
+def top_dirs(paths, n):
+    """一致のあったファイルのパスを、ディレクトリごとの件数にまとめ、多い順に n 個まで。残りは 1 行の件数にする。
+    名前だけの一致は大きなコードでは数百のフォルダに散り、全部並べると結果の大半を占める(O3DE の Create で 180 フォルダ)。"""
+    agg = {}
+    for p in paths:
+        d = p.rsplit('/', 1)[0] if '/' in p else '.'
+        c, files = agg.setdefault(d, [0, set()])
+        agg[d][0] = c + 1
+        files.add(p)
+    top = sorted(agg.items(), key=lambda kv: (-kv[1][0], kv[0]))
+    out = [f'{d}/  {c} matches in {len(fs)} files' for d, (c, fs) in top[:n]]
+    if len(top) > n:
+        out.append(f'... {len(top) - n} more folders ({sum(c for _, (c, _) in top[n:])} matches)')
+    return out
+
+
 def fmt(r, show_sym, idx):
     sym, role, caller, path, line, col, src, note, _ = r
     s = f'{role:<6} {path}:{line}'
@@ -735,6 +780,9 @@ def cmd_refs(a, idx):
     # 記号の列の末尾が short の行だけを読む(`short<TAB>` を含む行。`Loader` などの部分一致の行は読まない)
     rows = idx.cached(('rows', short), lambda: [r for r in idx.rows([sb + b'\t'], lambda raw: True)
                                                  if r[0].rsplit('::', 1)[-1] == short])
+    # テキストの一致(下の「索引に無い一致」で使う)。名前を含むファイルを先に知り、索引の状態はそのファイルの分だけ並べる
+    hits = idx.cached(('text', short, tuple(sorted(a.exclude))), lambda: text_hits(idx, short, set(a.exclude)))
+    focus = {h[0] for h in hits} | {r[3] for r in rows}
     # 仮想関数の上書き(上書きするメソッド -> 上書きされる基底のメソッド)。同じ名前なので rows に入っている
     up, down, ov_at = {}, {}, {}
     for r in rows:
@@ -747,12 +795,22 @@ def cmd_refs(a, idx):
     deps = [r for r in rows if r[0] == '?::' + short]
     syms = sorted({r[0] for r in target})
     show_sym = len(syms) > 1
+    # 修飾名で問われたら、`Scope::Name` と書かれた行は短い形でも省かない(無効な #if の中の呼び出しなど。O3DE の
+    # DynamicModuleHandle::Create では、正解 17 のうち 2 つが無効な #if の中にあり、件数にまとめると消えていた)
+    parts = [p for p in name.split('::') if p]
+    tail = re.compile(r'(?<![\w])' + r'\s*::\s*'.join(map(re.escape, parts[-2:])) + r'(?![\w])') if len(parts) > 1 else None
 
-    idx.header()
+    def named(src):
+        return bool(tail and tail.search(src))
+
+    if tail:  # 修飾名なら、末尾の名前だけの一致(O3DE の Create で数千ファイル)ではなく、修飾名を書いたファイルと結果のファイル
+        focus = {h[0] for h in hits if named(h[3])} | {r[3] for r in target + deps}
+    idx.header(focus)
     print(f'query: {a.name}')
     if a.compact:
         print('  (compact output: comments, inactive #if, strings, and matches that resolve to other symbols are'
-              ' summarized as counts; calls and likely calls are listed in full)')
+              ' summarized as counts; calls, likely calls'
+              + (f' and lines that spell {"::".join(parts[-2:])}' if tail else '') + ' are listed in full)')
     if not syms:
         print('  no symbol in the index matches this name.')
     elif show_sym:
@@ -840,7 +898,6 @@ def cmd_refs(a, idx):
         print(f'  ... {len(dep_lines) - a.limit} more (raise --limit)')
 
     # テキスト一致のうち、索引に同名の行が無いものの理由
-    hits = idx.cached(('text', short, tuple(sorted(a.exclude))), lambda: text_hits(idx, short, set(a.exclude)))
     known = {r[3] for r in rows}
     loose = [h for h in hits if (h[0], h[1]) not in at]
     want = frozenset(h[0] for h in loose)
@@ -886,6 +943,10 @@ def cmd_refs(a, idx):
         if k is None:
             k = (hint or 'other') if path in parsed else 'unparsed'
         like, verdict = resolved_like(src) if k in ('unparsed', 'other') else ('', '')
+        if k == 'inactive' and named(src):
+            # 短い形でも並べる(修飾名がそのまま書かれている)。読まれていないファイルの呼び出しには上の手がかりが付くので、
+            # 手がかりの無い無効な #if だけにする(生成物の u8"Scope::Name" のような文字列の行まで並べない)
+            verdict = 'named'
         cats[k].append((path, f'{path}:{line}{span}{"  [file changed after indexing]" if stale else ""}{like}  | {src}', verdict))
 
     print(f'\n== text matches of "{short}" not in the index: '
@@ -904,20 +965,20 @@ def cmd_refs(a, idx):
             continue
         print(f'  {title}: {len(items)}')
         if a.compact and k in ('comment', 'inactive', 'macro', 'string'):
-            # 短い出力: 報告しない分類は、件数の多いフォルダだけ
-            dirs = sorted(by_dir([(p, s) for p, s, _ in items]), key=lambda x: -int(x.split()[1]))
-            for s in dirs[:5]:
+            # 短い出力: 報告しない分類は、件数の多いフォルダだけ(修飾名がそのまま書かれた無効な #if の中の行は並べる)
+            for s in [s for _, s, v in items if v == 'named'][:a.limit]:
                 print('    ' + s)
-            if len(dirs) > 5:
-                print(f'    ... {len(dirs) - 5} more folders')
+            for s in top_dirs([p for p, _, v in items if v != 'named'], 5):
+                print('    ' + s)
             continue
         if a.compact:
-            # 短い出力: 問い合わせの呼び出しらしい行だけを出し、別の記号らしい行は件数に、残りはフォルダごとにまとめる
+            # 短い出力: 問い合わせの呼び出しらしい行と修飾名の行だけを出し、別の記号らしい行は件数に、残りはフォルダごとにまとめる
             nots = sum(1 for _, _, v in items if v == 'not')
-            lines = [s for _, s, v in items if v == 'call']
+            lines = [s for _, s, v in items if v in ('call', 'named')]
             if nots:
                 lines.append(f'{nots} look like calls to other symbols (the same line or receiver resolves elsewhere)')
-            lines += by_dir([(p, s) for p, s, v in items if not v]) if len(items) > 10 else [s for _, s, v in items if not v]
+            rest = [(p, s) for p, s, v in items if not v]
+            lines += top_dirs([p for p, _ in rest], 10) if len(items) > 10 else [s for _, s in rest]
         elif fold and len(items) > 10:  # 手がかりの付いた行はまとめずに出す
             lines = [s for _, s, v in items if v] + by_dir([(p, s) for p, s, v in items if not v])
         else:
@@ -946,7 +1007,7 @@ def cmd_check(a, idx):
     needles = [b'\t' + p + b':' for p in pb]
     rows = idx.rows(needles, lambda raw: any(n in raw for n in needles))
     ranges = idx.skips(paths)
-    idx.header()
+    idx.header(paths)  # 問われたファイルの分だけ並べる
     for path, line, col in locs:
         here = [r for r in rows if r[3] == path and r[4] == line and (col is None or r[5] == col)]
         fp = os.path.join(idx.root, path)
