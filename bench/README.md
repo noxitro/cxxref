@@ -89,6 +89,29 @@ python -I ratio13.py --round v13 --tasks local/v13-tasks-stage2-a.json --conds A
 python -I trace13.py v13q-C2-createinstance-Q-r4
 ```
 
+## rg との突き合わせ(`parity.py`)
+
+Copilot を使わずに、「ふつうのエージェントが rg で見つける行が、cxxref の結果のどこにも出ない」ことが無いかを確かめます。名前ごとに `rg -w -F <名前>` の一致行と、`ltq refs` の 3 つの形(全文・短い形の 1 段目・2 段目)と、MCP サーバーが実際に返す文面(`mcp/server.py` の `run_ltq`)を突き合わせ、rg の行を「1 行ずつ出ている(listed)」「フォルダの件数に入っている(folded)」「上の階層の件数に入っている(area)」「どこにも出ていない(hidden)」「全文にも無い(missing)」に分けます。hidden と missing が 0 であることが目標です。rg は PATH の `rg.exe` か、Copilot CLI に同梱のものを使います。
+
+```powershell
+python -I parity.py --root <ソースのルート> --index <索引.tsv> --sample 40 --under runtime/ --out parity.tsv
+python -I parity.py --root <ソースのルート> --index <索引.tsv> --names Create GetName --no-ignore
+```
+
+- `--sample N` は、差分の索引(`.alt.tsv`)に出てくる名前から N 個を、名前のハッシュの順で選びます(同じ索引なら同じ名前)
+- `--no-ignore` は、rg に `.gitignore` を無視させます
+- `--out` は、MCP の文面で 1 行ずつ出ていない rg の行を、分類つきで書きます
+
+結果(2026-11-11)【実測】:
+
+| | 名前 | rg の行 | MCP: 1 行ずつ | MCP: フォルダの件数 | MCP: 上の階層の件数 | hidden | missing |
+|---|---|---|---|---|---|---|---|
+| コードベース A(`runtime/` の名前) | 40 | 5,176 | 1,124 | 4,020 | 32 | 0 | 0 |
+| 同(`--no-ignore`) | 40 | 5,519 | 1,248 | 4,239 | 32 | 0 | 0 |
+| O3DE(30 個 + よくある名前 5 個) | 35 | 24,091 | 548 | 9,197 | 14,346 | 0 | 0 |
+
+MCP の 1 回の `refs` は、コードベース A で中央値 0.1 秒、O3DE で中央値 2.6 秒・最大 16.6 秒でした(最大はよくある名前。内訳は未調査)。O3DE では、MCP の文面が上限で末尾から切れた名前は 0 でした(前は 3 名)。ただし rg の行の 6 割は「上の階層の件数」にしか出ないので、そこを 1 行ずつ見るには `path` で絞って引き直す必要があります。
+
 ## 計測に使うソースの写し
 
 正解の行番号は、ソースの写しに対するものです。写しは計測の外で書き換えないでください。`snapshot.py digest <写し>` の指紋で、写しが変わっていないかを確かめます(`batch.ps1 -Digest` は始める前と各回の後に確かめます)。指紋は、計測の道具が書き換える `.` で始まるフォルダ・ファイル(`.index` `.cdb` `.github` `.mcp.json`)を除いて作ります。

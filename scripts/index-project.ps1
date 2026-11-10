@@ -91,5 +91,10 @@ if (-not $NoAlt) {
         if ($LASTEXITCODE -ne 0) { "無効な #if の中の解析(差分パス)に失敗しました(終了コード $LASTEXITCODE)。索引はできています" }
         else { "差分パス {0} 秒" -f [int]((Get-Date) - $t1).TotalSeconds }
     }
+} else {
+    # 前に作った差分は、今の索引と行番号が合わないことがあるので消す(残すと古い行が [inactive] として混ざる)
+    foreach ($f in @("$out.alt.tsv", "$out.alt.json")) {
+        if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force }
+    }
 }
 exit 0

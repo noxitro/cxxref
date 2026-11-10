@@ -39,6 +39,7 @@ BIN_EXT = {'.obj', '.o', '.a', '.lib', '.dll', '.exe', '.pdb', '.ilk', '.exp', '
            '.wav', '.mp3', '.ogg', '.mp4', '.ttf', '.otf', '.woff', '.woff2', '.class', '.jar', '.pyc', '.pack'}
 OTHER_MAX = 64 << 20  # これより大きいファイルは読まない
 OTHER_LIST = 10  # 短い出力(--compact 1 つ)で、ソースでないファイルの一致を 1 行ずつ並べる数
+SYM_LIST = 20  # matched symbols: に並べる記号の数(残りは件数)
 COMPACT_LIST = 30  # 短い出力(--compact 1 つ)で、分類ごとに 1 行ずつ並べる数。残りはフォルダごとの件数にする
 COND_MAX = 100  # 無効な行に添える #if の条件の長さ(1 つあたり)
 SEEN_CACHE = '.seen.cache'  # .deps.tsv に載るパスの一覧の写し(ltq が書く)
@@ -816,8 +817,9 @@ def receiver(src, short):
     return re.sub(r'\s+', '', found[0].group(1)) + short
 
 
-def areas(dirs, n=8):
-    """[(フォルダ, 件数)] を、上の階層でまとめた件数にして、多い順に n 個まで 1 行に並べる。全部が同じ階層の下に
+def areas(dirs):
+    """[(フォルダ, 件数)] を、上の階層でまとめた件数にして、多い順に 1 行に並べる。数は切らない(切った分はどこにも名前が
+    出なくなる。いちばん上の階層のフォルダの数で抑えられる)。全部が同じ階層の下に
     あるときは、分かれるところまで階層を下りる(--path で絞り直したときに、同じ 1 つの名前に戻らないように)。"""
     deepest = max(d.count('/') + 1 for d, _ in dirs)
     depth = 1
@@ -830,7 +832,7 @@ def areas(dirs, n=8):
             break
         depth += 1
     top = sorted(groups.items(), key=lambda kv: (-kv[1], kv[0]))
-    return ', '.join(f'{k}/ {c}' for k, c in top[:n]) + (f', ... {len(top) - n} more' if len(top) > n else '')
+    return ', '.join(f'{k}/ {c}' for k, c in top)
 
 
 def top_dirs(paths, n):
@@ -997,7 +999,14 @@ def cmd_refs(a, idx):
     if not syms:
         print('  no symbol in the index matches this name.')
     elif show_sym:
-        print('  matched symbols: ' + ', '.join(f'{s} ({sum(1 for r in target if r[0] == s)})' for s in syms))
+        # 短い名前は数百の記号に当たる(O3DE の Activate で 47 KB の 1 行)。行の多い順に上限まで並べ、残りは件数にする。
+        # 行そのものは下の節に記号つきで出るので、ここで省いても見えなくなる行は無い
+        per = collections.Counter(r[0] for r in target)
+        top = sorted(syms, key=lambda s: (-per[s], s))
+        cap = len(top) if len(top) <= SYM_LIST + 5 else SYM_LIST
+        print('  matched symbols: ' + ', '.join(f'{s} ({per[s]})' for s in top[:cap])
+              + (f', ... {len(top) - cap} more symbols ({sum(per[s] for s in top[cap:])} rows; each row below names'
+                 ' its symbol. Ask with a qualified name to narrow)' if len(top) > cap else ''))
     else:
         print(f'  symbol: {syms[0]}' + ('  (a macro)' if is_macro else ''))
     if renamed:

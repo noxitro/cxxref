@@ -102,6 +102,15 @@ class IndexProjectAltTest(unittest.TestCase):
         with open(os.path.join(self.tmp, '.index', 'index.tsv.recipe.json'), encoding='utf-8') as f:
             self.assertFalse(json.load(f)['alt'])
 
+    def test_no_alt_removes_the_previous_alt_rows(self):
+        # -NoAlt で作り直したら、前の差分は消す(今の索引と行番号が合わない古い行を混ぜない)
+        self.assertEqual(self.index().returncode, 0)
+        self.assertTrue(os.path.exists(self.alt))
+        r = self.index('-NoAlt')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertFalse(os.path.exists(self.alt))
+        self.assertFalse(os.path.exists(self.alt[:-len('.tsv')] + '.json'))
+
 
 if __name__ == '__main__':
     unittest.main()

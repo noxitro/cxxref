@@ -27,7 +27,7 @@ PROTOCOL = '2025-06-18'
 # ツールの結果をモデルに渡さず、ファイルに退かせて先頭だけを見せる【実測: 1.0.18 の app.js。1.0.105 は native に移り、
 # 計測で 21.2 KB 以上が退かされ、18,000 バイト以下は退かされなかった】。少し下回らせる
 MAX_BYTES = 18000
-FIT_LIMITS = (60, 25, 10)  # 短い形でも上限を超えるときに、順に試す --limit(1 節に並べる行数)
+FIT_LIMITS = (60, 25, 10, 5, 2)  # 短い形でも上限を超えるときに、順に試す --limit(1 節に並べる行数)
 
 # 定義は、モデルを呼ぶたびに毎回送られる(C++ でないリポジトリでも)。言っていることは変えずに短く保つ
 ROOT_ARG = {'type': 'string', 'description': 'Absolute path of your working folder (the server may run elsewhere)'}
@@ -46,7 +46,8 @@ TOOLS = [
             'virtual overrides, unresolved template calls (decide from the line), and text matches of the name that '
             'are not in the index, with the reason (comment, inactive #if, dropped macro argument, local name, macro, '
             'string, file not analyzed). Code in #if branches the build does not compile is included, marked '
-            '[inactive: #if ...]. Macros (#define and expansions) are symbols too.'),
+            '[inactive: #if ...]. Matches in non-C/C++ files (scripts, build files, docs) are listed too. Lines over the '
+            'limit are counted by folder; pass path to list them. Macros (#define and expansions) are symbols too.'),
         'inputSchema': {
             'type': 'object',
             'properties': {

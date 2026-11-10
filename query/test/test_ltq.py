@@ -454,7 +454,7 @@ class LtqTest(unittest.TestCase):
         self.assertEqual(ltq.top_dirs(['a/x/f.cpp', 'a/x/g.cpp', 'a/y/p/f.cpp', 'a/z/f.cpp', 'a/z/q/f.cpp'], 1),
                          ['a/x/  2 matches in 2 files', '... 3 more folders (3 matches) under: a/z/ 2, a/y/ 1'])
         many = [f'd{i:02}/f.cpp' for i in range(12)]
-        self.assertTrue(ltq.top_dirs(many, 1)[1].endswith('d08/ 1, ... 3 more'))
+        self.assertTrue(ltq.top_dirs(many, 1)[1].endswith('d10/ 1, d11/ 1'))  # 上の階層は数を切らない
 
     def test_non_source_files_are_searched_by_name(self):
         # C/C++ でないファイル(生成器・ビルドの定義・文書)の一致も出す。中身は解析しないが、rg なら出る行を無いことにしない
@@ -491,6 +491,16 @@ class LtqTest(unittest.TestCase):
         self.assertNotIn('build.cmake', out)
         # --exclude はこの節にも効く
         self.assertNotIn(head, self.ltq('refs', 'Run', '--exclude', 'tools'))
+
+    def test_matched_symbols_are_capped_by_row_count(self):
+        # 短い名前が多くの記号に当たっても、記号の一覧は行の多い順に上限まで。残りは件数(行は下の節に記号つきで出る)
+        rows = [(f'n{i:02}::Run', 'decl', '', f'src/a.cpp:{i + 1}:6', 'void Run();') for i in range(30)]
+        rows += [('n29::Run', 'call', 'Main', 'src/a.cpp:3:3', 'Run();')]
+        self.index('index', rows, [self.COMMENT])
+        line = next(s for s in self.ltq('refs', 'Run').splitlines() if s.startswith('  matched symbols: '))
+        self.assertTrue(line.startswith('  matched symbols: n29::Run (2), n00::Run (1), '))
+        self.assertEqual(line.count('::Run ('), ltq.SYM_LIST)
+        self.assertIn(f', ... {30 - ltq.SYM_LIST} more symbols ({30 - ltq.SYM_LIST} rows;', line)
 
     def test_unparsed_files_are_listed_line_by_line_in_the_full_output(self):
         # どの TU も読まないファイルの一致はコードでありうる。全文では 10 行を超えても 1 行ずつ出す(rg と同じ見え方)

@@ -32,7 +32,11 @@ code-ref-index-mcp.cmd [--root <ソースのルート>] [--index <索引.tsv>] [
 - `--index` を省くと、`<ルート>\.index` の中の索引本体(構成ごとの `<名前>.tsv`)をすべてまとめて引きます
 - 環境変数 `CRI_ROOT` と `CRI_INDEX` でも指定できます
 - `--auto-update-wait`(既定 10 秒)と `--no-auto-update` は、下の「索引の自動更新」を参照してください。環境変数 `CRI_AUTO_UPDATE_WAIT`・`CRI_AUTO_UPDATE=0` でも指定できます
-- `--max-output-bytes`(既定 18,000)は、結果の大きさの上限です。超えると、`refs` は短い形(`ltq refs --compact`)で出し直し、それでも超えれば末尾を切って、そう書き添えます。環境変数 `CRI_MAX_OUTPUT_BYTES` でも指定でき、0 で切りません
+- `--max-output-bytes`(既定 18,000)は、結果の大きさの上限です。超えると、`refs` は次の順に出し直し、収まった最初のものを返します。どれでも収まらなければ末尾を切って、そう書き添えます。環境変数 `CRI_MAX_OUTPUT_BYTES` でも指定でき、0 で切りません
+  1. 短い形の 1 段目(`ltq refs --compact`)
+  2. 短い形の 2 段目(`--compact --compact`。無効な `#if` とマクロの定義の中の一致もフォルダごとの件数にする)
+  3. 2 段目で、1 節に並べる行を 60・25・10・5・2 行に減らしたもの(呼び出し側が渡した `limit` より小さい値だけ)
+  - 省いた行は、どれもフォルダごとか上の階層ごとの件数で残ります。引数 `path` にそのフォルダを渡すと、1 行ずつ出し直せます。O3DE で、よくある名前(`Create`・`GetName`・`Activate` など)を引いても、3. で収まります【実測】
   - Copilot CLI は、ツールの結果が上限(既定は 20,480 バイト、環境変数 `COPILOT_LARGE_OUTPUT_THRESHOLD_BYTES`)を超えると、中身をモデルに渡さず、ファイルに退かせて先頭だけを見せます。大きなコードベースでよくある名前を引くと 75〜110 KB になり、答えの要の部分が届かなかったので、上限を設けました(`../docs/design.md` の「測り直し」)
 
 ## 索引の自動更新
@@ -109,7 +113,7 @@ Copilot CLI は、許可リストに無い MCP サーバーの初期化時の説
 
 ## テスト
 
-`test\run_test.bat` をダブルクリックします。`server.py` を子プロセスで起動し、合成した小さな索引に対して `initialize`・`tools/list`・`tools/call`(`refs`・`check`)と誤った要求を JSON-RPC で送り、返事を確かめます。結果の大きさの上限(短い形で収まればそれを返し、収まらなければ切ること、環境変数 `CRI_MAX_OUTPUT_BYTES`、0 なら切らないこと)も確かめます。Copilot は要りません。
+`test\run_test.bat` をダブルクリックします。`server.py` を子プロセスで起動し、合成した小さな索引に対して `initialize`・`tools/list`・`tools/call`(`refs`・`check`)と誤った要求を JSON-RPC で送り、返事を確かめます。結果の大きさの上限(短い形で収まればそれを返すこと、解決済みの行が多いときは節ごとの行数を減らし、後ろの節を切らないこと、収まらなければ切ること、環境変数 `CRI_MAX_OUTPUT_BYTES`、0 なら切らないこと)も確かめます。Copilot は要りません。
 
 `ltidx.exe` をビルド済みなら、自動更新も確かめます(`test_autoupdate.py`)。小さなプロジェクトを索引にしてからソースを変え、次の呼び出しで作り直されること、TU を足すと拾うこと、待たない設定でも次の呼び出しで新しい索引を使うこと、記録の無い索引には触らないこと、失敗を繰り返さないことです。GitHub Actions では、ltidx をビルドするジョブでこれを流します(`CRI_REQUIRE_LTIDX=1` を付け、`ltidx.exe` が無ければ飛ばさずに失敗させます)。
 
