@@ -67,7 +67,7 @@ index-project.bat -Root D:\src\game -Cdb D:\build\game
 LLVM と Visual Studio で ltidx をビルドせずに使うときは、`get-ltidx.bat` をダブルクリックします。GitHub のリリースから、`plugin.json` の版の配布物(`cxxref-ltidx-win-x64.zip`。ltidx.exe・clang の組み込みヘッダー・ライセンス)を取ってきて、sha256 を確かめてから `%LOCALAPPDATA%\cxxref\ltidx` に置きます。途中で失敗したら前のものを残します。
 
 - `-Version 0.5.0` で版を、`-Zip <zip>` で手元の zip を、`-Dest <フォルダ>` で置き場所を指定できます
-- 配布物は `package-ltidx.ps1` が作ります(CI がタグのときにリリースに載せます)。ライセンスの表示(LLVM のライセンス文と、`llvm-notices.py` が LLVM のソースから作る別ライセンスの部品の表示)は CI が渡します。手元で `pwsh -File package-ltidx.ps1` で作った `dist\` の zip は、表示が足りないので配らないでください(そう警告します)
+- 配布物は `package-ltidx.ps1` が作ります(CI が、版の上がったコミットが main に入ったとき、またはタグの push のときにリリースに載せます)。ライセンスの表示(LLVM のライセンス文と、`llvm-notices.py` が LLVM のソースから作る別ライセンスの部品の表示)は CI が渡します。手元で `pwsh -File package-ltidx.ps1` で作った `dist\` の zip は、表示が足りないので配らないでください(そう警告します)
 
 ### 使い方の指示を足す・消す(`setup-instructions.bat`)
 
