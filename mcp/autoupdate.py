@@ -36,6 +36,34 @@ def find_ltidx():
     return None
 
 
+def plugin_version():
+    """このプラグイン(リポジトリ)の版(plugin.json の version)。読めなければ空"""
+    try:
+        with open(os.path.join(HERE, '..', 'plugin.json'), encoding='utf-8-sig') as f:
+            return str(json.load(f).get('version') or '')
+    except (OSError, ValueError):
+        return ''
+
+
+def stale_ltidx():
+    """使う ltidx が取ってきたもの(%LOCALAPPDATA%/cxxref/ltidx)で、その版(隣の version.txt)がプラグインと違えば
+    (その版, プラグインの版)。ビルドしたもの・環境変数 LTIDX のもの・見つからないときは None。
+    プラグインを更新しても取ってきた ltidx は入れ替わらないので、/cxxref-index で取り直すよう知らせるのに使う"""
+    p = find_ltidx()
+    if not p or os.environ.get('LTIDX') or not os.environ.get('LOCALAPPDATA'):
+        return None
+    got = os.path.normcase(os.path.join(os.environ['LOCALAPPDATA'], 'cxxref', 'ltidx', 'ltidx.exe'))
+    if os.path.normcase(os.path.abspath(p)) != got:
+        return None
+    want = plugin_version()
+    try:
+        with open(os.path.join(os.path.dirname(p), 'version.txt'), encoding='utf-8-sig') as f:
+            have = f.read().strip()
+    except OSError:
+        have = ''
+    return (have or 'unknown', want) if want and have != want else None
+
+
 def no_ltidx():
     if os.environ.get('LTIDX'):  # 取ってきても直らない
         return f'ltidx.exe not found at LTIDX={os.environ["LTIDX"]}; fix or unset the LTIDX environment variable'

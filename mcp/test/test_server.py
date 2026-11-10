@@ -284,6 +284,15 @@ class ReuseTest(unittest.TestCase):
         self.assertEqual(code, 0, text)
         return text
 
+    def test_old_downloaded_ltidx_is_told_once(self):
+        # 取ってきた ltidx がプラグインより古ければ、最初の結果に 1 回だけ /cxxref-index で取り直すよう添える
+        from unittest import mock
+        with mock.patch.object(self.server.autoupdate, 'stale_ltidx', return_value=('0.5.1', '0.6.0')):
+            first, second = self.refs(), self.refs()
+        self.assertIn('ltidx 0.5.1 is older than this plugin (0.6.0)', first)
+        self.assertIn('/cxxref-index', first)
+        self.assertNotIn('is older than this plugin', second)
+
     def test_index_is_reused_while_unchanged(self):
         self.refs()
         first = self.cfg.opened[2]

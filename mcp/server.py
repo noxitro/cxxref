@@ -124,6 +124,7 @@ class Config:
         self.wait = wait  # 自動更新で待つ秒数。None なら自動更新しない
         self.max_bytes = max_bytes  # 結果の大きさの上限(0 なら切らない)
         self.opened = None  # (鍵, 索引のファイルの状態, ltq.Index)。最後に引いた索引を 1 つだけ保つ
+        self.told_ltidx = False  # 取ってきた ltidx が古いことを、もう知らせたか(1 回だけ)
 
     def open_index(self, paths, root):
         """索引を開く。前の呼び出しと同じ索引で、索引のファイル(本体と隣のファイル)の大きさと更新日時が変わっていなければ、
@@ -169,6 +170,12 @@ def run_ltq(cfg, args, start=None):
                 cfg.keep(paths, root, new)
             idx = new
             note += up
+        if not cfg.told_ltidx:
+            cfg.told_ltidx = True
+            old = autoupdate.stale_ltidx()
+            if old:
+                note += (f'ltidx {old[0]} is older than this plugin ({old[1]}): the index lacks newer kinds of rows. '
+                         'Ask the user to run /cxxref-index (it fetches the new ltidx and rebuilds the index).\n')
     elif not cfg.index:
         plugin = os.environ.get('PLUGIN_ROOT')
         if not start and plugin and os.path.normcase(root) == os.path.normcase(os.path.abspath(plugin)):

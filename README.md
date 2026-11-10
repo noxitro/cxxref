@@ -139,8 +139,9 @@ Copilot で C++ の呼び出し箇所を探すと、LSP(clangd)を渡しても�
 
 プラグインの拡張(`com.github.copilot\extensions\cxxref\extension.mjs`)が足すコマンドです。Copilot CLI のセッションで `/cxxref-index` と打つと、モデルを呼ばずに次を行います。
 
-- ltidx.exe が無ければ、リリースから取ってくる(`scripts\get-ltidx.ps1` と同じ)
-- 作業フォルダ(または、親へさかのぼって `.index` のあるフォルダ)の索引を、裏で作る。索引がすでにあれば、変わった TU だけを作り直す。`/cxxref-index <ルート>` でルートを指定できる
+- ltidx.exe が無ければ、リリースから取ってくる(`scripts\get-ltidx.ps1` と同じ)。取ってきた ltidx の版(`%LOCALAPPDATA%\cxxref\ltidx\version.txt`)がプラグインの版と違うとき(プラグインを更新したときなど)も取り直す。取り直せなければ(ltidx を使っている最中など)、そう出して手元のもので続ける
+- 作業フォルダ(または、親へさかのぼって `.index` のあるフォルダ)の索引を、裏で作る。索引がすでにあれば、変わった TU だけを作り直す(何も変わっていなければ、すぐ終わる)。`/cxxref-index full` で最初から作り直す。`/cxxref-index <ルート>`・`/cxxref-index full <ルート>` でルートを指定できる(`full` という名前のフォルダは `./full` と書く)
+- ltidx の出力の形式が変わった版に替わったときは、変わった TU だけでなく全 TU を作り直す(形式の版を TU ごとの記録に入れている)。プラグインを更新したら、`/cxxref-index` を 1 回実行すれば、新しい ltidx を取ってきて索引も新しい形式に揃う。MCP サーバーも、取ってきた ltidx が古いと分かれば、最初の結果にそう書き添える
 - `compile_commands.json` の作り元(`.slnx`・`.sln`・`CMakeLists.txt`・`.vcxproj`。探し方は `scripts\README.md`)の候補が複数あれば、CLI のダイアログで選ばせる(モデルは呼ばない)。選んだものは作り方の記録(`.index\index.tsv.recipe.json`)に残るので、次からは聞かない。選び直すときは、その記録を消してから実行する
 - 始めたとき・終わったとき(かかった秒数)・失敗したとき(ログの場所)を、セッションに出す。ログは `<ルート>\.index\cxxref-index.log`。同時に 2 つは走らせない
 - 走っている間は、進み具合をセッションに出す。`compile_commands.json` を用意している間はそう出し(1 分を超えると 1 分ごとに経過秒数も)、ltidx が始まると、解析した TU の数・割合・解析エラーの数を、およそ 1 割進むごとに出す(行が増えすぎないよう、前の行から 10 秒以上あける)。元は ltidx が TU ごとに書く `<ルート>\.index\index.log`(`[n/全体] ok|NG ファイル` の行)。ターミナルで細かく追うなら `Get-Content -Wait <ルート>\.index\index.log`

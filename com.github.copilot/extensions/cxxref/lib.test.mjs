@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { enableRoot, escapeMarkdown, findLtidx, gitTop, indexRoot, lastCwd, parseEnableArgs, parseProgress, pluginRoot, progressNote, projectChoices, savedProject, statusHint, targetRoot } from "./lib.mjs";
+import { enableRoot, escapeMarkdown, findLtidx, gitTop, indexRoot, lastCwd, parseEnableArgs, parseIndexArgs, parseProgress, pluginRoot, progressNote, projectChoices, savedProject, statusHint, targetRoot } from "./lib.mjs";
 
 test("projectChoices: フルパスの行を、ルートからの相対パスの選択肢にする", () => {
   const root = join(tmpdir(), "cxxref-lib-test");
@@ -71,6 +71,37 @@ test("findLtidx: LTIDX が無いファイルなら取ってこない(error)。LO
     writeFileSync(join(plugin, "indexer", "build", "ltidx.exe"), "");
     assert.equal(findLtidx(plugin, { LOCALAPPDATA: join(d, "app") }).path, join(plugin, "indexer", "build", "ltidx.exe"));
   } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test("findLtidx: 取ってきた ltidx の版がプラグインと違えば stale(ビルドしたもの・LTIDX のものは見ない)", () => {
+  const d = tree();
+  try {
+    const plugin = join(d, "plugin");
+    writeFileSync(join(plugin, "plugin.json"), '{"name": "cxxref", "version": "0.6.0"}');
+    const got = join(d, "app", "cxxref", "ltidx");
+    mkdirSync(got, { recursive: true });
+    writeFileSync(join(got, "ltidx.exe"), "");
+    const env = { LOCALAPPDATA: join(d, "app") };
+    assert.deepEqual(findLtidx(plugin, env).stale, { have: "不明", want: "0.6.0" });  // version.txt の無い古い配布物
+    writeFileSync(join(got, "version.txt"), "0.5.1\n");
+    assert.deepEqual(findLtidx(plugin, env).stale, { have: "0.5.1", want: "0.6.0" });
+    writeFileSync(join(got, "version.txt"), "0.6.0\n");
+    assert.deepEqual(findLtidx(plugin, env), { path: join(got, "ltidx.exe") });
+    writeFileSync(join(got, "version.txt"), "0.5.1\n");
+    assert.deepEqual(findLtidx(plugin, { ...env, LTIDX: join(got, "ltidx.exe") }), { path: join(got, "ltidx.exe") });
+    mkdirSync(join(plugin, "indexer", "build"), { recursive: true });
+    writeFileSync(join(plugin, "indexer", "build", "ltidx.exe"), "");
+    assert.equal(findLtidx(plugin, env).stale, undefined);
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test("parseIndexArgs: 先頭の full で最初から作り直す。残りはルート", () => {
+  assert.deepEqual(parseIndexArgs(""), { full: false, root: "" });
+  assert.deepEqual(parseIndexArgs("full"), { full: true, root: "" });
+  assert.deepEqual(parseIndexArgs(" FULL  E:\\src\\proj "), { full: true, root: "E:\\src\\proj" });
+  assert.deepEqual(parseIndexArgs("fullpath"), { full: false, root: "fullpath" });
+  assert.deepEqual(parseIndexArgs("./full"), { full: false, root: "./full" });
+  assert.deepEqual(parseIndexArgs('"E:\\a b"'), { full: false, root: '"E:\\a b"' });
 });
 
 test("lastCwd は最後の作業フォルダを返す", () => {

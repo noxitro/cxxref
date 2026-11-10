@@ -13,18 +13,40 @@ export function pluginRoot(start) {
   throw new Error("cxxref のプラグインのフォルダが見つかりません");
 }
 
+// プラグインの版(plugin.json の version)。読めなければ ""
+export function pluginVersion(plugin) {
+  try {
+    return String(JSON.parse(readFileSync(join(plugin, "plugin.json"), "utf8").replace(/^﻿/, "")).version || "");
+  } catch {
+    return "";
+  }
+}
+
 // ltidx.exe を MCP サーバー(mcp\autoupdate.py の find_ltidx)と同じ順に探す。{ path } か、
-// 環境変数 LTIDX が無いファイルを指すときは { error }(取ってきても直らないので、取ってこない)、どこにも無ければ {}
+// 環境変数 LTIDX が無いファイルを指すときは { error }(取ってきても直らないので、取ってこない)、どこにも無ければ {}。
+// 取ってきたもの(%LOCALAPPDATA%\cxxref\ltidx)の版(隣の version.txt)がプラグインの版と違えば、stale: { have, want } を添える
+// (プラグインを更新しても、取ってきた ltidx は入れ替わらない。ビルドしたものと LTIDX のものは版を見ない)
 export function findLtidx(plugin, env = process.env) {
   if (env.LTIDX) {
     return existsSync(env.LTIDX) ? { path: env.LTIDX } : { error: `環境変数 LTIDX の ltidx.exe がありません: ${env.LTIDX}` };
   }
-  const cands = [join(plugin, "indexer", "build", "ltidx.exe")];
-  if (env.LOCALAPPDATA) cands.push(join(env.LOCALAPPDATA, "cxxref", "ltidx", "ltidx.exe"));  // 無ければ探さない(相対パスにしない)
-  for (const p of cands) {
-    if (existsSync(p)) return { path: p };
-  }
-  return {};
+  const built = join(plugin, "indexer", "build", "ltidx.exe");
+  if (existsSync(built)) return { path: built };
+  if (!env.LOCALAPPDATA) return {};  // 無ければ探さない(相対パスにしない)
+  const got = join(env.LOCALAPPDATA, "cxxref", "ltidx", "ltidx.exe");
+  if (!existsSync(got)) return {};
+  let have = "";
+  try { have = readFileSync(join(dirname(got), "version.txt"), "utf8").trim(); } catch { /* 古い配布物には無い */ }
+  const want = pluginVersion(plugin);
+  return want && have !== want ? { path: got, stale: { have: have || "不明", want } } : { path: got };
+}
+
+// /cxxref-index の引数。先頭が full なら、前回の索引があっても最初から作り直す(残りはルート)。
+// full という名前のフォルダは ./full と書く
+export function parseIndexArgs(arg) {
+  const a = (arg ?? "").trim();
+  const m = a.match(/^full(?:\s+(.*))?$/i);
+  return m ? { full: true, root: (m[1] ?? "").trim() } : { full: false, root: a };
 }
 
 // セッションの作業フォルダ(最後の session.start / session.context_changed の cwd)

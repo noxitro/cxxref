@@ -1,7 +1,10 @@
 // cxxref の Copilot CLI 拡張。モデルは呼ばない(スクリプトを裏で動かし、結果をセッションに出すだけ)。
 //
-// /cxxref-index [ルート]  作業中のリポジトリの索引を作る。ltidx.exe が無ければ、先に scripts\get-ltidx.ps1 で取ってくる。
-//                         索引がすでにあれば、変わった TU だけを作り直す(-Update)。裏で動かし、終わったらそう出す。
+// /cxxref-index [full] [ルート]
+//                         作業中のリポジトリの索引を作る。ltidx.exe が無いか、取ってきたものの版がプラグインと違えば、
+//                         先に scripts\get-ltidx.ps1 で取ってくる(取り直せなければ、そう言って手元のもので続ける)。
+//                         索引がすでにあれば、変わった TU だけを作り直す(-Update)。full を付けると最初から作り直す。
+//                         ltidx の出力の形式が変わった版に替わったときは、-Update でも全 TU を作り直す。裏で動かし、終わったらそう出す。
 //                         走っている間は、進み具合(compile_commands.json の用意・解析した TU の数)をときどき出す。
 //                         ルートを省くと、作業フォルダから親へさかのぼって .index のあるフォルダ、無ければ作業フォルダ。
 //                         compile_commands.json の作り元(.slnx など)の候補が複数あれば、ダイアログで選ばせる。
@@ -18,7 +21,7 @@ import { closeSync, existsSync, mkdirSync, openSync, readFileSync, statSync } fr
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { enableRoot, escapeMarkdown, findLtidx, lastCwd, parseEnableArgs, parseProgress, pluginRoot, progressNote, projectChoices, savedProject, statusHint, targetRoot } from "./lib.mjs";
+import { enableRoot, escapeMarkdown, findLtidx, lastCwd, parseEnableArgs, parseIndexArgs, parseProgress, pluginRoot, progressNote, projectChoices, savedProject, statusHint, targetRoot } from "./lib.mjs";
 
 function run(script, args, log) {
   return new Promise((done) => {
@@ -115,7 +118,8 @@ async function indexCommand(ctx) {
   try {
     const plugin = pluginRoot(dirname(fileURLToPath(import.meta.url)));
     const cwd = lastCwd(await session.getEvents()) || process.cwd();
-    const t = targetRoot(ctx.args, cwd);
+    const ia = parseIndexArgs(ctx.args);
+    const t = targetRoot(ia.root, cwd);
     if (t.error) {
       await tell(`cxxref: ${t.error}`, "error");
       return;
@@ -131,22 +135,32 @@ async function indexCommand(ctx) {
       await tell(`cxxref: ${lt.error}(LTIDX を直すか消してください)`, "error");
       return;
     }
-    if (!lt.path) {
+    if (!lt.path || lt.stale) {
       // 取ってくる前は、ルートに .index を作らない(失敗したときに空の .index が残ると、そこが索引のルートと見なされる)
       const log = join(tmpdir(), "cxxref-get-ltidx.log");
-      await tell("cxxref: ltidx.exe が無いので、先にリリースから取ってきます(scripts\\get-ltidx.ps1)");
+      const old = lt.path ? lt : null;
+      await tell(old
+        ? `cxxref: 手元の ltidx(版 ${old.stale.have})がプラグイン(版 ${old.stale.want})と違うので、取り直します(scripts\\get-ltidx.ps1)`
+        : "cxxref: ltidx.exe が無いので、先にリリースから取ってきます(scripts\\get-ltidx.ps1)");
       const r = await run(join(plugin, "scripts", "get-ltidx.ps1"), [], log);
       lt = findLtidx(plugin);
       if (r.code !== 0 || !lt.path) {
-        await tell(`cxxref: ltidx を取ってこられませんでした(${why(r)})。ログ: ${log}`, "error");
-        return;
+        if (!old) {
+          await tell(`cxxref: ltidx を取ってこられませんでした(${why(r)})。ログ: ${log}`, "error");
+          return;
+        }
+        // 取り直せなくても(ltidx を使っている最中・その版のリリースが無いなど)、手元のもので続ける
+        lt = old;
+        await tell(`cxxref: ltidx を取り直せなかったので、手元のもの(版 ${old.stale.have})で続けます(${why(r)})。ログ: ${log}`, "warning");
       }
     }
     const dir = join(root, ".index");
     mkdirSync(dir, { recursive: true });
     const log = join(dir, "cxxref-index.log");
-    const update = existsSync(join(dir, "index.tsv.deps.tsv"));
-    await tell(`cxxref: 索引を${update ? "作り直し" : "作り"}始めました(${root})。裏で動かすので、作業を続けてかまいません。ログ: ${log}`);
+    const had = existsSync(join(dir, "index.tsv.deps.tsv"));
+    const update = had && !ia.full;  // 前回の索引があれば、変わった TU だけ(full なら最初から)
+    const what = update ? "作り直し(変わった TU だけ)" : had ? "最初から作り直し" : "作り";
+    await tell(`cxxref: 索引を${what}始めました(${root})。裏で動かすので、作業を続けてかまいません。ログ: ${log}`);
     // index-project.ps1 は、索引ができたら 0、できなければ 2 で終える(ltidx の失敗や異常終了も 2)
     const args = ["-Root", root, ...(pick.project ? ["-Project", pick.project] : []), ...(update ? ["-Update"] : [])];
     const stop = watchProgress(join(dir, "index.log"), Date.now());
@@ -194,7 +208,7 @@ const session = await joinSession({
     {
       // 拡張のコマンドには引数のヒントを付けられないので、説明文の先頭に引数を書く
       name: "cxxref-index",
-      description: "[ルート] — C++ の参照索引(cxxref)を作る・作り直す。裏で動かす(モデルは呼ばない)",
+      description: "[full] [ルート] — C++ の参照索引(cxxref)を作る・変わった分を作り直す。full で最初から作り直す。裏で動かす(モデルは呼ばない)",
       handler: (ctx) => {
         indexCommand(ctx).catch((err) => tell(`cxxref: ${err?.message ?? err}`, "error"));
       },
