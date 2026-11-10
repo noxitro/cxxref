@@ -1,21 +1,21 @@
 ﻿# 問題 × 条件 × 回数をまとめて run.ps1 で流す。runs\index.jsonl に終わった(exit 0 の)回があれば飛ばすので、
 # 止まっても同じコマンドで続きから流せる。Copilot CLI のセッションは実行後に最新のものを引くので、並列には流さない。
-#   pwsh -File batch.ps1 -Round v6 -Tasks tasks.json -TaskIds T1,T2 -Conds A,F,G -Reps 5 -Workspace <写し> -IndexDir <dir> -Index nox-v6.tsv
+#   pwsh -File batch.ps1 -Round v6 -Tasks local\tasks-a.json -TaskIds T1,T2 -Conds A,F,G -Reps 5 -Workspace <写し> -IndexDir <dir> -Index <索引.tsv>
 param(
     [Parameter(Mandatory)][string]$Round,
     [Parameter(Mandatory)][string[]]$TaskIds,
     [Parameter(Mandatory)][string[]]$Conds,
     [int]$Reps = 5,
-    [string]$Tasks = 'tasks.json',
+    [string]$Tasks = 'local\tasks-a.json',
     [string]$Format = 'answer-format.md',
     [string]$Workspace = $env:CRI_BENCH_WORKSPACE,
     [string]$IndexDir = $env:CRI_BENCH_INDEXDIR,
-    [string]$Index = 'nox.tsv',
+    [string]$Index = 'index.tsv',
     [string]$Digest = '',           # 写しの指紋(snapshot.py digest)。指定すると、始める前と各回の後に確かめる
     [string]$Clangd = 'clangd',     # 条件 B・D の clangd(run.ps1 に渡す)
     [string]$Model = 'gpt-6-luna',  # run.ps1 に渡す
     [string]$Provider = '',         # run.ps1 に渡す('anthropic' で BYOK)
-    [string]$Codebase = 'nox'       # run.ps1 に渡す(条件 I・K・M・N の索引の置き場の名前)
+    [string]$Codebase = 'a'         # run.ps1 に渡す(条件 I・K・M・N の索引の置き場の名前)
 )
 $ErrorActionPreference = 'Stop'
 $bench = $PSScriptRoot

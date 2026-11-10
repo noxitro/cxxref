@@ -1,6 +1,6 @@
 """v13 の入力トークンの比と、その 95% の bootstrap 信頼区間を出す。
 
-usage: python -I ratio13.py --round v13q --conds A,P,Q [--base A] [--tasks v13/tasks-stage2.json]
+usage: python -I ratio13.py --round v13q --conds A,P,Q [--base A] [--tasks local/v13-tasks-stage2-a.json]
 
 比の出し方(v13 の段階 1・2 と測り直しは、どれもこの出し方の値)
 - 問題ごとの比: 各条件の回の入力の平均どうしの比(例: P の平均 / A の平均)。入力の合計の比と同じ
@@ -19,7 +19,7 @@ def main():
     ap.add_argument('--round', required=True)
     ap.add_argument('--conds', required=True)
     ap.add_argument('--base', default='A')
-    ap.add_argument('--tasks', help='この問題のファイル(v13/tasks-stage2.json など)の問題だけに絞る')
+    ap.add_argument('--tasks', help='この問題のファイル(local/v13-tasks-stage2-a.json など)の問題だけに絞る')
     ap.add_argument('--only', help='問題の id をこの文字で始まるものに絞る(例: S1-requests,S1-newtonsoft,S1-zod)')
     a = ap.parse_args()
     conds = a.conds.split(',')

@@ -1,4 +1,4 @@
-"""v13 の段階 2(Nox)の対象を、決めた手順で無作為に選び、正解を作る。
+"""v13 の段階 2(コードベース A)の対象を、決めた手順で無作為に選び、正解を作る。
 
 usage: python -I sample2.py <出力の json>
 
@@ -15,8 +15,12 @@ import collections, json, os, random, re, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cxxcheck
 
-WS = r'E:\dev\bench-data\cxxref\nox-20261103'
-IDX = r'E:\dev\bench-data\cxxref\index\nox-v6.tsv'
+# 写しと索引の場所は bench/local/codebase-a.json(公開しない)。無ければ使えない
+_A_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'local', 'codebase-a.json')
+if not os.path.exists(_A_PATH):
+    raise SystemExit(f'コードベース A の場所がありません: {_A_PATH}(公開しないコードベースの台本です)')
+_A = json.load(open(_A_PATH, encoding='utf-8'))
+WS, IDX = _A['path'], _A['index']
 GEN = re.compile(r'(^|/)(reflection_generated|gen)/')
 TEST = re.compile(r'(^|/)(test|tests|bench)/')
 

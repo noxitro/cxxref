@@ -7,7 +7,7 @@
   "args": ["/c", "${TOOLS}\\${STATE}\\run.bat"],
   "env": {},
   "tools": ["*"],
-  "vars": { "nox": { "STATE": "clang_index_mcp-state" }, "ue5": { "STATE": "clang_index_mcp-state-ue5" } },
+  "vars": { "a": { "STATE": "clang_index_mcp-state" }, "ue5": { "STATE": "clang_index_mcp-state-ue5" } },
   "instructions": "clang-index-mcp-instructions.md",
   "note": "run.bat(clang-index-mcp.run.bat を写したもの)が LIBCLANG_PATH・キャッシュの置き場・PATH を設定し、状態のフォルダに cd してから起動する。session.json が起動時のカレントディレクトリに書かれるため。前回の set_project を session.json から読み直すので、索引は前もって作っておき、エージェントに set_project を呼ばせなくてよい。起動に 12 秒ほどかかる"
 }

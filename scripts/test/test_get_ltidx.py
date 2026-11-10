@@ -102,6 +102,19 @@ class GetLtidxTest(unittest.TestCase):
         self.assertIn('sha256', r.stdout + r.stderr)
         self.assertTrue(os.path.exists(os.path.join(self.ltidx, 'ltidx.exe')))  # 前のものが残る
 
+    def test_old_zip_without_version_gets_one(self):
+        # 版の記録(version.txt)の無い古い配布物には、取ってきた版を書く(/cxxref-index が毎回取り直さないように)
+        import zipfile
+        old = os.path.join(self.dest, 'old.zip')
+        with zipfile.ZipFile(self.zip) as src, zipfile.ZipFile(old, 'w') as dst:
+            for n in src.namelist():
+                if os.path.basename(n) != 'version.txt':
+                    dst.writestr(n, src.read(n))
+        r = ps('get-ltidx.ps1', '-Zip', old, '-Dest', self.ltidx, '-Version', '0.4.9')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        with open(os.path.join(self.ltidx, 'version.txt'), encoding='utf-8') as f:
+            self.assertEqual(f.read().strip(), '0.4.9')
+
 
 if __name__ == '__main__':
     unittest.main()

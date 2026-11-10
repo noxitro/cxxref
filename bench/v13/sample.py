@@ -16,9 +16,14 @@ REPOS = {
                    'def': re.compile(r'^\s*(?:public|internal)\s+(?:static\s+|virtual\s+|override\s+|sealed\s+)*[\w<>\[\],.? ]+?\s+([A-Z]\w*)\s*(?:<[^>]*>)?\s*\(', re.M)},
     'zod': {'root': os.path.join(DATA, 'v13', 'zod'), 'src': ['src'], 'ext': ('.ts',),
             'def': re.compile(r'^\s*export\s+(?:async\s+)?function\s+([A-Za-z]\w*)\s*[<(]', re.M)},
-    'nox-noindex': {'root': os.path.join(DATA, 'nox-20261103'), 'src': ['runtime'], 'ext': ('.h', '.cpp'),
-                    'def': re.compile(r'^\s*(?:static\s+|inline\s+|virtual\s+)*(?:[\w:<>,*& ]+?)\s+([A-Z]\w*)\s*\([^;{)]*\)\s*(?:const\s*)?;', re.M)},
+    'a-noindex': {'root': None, 'src': ['runtime'], 'ext': ('.h', '.cpp'),  # コードベース A。場所は bench/local/codebase-a.json
+                  'def': re.compile(r'^\s*(?:static\s+|inline\s+|virtual\s+)*(?:[\w:<>,*& ]+?)\s+([A-Z]\w*)\s*\([^;{)]*\)\s*(?:const\s*)?;', re.M)},
 }
+_A = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'local', 'codebase-a.json')
+if os.path.exists(_A):
+    REPOS['a-noindex']['root'] = json.load(open(_A, encoding='utf-8'))['path']
+else:
+    del REPOS['a-noindex']
 # 言語の組み込みと同じ名前(Python の next など)は、名前の一致が組み込みの呼び出しと混ざるので外す
 import builtins
 BUILTINS = set(dir(builtins))

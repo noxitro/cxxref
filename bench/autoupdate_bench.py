@@ -2,7 +2,7 @@
 
   python -I autoupdate_bench.py --workspace <作業フォルダ> --index <索引.tsv> [--cdb <フォルダ>] [--reps N] [--out <tsv>] <問題 ID>=<問い合わせ> ...
 
-問題は tasks.json(edit と truth)から読む。条件ごと(auto: 自動更新あり / off: --no-auto-update)に、
+問題は local/tasks-a.json(edit と truth。公開しない)から読む。条件ごと(auto: 自動更新あり / off: --no-auto-update)に、
   1. 作業フォルダの .index に索引と作り方の記録を置き直す(run.ps1 の条件 F・G と同じ)
   2. edit を当てる(edit の無い問題は、ソースを変えない場合の基準)
   3. サーバーを起動して refs を呼び、応答の時間と、calls の節が正解と同じかを記録する
@@ -124,7 +124,7 @@ def main():
     ap.add_argument('--workspace', required=True)
     ap.add_argument('--index', required=True)
     ap.add_argument('--cdb')
-    ap.add_argument('--tasks', default=os.path.join(HERE, 'tasks.json'))
+    ap.add_argument('--tasks', default=os.path.join(HERE, 'local', 'tasks-a.json'))
     ap.add_argument('--reps', type=int, default=3)
     ap.add_argument('--settle', type=float, default=600)
     ap.add_argument('--conds', default='auto,off')

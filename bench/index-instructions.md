@@ -1,6 +1,6 @@
 # C++ 参照索引
 
-`.index/nox.tsv` は、clang(libtooling)で全 TU を解析して作った C++ の参照索引です。C++ の呼び出し元・参照・定義を探すときは、ソースを grep する前に、まずこの索引を rg で引いてください。
+`.index/index.tsv` は、clang(libtooling)で全 TU を解析して作った C++ の参照索引です。C++ の呼び出し元・参照・定義を探すときは、ソースを grep する前に、まずこの索引を rg で引いてください。
 
 - 形式: 1 行 1 参照のタブ区切り。列は次の 5 つです
   1. 参照先の修飾名
@@ -8,12 +8,12 @@
   3. その参照を含む関数の修飾名(どの関数の中に書かれているか。参照先とは別物)
   4. `path:line:col`
   5. ソース行
-- 修飾名にテンプレート引数は付きません(`nox::Foo<int>::Bar` は `nox::Foo::Bar`)
+- 修飾名にテンプレート引数は付きません(`a::Foo<int>::Bar` は `a::Foo::Bar`)
 - テンプレートの実体化の中の呼び出しも、解決先の関数で載っています
 - `dep` 行は、テンプレートの中で解決先が決まらない呼び出し・参照です(`t.f()`、`this->f()`、`Base::f()` など)。修飾名は `?::f` で、名前しか分かりません。実体化されないテンプレートの呼び出しは `dep` 行にしか現れないので、呼び出し箇所を探すときは `dep` 行も引き、ソース行と周りのコードで呼び出し先を判断してください
 - 例:
-  - `rg "^nox::JobSystem::Initialize\tcall\t" .index/nox.tsv`
-  - `rg "^\?::Initialize\tdep\t" .index/nox.tsv`
-- 修飾名が分からないときは、定義から候補を探します: `rg "::Initialize\tdef\t" .index/nox.tsv`
+  - `rg "^a::JobSystem::Initialize\tcall\t" .index/index.tsv`
+  - `rg "^\?::Initialize\tdep\t" .index/index.tsv`
+- 修飾名が分からないときは、定義から候補を探します: `rg "::Initialize\tdef\t" .index/index.tsv`
 - 索引にはコメントの中と、無効な `#if` の中のコードは含まれません。ソースを rg した一致が索引に無いときは、まずその行がコメント(`/* */` はかなり上から始まることがある)か無効領域の中にないかを疑ってください
-- 索引は Debug|x64 の解析結果です。解析に失敗した TU は `.index/nox.tsv.tu.tsv` に `ok=0` で載っており、その TU だけにある参照は索引にありません
+- 索引は Debug|x64 の解析結果です。解析に失敗した TU は `.index/index.tsv.tu.tsv` に `ok=0` で載っており、その TU だけにある参照は索引にありません

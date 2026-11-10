@@ -2,7 +2,7 @@
 
 このフォルダの C++ は、clang(libtooling)で全 TU を解析した参照索引があり、`ltq` コマンドで引けます。C++ の呼び出し箇所・参照・定義を探すときは、ソースを grep する前に、まず `ltq refs` を実行してください。
 
-- `ltq refs <修飾名>`(例: `ltq refs nox::io::File::Read`。末尾一致なので `File::Read` でもよい)は、1 回で次を返します
+- `ltq refs <修飾名>`(例: `ltq refs a::io::File::Read`。末尾一致なので `File::Read` でもよい)は、1 回で次を返します
   - `calls`: clang が解決した呼び出し。どの関数の中に書かれているか(`[in ...]`)付き
   - `other references`: 関数ポインターの取得、テンプレート引数などの呼び出し以外の参照
   - `definitions and declarations`: 定義と宣言

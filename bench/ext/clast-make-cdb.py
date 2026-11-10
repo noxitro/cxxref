@@ -1,4 +1,4 @@
-"""Nox の MSVC 形式 compile_commands.json を、clast(libclang)が読める形に変換する。
+"""コードベース A の MSVC 形式 compile_commands.json を、clast(libclang)が読める形に変換する。
 
 - --driver-mode=cl を差し込む(libclang に cl.exe 形式の引数 /I /D /std: を解釈させる)
 - /Yu /Yc /Fp(PCH。PCH ファイルは無いので libclang が失敗する)を除く

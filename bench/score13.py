@@ -103,7 +103,7 @@ def score(task, rec, do_compile):
         pname = [w for w in pname if w not in ('bool', 'boolean', 'int', 'const', 'std', 'string')]
         dfile = task['def_file']
         out['param_added'] = bool(pname) and any(pname[-1] in x for p, d in df.items() for x in d['added'] if p == dfile or p.endswith(('.h', '.cpp', '.py', '.ts', '.cs')))
-    if do_compile and kind in ('change', 'log', 'test') and task['repo'] == 'nox':
+    if do_compile and kind in ('change', 'log', 'test') and task['repo'] == 'a':
         import cxxcheck
         w = run13.WORKSPACES[task['repo']]
         files = apply_diff(w['path'], diff) if diff else {}

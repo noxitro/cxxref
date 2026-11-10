@@ -24,7 +24,7 @@
     "diagnostics"
   ],
   "vars": {
-    "nox": {
+    "a": {
       "SEED": "runtime\\kernel\\job_system.cpp"
     }
   },

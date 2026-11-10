@@ -56,6 +56,10 @@ try {
         throw
     }
     if (Test-Path -LiteralPath $old) { Remove-Item -LiteralPath $old -Recurse -Force -ErrorAction SilentlyContinue }
+    # 版の記録の無い古い配布物には、取ってきた版を書いておく(/cxxref-index と MCP サーバーが、プラグインの版と比べる)
+    if (-not (Test-Path -LiteralPath (Join-Path $Dest 'version.txt'))) {
+        [IO.File]::WriteAllText((Join-Path $Dest 'version.txt'), "$Version`n")
+    }
     $v = (Get-Content -Raw -LiteralPath (Join-Path $Dest 'version.txt') -ErrorAction SilentlyContinue)
     "ltidx を置きました: $(Join-Path $Dest 'ltidx.exe')(版 $("$v".Trim()))"
 } finally {

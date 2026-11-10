@@ -526,10 +526,10 @@ public:
                             ASTNodeInfo) override {
     if (isa<NamespaceDecl>(D) || isa<NamespaceAliasDecl>(D)) return true;  // 雑音なので出さない
     // 関数の中の変数・引数と、テンプレートの引数は行にせず、名前の位置だけを local の範囲にする。テキスト検索で同じ名前が
-    // 当たったとき(ローカル変数 begin と std::vector::begin など)、ltq が「別の記号」と言えるように(Nox で、理由の付かない
+    // 当たったとき(ローカル変数 begin と std::vector::begin など)、ltq が「別の記号」と言えるように(コードベース A で、理由の付かない
     // 一致の大半がこれだった)。.skip.tsv は大きくなる(O3DE で 28 MB -> 139 MB)。要らなければ -no-local。
     // 同じ名前の記号が TU に出てくるものだけに絞ると、ヘッダーの範囲が TU ごとに変わって .own.bin が大きくなり、
-    // 合計ではかえって大きかった(Nox で .skip.tsv 6.9 -> 5.6 MB、.own.bin 1.2 -> 3.6 MB)
+    // 合計ではかえって大きかった(コードベース A で .skip.tsv 6.9 -> 5.6 MB、.own.bin 1.2 -> 3.6 MB)
     if (index::isFunctionLocalSymbol(D) || isa<TemplateTypeParmDecl, NonTypeTemplateParmDecl, TemplateTemplateParmDecl>(D)) {
       if (const auto *ND = dyn_cast<NamedDecl>(D); ND && ND->getIdentifier() && !(Roles & (unsigned)index::SymbolRole::Implicit))
         W.addName(Ctx->getSourceManager(), Loc, ND->getName().size(), "local");
