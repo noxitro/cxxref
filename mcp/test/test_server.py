@@ -341,6 +341,7 @@ class ReuseTest(unittest.TestCase):
         self.cfg = server.Config(self.root, None, None)  # 自動更新はしない
 
     def tearDown(self):
+        self.cfg.close()  # 監視しているフォルダと目次の写しを手放す(開いたままでは消せない)
         shutil.rmtree(self.root)
 
     def refs(self):
@@ -390,6 +391,39 @@ class ReuseTest(unittest.TestCase):
         text = self.refs()
         self.assertIn('1 source files changed after indexing', text)
         self.assertNotIn('not read by any indexed configuration', text)
+
+    def test_resident_parts_give_the_same_answers(self):
+        """保つ部品(ソースの一覧の監視・単語のフィルタ・名前の目次)があっても無くても、結果は一字一句同じ。
+        編集・新しいファイル・消したファイル・索引の作り直しのたびに比べる。"""
+        plain = self.server.Config(self.root, None, None, resident=False)
+        self.addCleanup(plain.close)
+        b = os.path.join(self.root, 'src', 'b.cpp')
+
+        def same(*names):
+            for name in names:
+                for args in ({'name': name}, ):
+                    want = self.server.call_tool(plain, 'refs', args)
+                    got = self.server.call_tool(self.cfg, 'refs', args)
+                    self.assertEqual(got, want, name)
+            want = self.server.call_tool(plain, 'check', {'locations': ['src/a.cpp:3', 'src/a.cpp:4']})
+            self.assertEqual(self.server.call_tool(self.cfg, 'check', {'locations': ['src/a.cpp:3', 'src/a.cpp:4']}), want)
+
+        same('Run', 'Main', 'Nothing')
+        self.assertTrue(self.cfg._trees and next(iter(self.cfg._trees.values()))[0].watching)
+        with open(self.src, 'w', encoding='utf-8', newline='\n') as f:  # 索引の後の編集(行が動く)
+            f.write('// top\nvoid Run();\nvoid Main() {\n  Run();\n  // Run\n  Run(); Main();\n}\n')
+        same('Run', 'Main')
+        with open(b, 'w', encoding='utf-8', newline='\n') as f:  # 新しいファイル
+            f.write('void Other() { Run(); }\n')
+        same('Run', 'Other')
+        os.remove(b)  # 消す
+        same('Run', 'Other')
+        with open(self.base, 'a', encoding='utf-8', newline='\n') as f:  # 索引の作り直し(目次も作り直す)
+            f.write('Main\tcall\tMain\tsrc/a.cpp:6:10\tRun(); Main();\n')
+        os.utime(self.base, (3000, 3000))
+        same('Run', 'Main')
+        tree = next(iter(self.cfg._trees.values()))[0]
+        self.assertEqual(tree.rescans, 1)  # 最初の 1 回のほかは、知らせだけで追った
 
 
 if __name__ == '__main__':

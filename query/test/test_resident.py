@@ -1,0 +1,252 @@
+"""長く動くプロセス向けの部品(名前の目次・単語のフィルタ・ソースの一覧の監視)の試験。"""
+import os
+import random
+import shutil
+import sys
+import tempfile
+import time
+import unittest
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
+import ltq  # noqa: E402
+import namedir  # noqa: E402
+import srctree  # noqa: E402
+import wordfilter  # noqa: E402
+
+
+class CliTest(unittest.TestCase):
+    def test_ltq_starts_alone_in_isolated_mode(self):
+        # ltq.cmd は python -I で起動する(スクリプトのフォルダが sys.path に入らない)。隣のモジュールに頼らない
+        import subprocess
+        here = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'ltq.py')
+        r = subprocess.run([sys.executable, '-I', here, '--help'], capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_short_name_agrees(self):
+        for s in (b'f', b'A::f', b'A<x::y>::f', b'a:::b', b'?::f', b''):
+            self.assertEqual(ltq.sym_short(s), namedir.short_of(s))
+            self.assertEqual(ltq.sym_short(s), s.rsplit(b'::', 1)[-1])
+
+
+class NameDirTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.path = os.path.join(self.dir, 'index.tsv')
+        rnd = random.Random(7)
+        names = [f'n{i}' for i in range(40)] + ['Run', 'operator==', '~Foo']
+        self.lines = []
+        for i in range(3000):
+            sym = '::'.join(['ns', rnd.choice(['A', 'B<x::y>', 'C'])][:rnd.randint(0, 2)] + [rnd.choice(names)])
+            self.lines.append(f'{sym}\tcall\tns::Caller{i % 7}\tsrc/f{i % 13}.cpp:{i}:3\t{sym}();')
+        with open(self.path, 'w', encoding='utf-8', newline='\n') as f:
+            f.write('\n'.join(self.lines))  # 最後の行に改行が無い
+
+    def tearDown(self):
+        shutil.rmtree(self.dir)
+
+    def brute(self, short):
+        out, pos = [], 0
+        for line in self.lines:
+            if namedir.short_of(line.split('\t', 1)[0].encode()) == short:
+                out.append(pos)
+            pos += len(line.encode()) + 1
+        return out
+
+    def test_offsets_match_a_full_scan_across_worker_boundaries(self):
+        nd = namedir.NameDir(self.path)
+        self.assertFalse(nd.open())
+        self.assertTrue(nd.build(workers=5))  # 区間の境目が行の途中に来る
+        try:
+            for short in (b'Run', b'n0', b'n39', b'operator==', b'~Foo', b'missing'):
+                got = [o for o in nd.offsets(short)
+                       if namedir.short_of(self._line(o).split(b'\t', 1)[0]) == short]
+                self.assertEqual(got, self.brute(short), short)
+            self.assertTrue(nd.current())
+        finally:
+            nd.close()
+        # 書いた目次を開き直せる。索引が変わると古いと分かる
+        nd2 = namedir.NameDir(self.path)
+        try:
+            self.assertTrue(nd2.open())
+            got = [o for o in nd2.offsets(b'Run') if namedir.short_of(self._line(o).split(b'\t', 1)[0]) == b'Run']
+            self.assertEqual(got, self.brute(b'Run'))
+            with open(self.path, 'a', encoding='utf-8', newline='\n') as f:
+                f.write('\nRun\tcall\t\tsrc/z.cpp:1:1\tRun();')
+            self.assertFalse(nd2.current())
+        finally:
+            nd2.close()
+        nd3 = namedir.NameDir(self.path)
+        self.assertFalse(nd3.open())
+
+    def _line(self, off):
+        with open(self.path, 'rb') as f:
+            f.seek(off)
+            return f.readline().rstrip(b'\n')
+
+
+class WordFilterTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.dir)
+
+    def write(self, name, data):
+        p = os.path.join(self.dir, name)
+        with open(p, 'wb') as f:
+            f.write(data)
+        return p
+
+    def test_no_false_negatives_and_unfiltered_files(self):
+        rnd = random.Random(3)
+        vocab = [f'W{i}_x' for i in range(2000)]
+        files, words = {}, {}
+        for i in range(30):
+            ws = set(rnd.sample(vocab, rnd.randint(0, 400)))
+            words[f'f{i}.cpp'] = ws
+            p = self.write(f'f{i}.cpp', (' '.join(sorted(ws)) + '\n// ok\n').encode())
+            files[f'f{i}.cpp'] = (p, os.stat(p).st_mtime)
+        p = self.write('u16.h', '﻿W1_x W2_x'.encode('utf-16'))
+        files['u16.h'] = (p, os.stat(p).st_mtime)
+        wf = wordfilter.WordFilter(os.path.join(self.dir, 'w.cache'))
+        wf.load(None)
+        self.assertEqual(wf.update(files, None, pool_min=10, workers=3), 31)
+        fp = 0
+        for w in vocab[:300]:
+            test = wf.may_contain(w)
+            for rel, ws in words.items():
+                if w in ws:
+                    self.assertTrue(test(rel, files[rel][1]), (w, rel))
+                elif test(rel, files[rel][1]):
+                    fp += 1
+            self.assertTrue(test('u16.h', files['u16.h'][1]))  # UTF-16 は絞らない
+            self.assertTrue(test('nope.cpp', 0))  # 知らないファイルは絞らない
+            self.assertTrue(test('f0.cpp', -1.0))  # 更新日時が違えば絞らない
+        self.assertLess(fp, 300 * 30 * 0.1)
+        self.assertIsNone(wf.may_contain('operator=='))
+        wf.save()  # update() が書くのは多くを読み直したときだけ
+        # 書いた一覧を読み直せる。変わったファイルだけ読み直す
+        wf2 = wordfilter.WordFilter(os.path.join(self.dir, 'w.cache'))
+        wf2.load(None)
+        self.assertEqual(wf2.update(files, None), 0)
+        time.sleep(0.01)
+        p = self.write('f0.cpp', b'Fresh_word\n')
+        os.utime(p, (5000, 5000))
+        files['f0.cpp'] = (p, os.stat(p).st_mtime)
+        self.assertEqual(wf2.update(files, None), 1)
+        self.assertTrue(wf2.may_contain('Fresh_word')('f0.cpp', files['f0.cpp'][1]))
+        # コードページが変わったら作り直す
+        self.assertEqual(wf2.update(files, 'cp932'), 31)
+
+    def test_words_are_taken_after_conversion(self):
+        # Shift_JIS の「ソ」(0x83 0x5C)と「ア」(0x83 0x41)。2 バイト目の英字を単語に数えない
+        p = self.write('sj.cpp', 'アB ok'.encode('cp932'))
+        files = {'sj.cpp': (p, os.stat(p).st_mtime)}
+        wf = wordfilter.WordFilter()
+        wf.update(files, 'cp932')
+        self.assertFalse(wf.may_contain('AB')('sj.cpp', files['sj.cpp'][1]))
+        self.assertTrue(wf.may_contain('B')('sj.cpp', files['sj.cpp'][1]))
+
+
+@unittest.skipUnless(os.name == 'nt', 'ReadDirectoryChangesW is Windows only')
+class SourceTreeTest(unittest.TestCase):
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        os.makedirs(os.path.join(self.root, '.index'))
+        os.makedirs(os.path.join(self.root, 'src', 'sub'))
+        for p in ('src/a.cpp', 'src/b.h', 'src/sub/c.cpp', 'src/readme.txt'):
+            self.write(p, 'x')
+        self.tree = srctree.SourceTree(self.root, ltq.SRC_EXT, other=ltq.is_other)  # C/C++ 以外のファイルも追う
+
+    def tearDown(self):
+        self.tree.close()
+        shutil.rmtree(self.root)
+
+    def write(self, rel, text):
+        p = os.path.join(self.root, *rel.split('/'))
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, 'w', encoding='utf-8') as f:
+            f.write(text)
+
+    def scan(self):
+        out, others = {}, {}
+        srctree.scan(self.root, '', ltq.SRC_EXT, out, ltq.is_other, others)
+        return {k: v[1] for k, v in out.items()}, {k: v[1] for k, v in others.items()}
+
+    def check(self):
+        got = {k: v[1] for k, v in self.tree.current().items()}
+        got_others = {k: v[1] for k, v in self.tree.others().items()}
+        src, others = self.scan()
+        self.assertEqual(got, src)
+        self.assertEqual(got_others, others)
+        # ltq の走査と同じ一覧(ソースと、C/C++ 以外のファイル)
+        idx = ltq.Index.__new__(ltq.Index)
+        idx.root, idx._sources, idx.tree = self.root, None, None
+        self.assertEqual({k: v[1] for k, v in idx.sources().items()}, src)
+        self.assertEqual({k: v[1] for k, v in idx.others().items()}, others)
+
+    def test_follows_changes_without_rescanning(self):
+        self.assertTrue(self.tree.watching)
+        self.check()
+        self.assertEqual(self.tree.rescans, 1)
+        self.write('src/a.cpp', 'changed')  # 書き換え
+        os.utime(os.path.join(self.root, 'src', 'a.cpp'), (9000, 9000))
+        self.check()
+        self.write('src/new.cpp', 'n')  # 新しいファイル
+        self.check()
+        os.remove(os.path.join(self.root, 'src', 'b.h'))  # 消す
+        self.check()
+        os.rename(os.path.join(self.root, 'src', 'new.cpp'), os.path.join(self.root, 'src', 'renamed.hpp'))
+        self.check()
+        # フォルダを外で作ってから入れる(中のファイルの知らせは来ない)
+        outside = tempfile.mkdtemp()
+        try:
+            os.makedirs(os.path.join(outside, 'mod', 'deep'))
+            with open(os.path.join(outside, 'mod', 'deep', 'm.cpp'), 'w') as f:
+                f.write('m')
+            shutil.move(os.path.join(outside, 'mod'), os.path.join(self.root, 'src', 'mod'))
+        finally:
+            shutil.rmtree(outside)
+        self.check()
+        os.rename(os.path.join(self.root, 'src', 'mod'), os.path.join(self.root, 'src', 'mod2'))  # フォルダの名前を変える
+        self.check()
+        shutil.rmtree(os.path.join(self.root, 'src', 'sub'))  # フォルダを消す
+        self.check()
+        self.write('.hidden/x.cpp', 'h')  # . で始まるフォルダは数えない
+        self.check()
+        # C/C++ 以外のファイル: 足す・書き換える・消す。バイナリの拡張子と空のファイルは数えない
+        self.write('src/notes.md', 'Run')
+        self.write('src/icon.png', 'x')
+        self.write('src/empty.txt', '')
+        self.check()
+        self.assertIn('src/notes.md', self.tree.others())
+        self.assertNotIn('src/icon.png', self.tree.others())
+        self.write('src/empty.txt', 'now text')
+        self.check()
+        self.assertIn('src/empty.txt', self.tree.others())
+        os.remove(os.path.join(self.root, 'src', 'readme.txt'))
+        self.check()
+        self.assertEqual(self.tree.rescans, 1)  # ここまで全体を走査し直していない
+        self.assertFalse([n for n in os.listdir(os.path.join(self.root, '.index')) if n.startswith('.cxxref-watch-')])
+
+    def test_without_index_folder_rescans_every_time(self):
+        root = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(root, 'a.cpp'), 'w') as f:
+                f.write('a')
+            t = srctree.SourceTree(root, ltq.SRC_EXT)
+            try:
+                self.assertFalse(t.watching)
+                self.assertEqual(list(t.current()), ['a.cpp'])
+                with open(os.path.join(root, 'b.cpp'), 'w') as f:
+                    f.write('b')
+                self.assertEqual(sorted(t.current()), ['a.cpp', 'b.cpp'])
+                self.assertEqual(t.rescans, 2)
+            finally:
+                t.close()
+        finally:
+            shutil.rmtree(root)
+
+
+if __name__ == '__main__':
+    unittest.main()

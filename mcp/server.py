@@ -20,6 +20,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # -I ではスクリプトのフォルダが入らない
 import ltq  # noqa: E402
 import autoupdate  # noqa: E402
+import namedir  # noqa: E402
+import srctree  # noqa: E402
+import wordfilter  # noqa: E402
 
 VERSION = '0.5.1'
 PROTOCOL = '2025-06-18'
@@ -123,13 +126,67 @@ def workspace():
 
 
 class Config:
-    def __init__(self, root=None, index=None, wait=None, max_bytes=MAX_BYTES):
+    def __init__(self, root=None, index=None, wait=None, max_bytes=MAX_BYTES, resident=True):
         self.fixed = os.path.abspath(root) if root else None  # None なら、呼ばれるたびに索引のあるフォルダを探す
         self.index = os.path.abspath(index) if index else None
         self.wait = wait  # 自動更新で待つ秒数。None なら自動更新しない
         self.max_bytes = max_bytes  # 結果の大きさの上限(0 なら切らない)
         self.opened = None  # (鍵, 索引のファイルの状態, ltq.Index)。最後に引いた索引を 1 つだけ保つ
         self.told_ltidx = False  # 取ってきた ltidx が古いことを、もう知らせたか(1 回だけ)
+        # 呼び出しをまたいで保つもの(False なら、呼ぶたびにソースと索引を全部読む)
+        self.resident = resident
+        self._trees = {}  # ルート -> (srctree.SourceTree, wordfilter.WordFilter)
+        self._names = {}  # 索引のパス -> namedir.NameDir
+        self._no_names = set()  # 目次を作れなかった索引の版
+
+    def attach(self, idx, paths, root):
+        """Index に、呼び出しをまたいで保つ部品を渡す。
+        - ソースの一覧(変更の知らせで保つ。ソースの走査を毎回しない)
+        - 単語のフィルタ(テキスト検索で、名前を含まないファイルを読まない)
+        - 名前の目次(索引の本体を頭から探さない。索引が変わったら作り直す)"""
+        if not self.resident:
+            return idx
+        key = os.path.normcase(os.path.abspath(root))
+        if key not in self._trees:
+            words = wordfilter.WordFilter(paths[0] + '.words.cache')
+            words.load(idx.codec())
+            other_words = wordfilter.WordFilter(paths[0] + '.words-other.cache')  # C/C++ 以外のファイル
+            other_words.load(idx.codec())
+            self._trees[key] = (srctree.SourceTree(root, ltq.SRC_EXT, other=ltq.is_other), words, other_words)
+        idx.tree, idx.words, idx.other_words = self._trees[key]
+        for p in paths:
+            k = os.path.normcase(os.path.abspath(p))
+            nd = self._names.get(k)
+            try:
+                version = (k, os.stat(p).st_size, os.stat(p).st_mtime_ns)
+            except OSError:
+                continue
+            if version in self._no_names:
+                continue  # この版の索引では目次を作れなかった。呼ぶたびに作り直さない
+            if nd is None or not nd.current():
+                if nd is not None:
+                    nd.close()
+                nd = namedir.NameDir(p)
+                try:
+                    if not nd.open():
+                        nd.build()
+                except Exception as e:  # 子のプロセスが落ちた・書けないなど。目次なしで、索引を頭から探す
+                    print(f'code-ref-index: name directory unavailable for {p} ({type(e).__name__}: {e})', file=sys.stderr)
+                    nd.close()
+                    self._names.pop(k, None)
+                    self._no_names.add(version)
+                    continue
+                self._names[k] = nd
+            idx.names[p] = nd
+        return idx
+
+    def close(self):
+        """保っている部品を手放す(監視しているフォルダと、目次の写しを開いたままにしない)。"""
+        for tree, *_ in self._trees.values():
+            tree.close()
+        for nd in self._names.values():
+            nd.close()
+        self._trees, self._names = {}, {}
 
     def open_index(self, paths, root):
         """索引を開く。前の呼び出しと同じ索引で、索引のファイル(本体と隣のファイル)の大きさと更新日時が変わっていなければ、
@@ -140,15 +197,15 @@ class Config:
         if self.opened and self.opened[0] == key and self.opened[1] == sig:
             idx = self.opened[2]
             idx.renew()
-            return idx
+            return self.attach(idx, paths, root)
         idx = ltq.Index(paths, root)
         self.opened = (key, sig, idx)
-        return idx
+        return self.attach(idx, paths, root)
 
     def keep(self, paths, root, idx):
         """自動更新で開き直した索引を、次の呼び出しで使い回せるように保つ。"""
         key = (tuple(os.path.normcase(os.path.abspath(p)) for p in paths), os.path.normcase(os.path.abspath(root)))
-        self.opened = (key, ltq.index_signature(paths), idx)
+        self.opened = (key, ltq.index_signature(paths), self.attach(idx, paths, root))
 
     def resolve(self, start=None):
         """(ルート, 注記)。--root が無ければ、start(ツールの引数の root)か作業フォルダ(workspace())から
@@ -296,8 +353,11 @@ def main():
                     help='never rebuild the index automatically (or set CRI_AUTO_UPDATE=0)')
     ap.add_argument('--max-output-bytes', type=int, default=int(os.environ.get('CRI_MAX_OUTPUT_BYTES', MAX_BYTES)),
                     help=f'shorten results larger than this (default {MAX_BYTES}; 0 = never)')
+    ap.add_argument('--no-resident', action='store_true', default=os.environ.get('CRI_RESIDENT') == '0',
+                    help='do not keep the source list, word filter and name directory between calls (or set CRI_RESIDENT=0)')
     a = ap.parse_args()
-    cfg = Config(a.root, a.index, None if a.no_auto_update else max(0.0, a.auto_update_wait), max(0, a.max_output_bytes))
+    cfg = Config(a.root, a.index, None if a.no_auto_update else max(0.0, a.auto_update_wait), max(0, a.max_output_bytes),
+                 resident=not a.no_resident)
     print(f'code-ref-index mcp {VERSION}: root={cfg.fixed or "auto (cwd upward)"} auto-update={"off" if cfg.wait is None else f"wait {cfg.wait:g} s"}',
           file=sys.stderr)
 

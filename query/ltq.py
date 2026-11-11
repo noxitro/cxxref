@@ -39,6 +39,11 @@ BIN_EXT = {'.obj', '.o', '.a', '.lib', '.dll', '.exe', '.pdb', '.ilk', '.pch', '
            '.wav', '.mp3', '.ogg', '.mp4', '.ttf', '.otf', '.woff', '.woff2', '.class', '.jar', '.pyc', '.pack'}
 OTHER_MAX = 64 << 20  # これより大きいファイルは読まない
 OTHER_LIST = 10  # 短い出力(--compact 1 つ)で、ソースでないファイルの一致を 1 行ずつ並べる数
+def is_other(ext, size):
+    """テキストとして名前を探す、C/C++ のソースでないファイルか(拡張子は小文字、. 付き)。"""
+    return ext not in SRC_EXT and ext not in BIN_EXT and 0 < size <= OTHER_MAX
+
+
 SYM_LIST = 20  # matched symbols: に並べる記号の数(残りは件数)
 COMPACT_LIST = 30  # 短い出力(--compact 1 つ)で、分類ごとに 1 行ずつ並べる数。残りはフォルダごとの件数にする
 COND_MAX = 100  # 無効な行に添える #if の条件の長さ(1 つあたり)
@@ -153,14 +158,20 @@ def grep_lines(path, needles):
     """path のファイルのうち、needles(bytes)のどれかを含む行(改行を除く)を、ファイルの順に返す。
     改行で始まる needle は、残りの部分で始まる行に当たる。
     大きな索引を 1 行ずつ Python で調べると遅いので、mmap の find で当たった行だけを取り出す。"""
+    found = grep_found(path, needles)
+    return [found[b] for b in sorted(found)]
+
+
+def grep_found(path, needles, found=None):
+    """grep_lines() の中身。{行の先頭の位置: 行} を返す(found を渡すと、それに足す)。"""
+    found = {} if found is None else found
     needles = [n for n in needles if n]
     try:
         size = os.path.getsize(path)
     except OSError:
-        return []
+        return found
     if not needles or size == 0:
-        return []
-    found = {}
+        return found
     with open(path, 'rb') as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as m:
         for n in needles:
             head = n[:1] == b'\n'
@@ -179,7 +190,30 @@ def grep_lines(path, needles):
                 i = m.find(n, e)
                 if head and i >= 0:
                     i += 1
-    return [found[b] for b in sorted(found)]
+    return found
+
+
+def name_lines(path, nd, short, found):
+    """名前の目次(namedir.NameDir)で、記号の最後の部分が short(bytes)の行を found({位置: 行})に足す。
+    ハッシュの衝突で混じる別の名前の行は、記号の列を見て捨てる。"""
+    with open(path, 'rb') as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as m:
+        size = len(m)
+        for b in nd.offsets(short):
+            if b in found:
+                continue
+            e = m.find(b'\n', b)
+            line = m[b:size if e < 0 else e].rstrip(b'\r')
+            t = line.find(b'\t')
+            if t >= 0 and sym_short(line[:t]) == short:
+                found[b] = line
+    return found
+
+
+def sym_short(sym):
+    """記号の列(bytes)の最後の部分(`sym.rsplit(b'::', 1)[-1]` と同じ)。namedir.short_of と同じもの
+    (ltq は python -I で単独に起動されるので、隣のモジュールを読み込まない)。"""
+    i = sym.rfind(b'::')
+    return sym if i < 0 else sym[i + 2:]
 
 
 def canon_line(raw):
@@ -221,6 +255,11 @@ class Index:
         self._tus = {}
         self._memo = {}
         self._groups = {}  # path -> ソースの #if の構造(ppcond)。無効な行に、囲む条件を添えるのに使う
+        # 長く動くプロセス(MCP サーバー)が渡す部品。無ければ、問い合わせのたびに全部を読む
+        self.tree = None  # srctree.SourceTree: ソースの一覧(C/C++ 以外のファイルも)を変更の知らせで保つ
+        self.words = None  # wordfilter.WordFilter: テキスト検索で読むファイルを絞る
+        self.other_words = None  # wordfilter.WordFilter: C/C++ 以外のファイルの検索で読むファイルを絞る
+        self.names = {}  # {索引のパス: namedir.NameDir}: 名前から索引の行を引く
 
     def renew(self):
         """ソースから読んだもの(走査・鮮度・ファイルの行・行の付け直し・問い合わせの途中の結果)を捨てる。
@@ -334,20 +373,30 @@ class Index:
         est = min(max(line + shift, 1), max(len(cur), 1))
         return est, 'line changed or removed after indexing' + (f'; estimated from line {line}' if est != line else '')
 
-    def rows(self, needles, keep):
+    def rows(self, needles, keep, name=None):
         """needles(bytes)のどれかを含み、keep(bytes の行)が真の行だけを
         (sym, role, caller, path, line, col, src, note, configs, alt) にして返す。
         note は行の付け直しの注記、configs はその行がある構成名の frozenset。
         alt は、その構成ではコンパイルされない #if の中の行(<索引>.alt.tsv。altpass が、条件を仮に有効にして解析したもの)なら True。
-        索引の後に変わったファイルの行は、索引にあるソース行の文字列で今のファイルから探し直す。"""
+        索引の後に変わったファイルの行は、索引にあるソース行の文字列で今のファイルから探し直す。
+        name(bytes)を渡すと、名前の目次がある索引では、needles の代わりに「記号の最後の部分が name の行」を目次で引く
+        (needles は name + TAB のはずで、それを含む行のうち記号の列が name で終わらない行は、呼ぶ側が捨てる)。
+        差分(.alt.tsv)は小さいので、目次を使わずに頭から探す。"""
         merged = {}
         for part in self.parts:
             stale = self._stale(part)
             sb = {p.encode('utf-8') for p in stale}
             anchors, picked = {}, []
+            stale_needles = [b'\t' + p + b':' for p in sb]
             # 変わったファイルの行は、問い合わせに合わなくても行の付け直しの手がかりとして読む
             for alt in ((False, True) if part.alt_ok else (False,)):
-                for raw in grep_lines(part.path + (ALT if alt else ''), list(needles) + [b'\t' + p + b':' for p in sb]):
+                nd = self.names.get(part.path) if name is not None and not alt else None
+                if nd is not None and nd.ready():
+                    found = grep_found(part.path, stale_needles)
+                    lines = [v for _, v in sorted(name_lines(part.path, nd, name, found).items())]
+                else:
+                    lines = grep_lines(part.path + (ALT if alt else ''), list(needles) + stale_needles)
+                for raw in lines:
                     hit = keep(raw)
                     if not hit:
                         q = raw.split(b'\t', 4)
@@ -563,6 +612,9 @@ class Index:
     def sources(self):
         """{ルートからの相対パス: (絶対パス, 更新日時)}。ルート配下の C/C++ のソースすべて(. で始まるフォルダを除く)。
         1 回だけ走査する。Windows では scandir の項目が更新日時を持っているので、ファイルごとの stat が要らない。"""
+        if self._sources is None and self.tree is not None:
+            self._sources = self.tree.current()  # 変更の知らせを当てた一覧。問い合わせの間は変えない
+            self._others = self.tree.others()
         if self._sources is None:
             out, other, todo, n = {}, {}, [self.root], len(self.root) + 1
             while todo:
@@ -582,7 +634,7 @@ class Index:
                                     out[e.path[n:].replace('\\', '/')] = (e.path, e.stat().st_mtime)
                                 elif ext not in BIN_EXT:
                                     st = e.stat()
-                                    if 0 < st.st_size <= OTHER_MAX:
+                                    if is_other(ext, st.st_size):
                                         other[e.path[n:].replace('\\', '/')] = (e.path, st.st_mtime)
                         except OSError:
                             continue
@@ -753,6 +805,15 @@ def text_hits(idx, short, excludes):
 
     # ファイルごとに仕事を渡すと、20 万ファイル(UE5)では受け渡しだけで数秒かかるので、続きのファイルをまとめて渡す
     items = list(walk_sources(idx, excludes))
+    test = None
+    if idx.words is not None:
+        try:
+            idx.words.update(idx.sources(), idx.codec())
+            test = idx.words.may_contain(short)
+        except Exception as e:  # 子のプロセスが落ちたなど。絞らずに全部読む
+            print(f'ltq: word filter unavailable ({type(e).__name__}: {e}); reading every source', file=sys.stderr)
+    if test is not None:  # 名前の単語が無いと分かっているファイルは読まない
+        items = [x for x in items if test(x[0], x[2])]
     size = max(1, -(-len(items) // 256))
     with ThreadPoolExecutor(max_workers=min(16, os.cpu_count() or 4)) as ex:
         loaded = [x for part in ex.map(load, (items[i:i + size] for i in range(0, len(items), size))) for x in part]
@@ -804,6 +865,15 @@ def other_hits(idx, short, excludes):
         return out
 
     items = list(walk_sources(idx, excludes, idx.others()))
+    if idx.other_words is not None:  # 長く動くプロセスでは、名前の単語が無いと分かっているファイルを読まない(ソースと同じ)
+        try:
+            idx.other_words.update(idx.others(), idx.codec())
+            test = idx.other_words.may_contain(short)
+        except Exception as e:  # 子のプロセスが落ちたなど。絞らずに全部読む
+            print(f'ltq: word filter unavailable ({type(e).__name__}: {e}); reading every file', file=sys.stderr)
+            test = None
+        if test is not None:
+            items = [x for x in items if test(x[0], x[2])]
     size = max(1, -(-len(items) // 256))
     with ThreadPoolExecutor(max_workers=min(16, os.cpu_count() or 4)) as ex:
         return [x for part in ex.map(load, (items[i:i + size] for i in range(0, len(items), size))) for x in part]
@@ -946,7 +1016,7 @@ def cmd_refs(a, idx):
         return sym == name or sym.endswith('::' + name)
 
     # 記号の列の末尾が short の行だけを読む(`short<TAB>` を含む行。`Loader` などの部分一致の行は読まない)
-    rows = idx.cached(('rows', short), lambda: [r for r in idx.rows([sb + b'\t'], lambda raw: True)
+    rows = idx.cached(('rows', short), lambda: [r for r in idx.rows([sb + b'\t'], lambda raw: True, name=sb)
                                                  if r[0].rsplit('::', 1)[-1] == short])
     # テキストの一致(下の「索引に無い一致」で使う)。名前を含むファイルを先に知り、索引の状態はそのファイルの分だけ並べる
     hits = idx.cached(('text', short, tuple(sorted(a.exclude))), lambda: text_hits(idx, short, set(a.exclude)))
