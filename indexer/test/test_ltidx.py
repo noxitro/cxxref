@@ -607,6 +607,68 @@ class LtidxTest(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertIn('-update', err)
 
+    def skips(self, kind, out='.index/index.tsv'):
+        with open(os.path.join(self.root, out + '.skip.tsv'), encoding='utf-8') as f:
+            return sorted(tuple(c[:1] + c[2:]) for c in (line.rstrip('\n').split('\t') for line in f) if c[1] == kind)
+
+    def test_reincluded_file_is_not_inactive(self):
+        # ガードが clang の「2 回目は開かない」最適化に乗らない形(ガードの外にコードがある)。2 回目は本体がまるごと飛ぶが、
+        # 1 回目に解析されているので、無効な範囲にしない。どの回でも無効な #ifdef の中だけを残す
+        self.write('h.h', 'struct Tag;\n#ifndef H_H\n#define H_H\nvoid Run();\n#ifdef NEVER\nvoid Off();\n#endif\n#endif\n')
+        self.write('a.cpp', '#include "h.h"\n#include "h.h"\nvoid Main() { Run(); }\n', [])
+        rc, err = self.run_ltidx()
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.skips('inactive'), [('h.h', '5:1', '7:7')])
+
+    def test_file_read_twice_with_different_macros(self):
+        # マクロを変えて 2 回読む .inc: どちらの回でも無効な部分は無い
+        self.write('list.inc', '#ifdef FIRST\nvoid A();\n#else\nvoid B();\n#endif\n')
+        self.write('a.cpp', '#define FIRST\n#include "list.inc"\n#undef FIRST\n#include "list.inc"\n', [])
+        rc, err = self.run_ltidx()
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.skips('inactive'), [])
+        self.assertTrue(self.has('A', 'decl', 'list.inc:2:6'))
+        self.assertTrue(self.has('B', 'decl', 'list.inc:4:6'))
+
+    def test_overlay_replaces_a_file(self):
+        self.write('h.h', 'void Run();\n#ifdef NEVER\ninline void Off() { Run(); }\n#endif\n')
+        self.write('a.cpp', '#include "h.h"\nvoid Main() { Run(); }\n', [])
+        rep = os.path.join(self.root, 'rep.h')
+        with open(rep, 'wb') as f:
+            f.write(b'void Run();\n#if 1\ninline void Off() { Run(); }\n#endif\n')
+        ov = os.path.join(self.root, 'overlay.tsv')
+        with open(ov, 'w', encoding='utf-8', newline='\n') as f:
+            f.write(os.path.join(self.root, 'h.h') + '\t' + rep + '\n')
+        rc, err = self.run_ltidx('-overlay', ov)
+        self.assertEqual(rc, 0, err)
+        self.assertTrue(self.has('Run', 'call', 'h.h:3:21', caller='Off'))  # 元のパスの行として出る
+        self.assertEqual(self.skips('inactive'), [])
+        rc, err = self.run_ltidx('-overlay', os.path.join(self.root, 'missing.tsv'))
+        self.assertEqual(rc, 2)
+
+    def test_keep_going_after_missing_include(self):
+        # 致命的なエラー(見つからない #include)の後、clang は解析を続けるが、テンプレートの実体化をやめる。
+        # -keep-going は、致命的なエラーをふつうのエラーとして扱い、実体化の中の呼び出しも出す
+        src = ('#include "missing.h"\ntemplate <class T> struct Box { void Put() { T t; t.Go(); } };\n'
+               'struct Car { void Go(); };\nvoid Main() { Box<Car> b; b.Put(); }\n')
+        self.write('a.cpp', src, [])
+        rc, err = self.run_ltidx()
+        self.assertEqual(rc, 1)
+        self.assertTrue(self.has('Box::Put', 'call', 'a.cpp:4:29'))
+        self.assertFalse(self.has('Car::Go', 'call', 'a.cpp:2:53'))
+        rc, err = self.run_ltidx('-keep-going')
+        self.assertEqual(rc, 1)
+        self.assertTrue(self.has('Car::Go', 'call', 'a.cpp:2:53', caller='Box::Put'))
+        # エラーの数の上限(既定 20)も外す
+        many = ''.join(f'int v{i} = Missing{i};\n' for i in range(40))
+        self.write('a.cpp', many + src.split('\n', 1)[1], [])
+        rc, err = self.run_ltidx()
+        self.assertFalse(self.has('Car::Go', 'call', 'a.cpp:41:53'))
+        rc, err = self.run_ltidx('-keep-going')
+        self.assertEqual(rc, 1)
+        self.assertTrue(self.has('Car::Go', 'call', 'a.cpp:41:53'))
+        self.assertEqual(self.tus()['a.cpp'][2], '40')
+
     def touch_later(self, rel, text):
         """索引の時刻(解析を始めた時刻)より確実に新しい時刻で書く。"""
         self.write(rel, text)

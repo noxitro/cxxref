@@ -46,6 +46,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <set>
@@ -80,6 +81,10 @@ static cl::opt<bool> NoLocal("no-local", cl::desc("関数の中の変数・引�
 static cl::opt<bool> Update("update", cl::desc("前回の索引の後に変わった TU だけを解析し直して差し替える"));
 static cl::opt<unsigned> SourceCp("source-cp", cl::desc("UTF-8 でないソースを読むコードページ(既定はこの PC の ANSI コードページ。"
                                                         "TU の /source-charset が優先)"), cl::init(0));
+static cl::opt<std::string> Overlay("overlay", cl::desc("読むファイルを差し替える表(1 行に「元のパス<TAB>代わりのファイル」)。"
+                                                        "無効な #if の中を仮に解析する差分パス(scripts/altpass.py)が使う"));
+static cl::opt<bool> KeepGoing("keep-going", cl::desc("見つからない #include などの致命的なエラーをふつうのエラーとして扱い、エラーの数の上限も"
+                                                      "外す(差分パス用)。致命的なエラーの後、clang はテンプレートの実体化をやめる"));
 static cl::list<std::string> Files(cl::Positional, cl::desc("[対象ファイル...](省略時は全 TU)"));
 
 namespace {
@@ -180,10 +185,42 @@ public:
       if (auto It = Cache.find(Key); It != Cache.end()) return It->second;
     }
     std::shared_ptr<const std::string> R;
-    if (auto Buf = FS.getBufferForFile(Abs, -1, false, /*IsVolatile=*/true)) R = convert((*Buf)->getBuffer(), Cp);
+    std::string From = Abs.str().str();
+    bool Replaced = false;
+    if (!Over.empty()) {
+      if (auto It = Over.find(overKey(Abs)); It != Over.end()) {
+        From = It->second;
+        Replaced = true;
+      }
+    }
+    if (auto Buf = FS.getBufferForFile(From, -1, false, /*IsVolatile=*/true)) {
+      R = convert((*Buf)->getBuffer(), Cp);
+      if (!R && Replaced) R = std::make_shared<const std::string>((*Buf)->getBuffer().str());
+    }
     std::lock_guard<std::mutex> L(M);
     return Cache.try_emplace(Key, R).first->second;
   }
+
+  // -overlay: 元のパス -> 代わりに読むファイル(「元のパス<TAB>代わりのファイル」の行)
+  bool loadOverlay(llvm::StringRef File) {
+    auto Buf = llvm::MemoryBuffer::getFile(File);
+    if (!Buf) return false;
+    llvm::SmallVector<llvm::StringRef, 16> Lines;
+    (*Buf)->getBuffer().split(Lines, '\n', -1, false);
+    for (llvm::StringRef L : Lines) {
+      auto [A, B] = L.rtrim("\r").split('\t');
+      if (!A.empty() && !B.empty()) Over[overKey(A)] = B.str();
+    }
+    return true;
+  }
+  static std::string overKey(llvm::StringRef P) {
+    llvm::SmallString<260> S(P);
+    llvm::sys::path::remove_dots(S, /*remove_dot_dot=*/true);
+    std::string K = S.str().lower();
+    std::replace(K.begin(), K.end(), '\\', '/');
+    return K;
+  }
+  std::map<std::string, std::string> Over;
 
 private:
   static std::shared_ptr<const std::string> convert(llvm::StringRef B, unsigned Cp) {
@@ -345,6 +382,13 @@ public:
 
   bool inRoot(const SourceManager &SM, FileID FID) { return !relPath(SM, FID).empty(); }
 
+  size_t skipCount() const { return Skips.size(); }
+  void eraseSkips(std::vector<size_t> Index) {
+    std::sort(Index.begin(), Index.end(), std::greater<size_t>());
+    Index.erase(std::unique(Index.begin(), Index.end()), Index.end());
+    for (size_t I : Index) Skips.erase(Skips.begin() + I);
+  }
+
 private:
   // ルート配下ならルートからの相対パス、それ以外は空
   const std::string &relPath(const SourceManager &SM, FileID FID) {
@@ -362,14 +406,90 @@ private:
   llvm::DenseMap<FileID, std::string> PathCache;
 };
 
+// 無効な #if の範囲。同じ TU が同じファイルを 2 回以上読んだとき(インクルードガードが clang の最適化に乗らず、
+// 2 回目に本体がまるごと飛ぶ場合や、マクロを変えて読み直す .inc など)は、どの回でも無効だった部分だけを残す。
+// そうしないと、1 回目に解析された行まで「無効」になる
 class SkippedRanges : public PPCallbacks {
 public:
   SkippedRanges(const SourceManager &SM, RowWriter &W) : SM(SM), W(W) {}
-  void SourceRangeSkipped(SourceRange R, SourceLocation) override { W.addRange(SM, R, "inactive"); }
+
+  void FileChanged(SourceLocation Loc, FileChangeReason Reason, SrcMgr::CharacteristicKind, FileID) override {
+    if (Reason != EnterFile) return;
+    FileID FID = SM.getFileID(Loc);
+    if (OptionalFileEntryRef FE = SM.getFileEntryRefForID(FID)) {
+      auto &V = Entered[&FE->getFileEntry()];
+      if (std::find(V.begin(), V.end(), FID) == V.end()) V.push_back(FID);
+    }
+  }
+  void SourceRangeSkipped(SourceRange R, SourceLocation) override {
+    size_t N = W.skipCount();
+    W.addRange(SM, R, "inactive");
+    if (W.skipCount() == N) return;  // ルートの外
+    SourceLocation B = SM.getFileLoc(R.getBegin()), E = SM.getFileLoc(R.getEnd());
+    Ranges[SM.getFileID(B)].push_back({SM.getFileOffset(B), SM.getFileOffset(E), N});
+  }
+
+  void flush() {
+    using Span = std::pair<unsigned, unsigned>;
+    std::vector<size_t> Drop;
+    std::vector<std::pair<FileID, Span>> Add;
+    for (auto &[FE, FIDs] : Entered) {
+      if (FIDs.size() < 2) continue;
+      std::vector<Span> Cur;
+      bool First = true, Any = false;
+      for (FileID F : FIDs) {
+        std::vector<Span> V;
+        if (auto It = Ranges.find(F); It != Ranges.end()) {
+          Any = true;
+          for (const auto &R : It->second) V.push_back({R.B, R.E});
+        }
+        std::sort(V.begin(), V.end());
+        if (First) {
+          Cur = std::move(V);
+        } else {  // 2 つの並びの共通部分(1 回の読み込みの中では、範囲は重ならない)
+          std::vector<Span> X;
+          for (size_t I = 0, J = 0; I < Cur.size() && J < V.size();) {
+            unsigned B = std::max(Cur[I].first, V[J].first), E = std::min(Cur[I].second, V[J].second);
+            if (B < E) X.push_back({B, E});
+            (Cur[I].second < V[J].second ? I : J)++;
+          }
+          Cur = std::move(X);
+        }
+        First = false;
+      }
+      if (!Any) continue;
+      // 範囲は「#if の行から、それを終える #else・#endif の行まで」なので、隣り合う分岐は境目の行だけ重なる。本体の無い重なりは捨てる
+      Cur.erase(std::remove_if(Cur.begin(), Cur.end(), [&](const Span &S) {
+                  return SM.getLineNumber(FIDs[0], S.first) == SM.getLineNumber(FIDs[0], S.second);
+                }), Cur.end());
+      std::set<Span> Keep(Cur.begin(), Cur.end()), Have;
+      for (FileID F : FIDs)
+        if (auto It = Ranges.find(F); It != Ranges.end())
+          for (const auto &R : It->second) {
+            if (Keep.count({R.B, R.E})) Have.insert({R.B, R.E});
+            else Drop.push_back(R.Index);
+          }
+      for (const Span &S : Cur)
+        if (!Have.count(S)) Add.push_back({FIDs[0], S});
+    }
+    W.eraseSkips(Drop);
+    for (const auto &[F, S] : Add) {
+      SourceLocation Start = SM.getLocForStartOfFile(F);
+      W.addRange(SM, SourceRange(Start.getLocWithOffset(S.first), Start.getLocWithOffset(S.second)), "inactive");
+    }
+    Entered.clear();
+    Ranges.clear();
+  }
 
 private:
+  struct Skipped {
+    unsigned B, E;
+    size_t Index;  // RowWriter の Skips の中の位置
+  };
   const SourceManager &SM;
   RowWriter &W;
+  std::map<const FileEntry *, std::vector<FileID>> Entered;  // ファイル -> 読み込みごとの FileID
+  llvm::DenseMap<FileID, std::vector<Skipped>> Ranges;
 };
 
 // マクロそのものの行: #define(macro)・展開(expand)・#ifdef / defined()(ifdef)・#undef(undef)。記号はマクロの名前。
@@ -667,7 +787,13 @@ public:
 
   bool BeginSourceFileAction(CompilerInstance &CI) override {
     Preprocessor &PP = CI.getPreprocessor();
-    PP.addPPCallbacks(std::make_unique<SkippedRanges>(CI.getSourceManager(), W));
+    if (KeepGoing) {  // 仮の解析では、無効だった分岐の #include が見つからないことがある。そこで止めない
+      CI.getDiagnostics().setFatalsAsError(true);
+      CI.getDiagnostics().setErrorLimit(0);
+    }
+    auto S = std::make_unique<SkippedRanges>(CI.getSourceManager(), W);
+    Skipped = S.get();
+    PP.addPPCallbacks(std::move(S));
     auto M = std::make_unique<MacroRefs>(PP, W);
     Macros = M.get();
     PP.addPPCallbacks(std::move(M));
@@ -681,6 +807,8 @@ public:
     CI.getPreprocessor().setTokenWatcher(nullptr);
     if (Macros) Macros->flush();
     Macros = nullptr;
+    if (Skipped) Skipped->flush();
+    Skipped = nullptr;
     const SourceManager &SM = CI.getSourceManager();
     for (auto It = SM.fileinfo_begin(); It != SM.fileinfo_end(); ++It) {
       std::string Rel;
@@ -709,6 +837,7 @@ private:
   RowWriter W;
   Comments C;
   MacroRefs *Macros = nullptr;  // Preprocessor が持つ
+  SkippedRanges *Skipped = nullptr;  // 同上
 };
 
 class Factory : public tooling::FrontendActionFactory {
@@ -1088,6 +1217,10 @@ int main(int argc, const char **argv) {
   }
   unsigned DefaultCp = SourceCp ? (unsigned)SourceCp : ansiCodepage();
   Transcoder Trans;
+  if (!Overlay.empty() && !Trans.loadOverlay(Overlay)) {
+    llvm::errs() << "overlay を読めない: " << Overlay << "\n";
+    return 2;
+  }
 
   // 書き終えてから差し替える(作っている途中の索引を ltq が読まないように)
   const std::string Outs[] = {Out, Out + ".tu.tsv", Out + ".skip.tsv", Out + ".deps.tsv", Out + ".own.bin"};

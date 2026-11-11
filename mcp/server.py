@@ -27,6 +27,7 @@ PROTOCOL = '2025-06-18'
 # ツールの結果をモデルに渡さず、ファイルに退かせて先頭だけを見せる【実測: 1.0.18 の app.js。1.0.105 は native に移り、
 # 計測で 21.2 KB 以上が退かされ、18,000 バイト以下は退かされなかった】。少し下回らせる
 MAX_BYTES = 18000
+FIT_LIMITS = (60, 25, 10, 5, 2)  # 短い形でも上限を超えるときに、順に試す --limit(1 節に並べる行数)
 
 # 定義は、モデルを呼ぶたびに毎回送られる(C++ でないリポジトリでも)。言っていることは変えずに短く保つ
 ROOT_ARG = {'type': 'string', 'description': 'Absolute path of your working folder (the server may run elsewhere)'}
@@ -44,7 +45,9 @@ TOOLS = [
             'calls (with the enclosing function; no need to re-check them with grep), other references, definitions, '
             'virtual overrides, unresolved template calls (decide from the line), and text matches of the name that '
             'are not in the index, with the reason (comment, inactive #if, dropped macro argument, local name, macro, '
-            'string, file not analyzed). Macros (#define and expansions) are symbols too.'),
+            'string, file not analyzed). Code in #if branches the build does not compile is included, marked '
+            '[inactive: #if ...]. Matches in non-C/C++ files (scripts, build files, docs) are listed too. Lines over the '
+            'limit are counted by folder; pass path to list them. Macros (#define and expansions) are symbols too.'),
         'inputSchema': {
             'type': 'object',
             'properties': {
@@ -52,6 +55,8 @@ TOOLS = [
                 'limit': {'type': 'integer', 'description': 'Max lines per section (default 200)'},
                 'exclude': {'type': 'array', 'items': {'type': 'string'},
                             'description': 'Folders or root-relative path prefixes to skip in the text search'},
+                'path': {'type': 'array', 'items': {'type': 'string'},
+                         'description': 'List only lines under these root-relative folders or files'},
                 'root': ROOT_ARG,
             },
             'required': ['name'],
@@ -204,13 +209,20 @@ def run_ltq(cfg, args, start=None):
 
     code, text = run([])
     # クライアントは大きな結果をモデルに渡さない(Copilot CLI は 20,480 バイトを超えるとファイルに退かせ、先頭だけを見せる)。
-    # 超えたら、報告しない節を件数にまとめた短い形で出し直し、それでも超えたら末尾を切る
-    if cfg.max_bytes and len(text.encode('utf-8')) > cfg.max_bytes and args[0] == 'refs':
-        code, text = run(['--compact'])
+    # 超えたら、報告しない節(コメント・文字列など)を件数にまとめた短い形で出し直す。それでも超えたら、無効な #if の中や
+    # マクロの定義の中の一致もフォルダごとの件数にし(どのフォルダに何件あるかは残り、path で 1 行ずつ出し直せる)、
+    # それでも超えたら末尾を切る
+    # それでも超えたら(解決済みの行だけで数百行ある名前)、節ごとの行数を減らす。省いた行はフォルダごとの件数で残る
+    # (呼び出し側が渡した limit より小さい値だけを試す。後ろに足した --limit が勝つ)
+    asked = int(args[args.index('--limit') + 1]) if '--limit' in args else 200
+    for extra in (['--compact'], ['--compact'] * 2,
+                  *(['--compact'] * 2 + ['--limit', str(n)] for n in FIT_LIMITS if n < asked)):
+        if cfg.max_bytes and len(text.encode('utf-8')) > cfg.max_bytes and args[0] == 'refs':
+            code, text = run(extra)
     if cfg.max_bytes and len(text.encode('utf-8')) > cfg.max_bytes:
         cut = text.encode('utf-8')[:cfg.max_bytes - 300].decode('utf-8', 'ignore')
         text = cut[:cut.rfind('\n') + 1] + (f'... output cut at {cfg.max_bytes} bytes (the client limit). Ask for a '
-                                            'narrower name, or pass exclude / limit to see the rest.\n')
+                                            'narrower name, or pass path / exclude / limit to see the rest.\n')
     return code, text
 
 
@@ -227,6 +239,9 @@ def call_tool(cfg, name, a):
             args += ['--limit', str(int(a['limit']))]
         for x in a.get('exclude') or []:
             args += ['--exclude', str(x)]
+        paths = a.get('path') or []
+        for x in [paths] if isinstance(paths, str) else paths:
+            args += ['--path', str(x)]
     elif name == 'check':
         locs = a.get('locations') or []
         if isinstance(locs, str):

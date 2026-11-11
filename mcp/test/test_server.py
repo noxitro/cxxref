@@ -4,6 +4,7 @@ usage: python -I -m unittest discover -s mcp/test   (リポジトリのルート
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -222,6 +223,69 @@ class ServerTest(unittest.TestCase):
         self.assertIn('call   src/a.cpp:3  [in Main]  | Run();', text)
         self.assertIn('inside comments -> not code; do not report these: 40', text)
         self.assertNotIn('output cut', text)
+
+    def many_inactive(self):
+        """無効な #if の中の一致が 25 行ある索引にする(1 行 100 バイトほど)。src/a.cpp の 4〜30 行目が無効。"""
+        with open(os.path.join(self.root, 'src', 'a.cpp'), 'w', encoding='utf-8', newline='\n') as f:
+            f.write('void Run();\nvoid Main() {\n  Run();\n#if 0\n'
+                    + ''.join(f'  Run();  /* {"x" * 80} {i} */\n' for i in range(25)) + '#endif\n}\n')
+        with open(os.path.join(self.root, '.index', 'index.tsv.skip.tsv'), 'w', encoding='utf-8', newline='\n') as f:
+            f.write('path\tkind\tbegin\tend\nsrc/a.cpp\tinactive\t4:1\t30:7\n')
+        for p in ('index.tsv', 'index.tsv.skip.tsv', 'index.tsv.tu.tsv'):
+            os.utime(os.path.join(self.root, '.index', p))
+
+    def test_inactive_lines_are_folded_only_when_the_listing_does_not_fit(self):
+        # 短い形の 1 段目は無効な #if の中の一致を 1 行ずつ出す。それで上限を超えるときだけ、2 段目(フォルダごとの件数)にする
+        self.many_inactive()
+        self.restart(['--root', self.root, '--max-output-bytes', '6000'])
+        text = self.refs_text()
+        self.assertIn('    src/a.cpp:29  [#if 0]  |', text)
+        self.assertNotIn('output cut', text)
+        self.restart(['--root', self.root, '--max-output-bytes', '2000'])
+        text = self.refs_text()
+        self.assertLessEqual(len(text.encode('utf-8')), 2000)
+        self.assertIn('inactive #if, macro bodies and matches that resolve to other symbols are summarized', text)
+        self.assertRegex(text, r'inside inactive #if/#ifdef branches[^\n]*: 25\n[^\n]*\n    src/  25 matches in 1 files')
+        self.assertIn('ask again with --path <folder>', text)
+        self.assertNotIn('output cut', text)
+
+    def test_many_resolved_lines_are_cut_by_section_not_at_the_end(self):
+        # 解決済みの行だけで上限を超える名前は、節ごとの行数を減らして返す。省いた行はフォルダごとの件数で残り、
+        # 後ろの節(索引に無い一致)が末尾ごと切れて消えることがない
+        os.makedirs(os.path.join(self.root, 'lib'))
+        rows = ['Run\tdecl\t\tsrc/a.cpp:1:6\tvoid Run();\n']
+        for rel in ('src/a.cpp', 'lib/b.cpp'):
+            with open(os.path.join(self.root, rel), 'w', encoding='utf-8', newline='\n') as f:
+                f.write('void Run();\nvoid Main() {\n'
+                        + ''.join(f'  Run();  /* {"x" * 60} {i} */\n' for i in range(60)) + '  // Run\n}\n')
+            rows += [f'Run\tcall\tMain\t{rel}:{3 + i}:3\tRun();  /* {"x" * 60} {i} */\n' for i in range(60)]
+        base = os.path.join(self.root, '.index', 'index.tsv')
+        with open(base, 'w', encoding='utf-8', newline='\n') as f:
+            f.write(''.join(rows))
+        with open(base + '.skip.tsv', 'w', encoding='utf-8', newline='\n') as f:
+            f.write('path\tkind\tbegin\tend\nsrc/a.cpp\tcomment\t63:3\t63:9\nlib/b.cpp\tcomment\t63:3\t63:9\n')
+        with open(base + '.tu.tsv', 'w', encoding='utf-8', newline='\n') as f:
+            f.write('file\tok\terrors\tsec\trefs\tfirst_error\n'
+                    + ''.join(f'{os.path.join(self.root, *rel.split("/"))}\t1\t0\t0.1\t2\t\n'
+                              for rel in ('src/a.cpp', 'lib/b.cpp')))
+        self.restart(['--root', self.root, '--max-output-bytes', '6000'])
+        text = self.refs_text()
+        self.assertLessEqual(len(text.encode('utf-8')), 6000)
+        self.assertNotIn('output cut', text)
+        self.assertIn('== calls (resolved by clang): 120\n', text)
+        self.assertEqual(len(re.findall(r'^  call   ', text, re.M)), 25)
+        self.assertIn('  ... 95 more (raise --limit, or ask with --path <folder>), by folder:\n', text)
+        self.assertEqual(sum(int(n) for n in re.findall(r'^  \S+/  (\d+) matches in', text, re.M)), 95)
+        self.assertIn('inside comments -> not code; do not report these: 2\n', text)  # 後ろの節も残る
+
+    def test_path_argument(self):
+        # path で、並べる行を指定のフォルダ・ファイルに絞る(フォルダごとの件数にまとめられた行を出し直す)
+        r = self.send('tools/call', {'name': 'refs', 'arguments': {'name': 'Run', 'path': ['src/a.cpp']}})['result']
+        self.assertIn('(--path: only lines in src/a.cpp are listed and counted)', r['content'][0]['text'])
+        self.assertIn('call   src/a.cpp:3  [in Main]', r['content'][0]['text'])
+        r = self.send('tools/call', {'name': 'refs', 'arguments': {'name': 'Run', 'path': 'elsewhere'}})['result']
+        self.assertIn('== calls (resolved by clang): 0', r['content'][0]['text'])
+        self.assertIn('symbol: Run\n', r['content'][0]['text'])  # 記号は索引の全体から決まる
 
     def test_limit_from_the_environment_and_zero_means_no_limit(self):
         self.many_comments()
