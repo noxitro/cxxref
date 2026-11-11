@@ -279,11 +279,118 @@ class LtqTest(unittest.TestCase):
         out = self.ltq('refs', 'Base::Draw')
         self.assertIn('== calls (resolved by clang): 1\n', out)
         self.assertNotIn('the query overrides', out)
-        self.assertIn('calls resolved to these, 2, call the override', out)
-        self.assertIn('    Derived::Draw  src/v.cpp:2\n    Leaf::Draw  src/v.cpp:3\n', out)
+        # 上書き 1 つが 1 行(宣言と定義の場所)。その下に、上書きへ解決された呼び出し
+        self.assertIn('change them with the query): 2\n    Derived::Draw  decl src/v.cpp:2\n    Leaf::Draw  decl src/v.cpp:3\n', out)
+        self.assertIn('  calls resolved to the overrides (they call the override, not the query; a signature change reaches'
+                      ' them too): 2\n    call   src/v.cpp:4  Derived::Draw  [in Call]', out)
         self.assertNotIn('override ', out.split('== virtual dispatch')[0])  # override 行は他の節に混ぜない
         out = self.ltq('check', 'src/v.cpp:2')
         self.assertIn('indexed: override Derived::Draw at col 30  [overrides Base::Draw]', out)
+
+    def family(self, n=12, far=0):
+        """Base::Tick と、それを上書きする D00..::Tick(宣言は src/d.h、定義と Base::Tick の呼び出しは src/d.cpp)。
+        far 行の、別の記号に解決されたテンプレートの中の呼び出し(src/t.h)も足す。"""
+        self.write('src/d.h', 'struct Base { virtual void Tick(int); };\n'
+                   + ''.join(f'struct D{i:02} : Base {{ void Tick(int) override; }};\n' for i in range(n)), self.t0 - 10)
+        self.write('src/d.cpp', ''.join(f'void D{i:02}::Tick(int v) {{ Base::Tick(v); }}\n' for i in range(n))
+                   + 'void All(D00* d) { d->Tick(1); }\n', self.t0 - 10)
+        self.write('src/t.h', 'template <class T> void Each(T& t) {\n' + '  t.Tick(0);\n' * far + '}\n', self.t0 - 10)
+        rows = [('Base::Tick', 'decl', '', 'src/d.h:1:28', 'struct Base { virtual void Tick(int); };')]
+        for i in range(n):
+            decl = f'struct D{i:02} : Base {{ void Tick(int) override; }};'
+            body = f'void D{i:02}::Tick(int v) {{ Base::Tick(v); }}'
+            rows += [(f'D{i:02}::Tick', 'decl', '', f'src/d.h:{i + 2}:26', decl),
+                     (f'D{i:02}::Tick', 'override', 'Base::Tick', f'src/d.h:{i + 2}:26', decl),
+                     (f'D{i:02}::Tick', 'def', '', f'src/d.cpp:{i + 1}:11', body),
+                     ('Base::Tick', 'call', f'D{i:02}::Tick', f'src/d.cpp:{i + 1}:31', body)]
+        rows += [('D00::Tick', 'call', 'All', f'src/d.cpp:{n + 1}:23', 'void All(D00* d) { d->Tick(1); }')]
+        for k in range(far):
+            rows += [('?::Tick', 'call-dep', 'Each', f'src/t.h:{k + 2}:5', 't.Tick(0);'),
+                     ('Other::Tick', 'call', 'Each', f'src/t.h:{k + 2}:5', 't.Tick(0);')]
+        self.index('index', rows, [], tus=('src/d.cpp',))
+
+    def test_override_family_is_one_line_per_override(self):
+        # 上書き 1 つを 1 行にして、宣言と定義の場所を並べる(引数を変えるときの直す先。別の節に 1 行ずつ出すと倍になる)
+        self.family()
+        out = self.ltq('refs', 'Base::Tick')
+        self.assertIn('change them with the query): 12\n    D00::Tick  decl src/d.h:2  def src/d.cpp:1\n', out)
+        self.assertIn('    D11::Tick  decl src/d.h:13  def src/d.cpp:12\n', out)
+        self.assertIn('reaches them too): 1\n    call   src/d.cpp:13  D00::Tick  [in All]  | void All(D00* d) { d->Tick(1); }\n', out)
+        self.assertNotIn('more overrides', out)
+        # 上書きの宣言と定義の行は、1 行ずつ並べた行に数える(名前を含む行は 1 + 12 + 12 + 1 で、全部)
+        self.assertTrue(out.endswith('\n== coverage: all 26 lines that contain the word "Tick" are listed above, one per line'
+                                     + SCOPE + '\n'), out[-300:])
+        # --family: 並べる上書きの数と、上書きへの呼び出しの数。他の節はそのまま
+        out = self.ltq('refs', 'Base::Tick', '--family', '2')
+        self.assertIn('    D01::Tick  decl src/d.h:3  def src/d.cpp:2\n    ... 10 more overrides (the last line says where the'
+                      ' rest is listed, with the calls to them; asking refs about each override adds nothing)\n', out)
+        self.assertNotIn('D02::Tick  decl', out)
+        self.assertIn('== calls (resolved by clang): 12\n', out)
+        self.assertIn('  call   src/d.cpp:12  [in D11::Tick]', out)
+        self.assertIn('\n== coverage: 16 of 26 lines', out)  # 並べなかったのは、上書き 10 個の宣言の行(定義は呼び出しと同じ行)
+        self.assertTrue(out.endswith(ltq.ALL_HINT + '\n'))
+        # 短い形は 10 まで(--family が勝つ)、--all は全部
+        out = self.ltq('refs', 'Base::Tick', '--compact')
+        self.assertIn('    D09::Tick  decl src/d.h:11  def src/d.cpp:10\n    ... 2 more overrides', out)
+        self.assertIn('D11::Tick  decl', self.ltq('refs', 'Base::Tick', '--compact', '--family', '12'))
+        self.assertIn('D11::Tick  decl', self.ltq('refs', 'Base::Tick', '--all', '--family', '1'))
+
+    def refs_and_rest(self, *args):
+        """refs の結果と、その結果に並べなかった行の一覧(MCP サーバーがファイルに書くもの)。"""
+        idx = ltq.Index(ltq.find_indexes(self.root), self.root)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(ltq.main(['--root', self.root, 'refs'] + list(args), idx=idx), 0)
+        shown, n_all, n_listed = idx.last_refs
+        rest = io.StringIO()
+        with contextlib.redirect_stdout(rest):
+            self.assertEqual(ltq.main(['--root', self.root, 'refs'] + list(args) + ['--all'], idx=idx, skip=shown), 0)
+        return out.getvalue(), rest.getvalue(), n_all, n_listed
+
+    def positions(self, text, family=True):
+        """文面に 1 行ずつ出ている位置(パス:行)。上書きの行は宣言と定義の 2 つ(family が偽なら入れない)。"""
+        if not family:
+            return re.findall(r'^ +(?:\w[\w-]* +)?((?:src|lib)/[\w./]+:\d+)', text, re.M)
+        return re.findall(r'(?:^ +(?:\w[\w-]* +)?| (?:decl|def) )((?:src|lib)/[\w./]+:\d+)', text, re.M)
+
+    def test_rest_lists_each_line_the_result_left_out_once(self):
+        # 残りの一覧(skip): 結果が 1 行ずつ並べた行を省いて、残りを全部並べる。結果と合わせると、名前を含む行がどれも 1 回ずつ出る
+        self.family(far=3)
+        self.write('src/c.cpp', '// Tick in a comment\n' * 4, self.t0 - 10)
+        self.index('index2', [], [('src/c.cpp', 'comment', f'{k}:1', f'{k}:21') for k in range(1, 5)], tus=('src/c.cpp',))
+        out, rest, n_all, n_listed = self.refs_and_rest('Base::Tick', '--compact', '--compact', '--family', '2', '--limit', '3')
+        self.assertEqual(n_all, 26 + 3 + 4)
+        self.assertLess(n_listed, n_all)
+        self.assertTrue(rest.startswith('query: Base::Tick\n  (the lines that contain the name and are not listed in the refs'
+                                        ' result, one per line; with that result, every line is listed once)\n'), rest[:300])
+        self.assertNotIn('\nindex: ', rest)  # 索引の状態は結果にある
+        a, b = self.positions(out), self.positions(rest)
+        self.assertEqual(len(set(a)), n_listed)
+        self.assertEqual(len(set(a) | set(b)), n_all)
+        # 上書きの行(宣言と定義の場所を 1 行に並べる。定義の行は、呼び出しの行と同じことがある)のほかは、重ならない
+        a, b = self.positions(out, False), self.positions(rest, False)
+        self.assertFalse(set(a) & set(b))
+        self.assertEqual(len(b), len(set(b)))
+        self.assertIn('    D02::Tick  decl src/d.h:4  def src/d.cpp:3\n', rest)
+        self.assertNotIn('D01::Tick  decl', rest)
+        self.assertIn('    src/c.cpp:4  | // Tick in a comment\n', rest)
+        self.assertTrue(rest.endswith(f'\n== coverage: {n_all - n_listed} lines here + {n_listed} in the refs result = all'
+                                      f' {n_all} lines that contain the word "Tick", each listed once' + SCOPE + '\n'), rest[-300:])
+        # 問い合わせの記号に結び付いた節が先、名前を含むだけの行の節(ltq.WORD_ONLY)が後ろ
+        heads = [x for x in rest.splitlines() if x.startswith('== ')]
+        word = [x.startswith(ltq.WORD_ONLY) for x in heads[:-1]]
+        self.assertEqual(word, sorted(word), heads)
+        # 実体化で別の記号に解決されたテンプレートの中の行は、名前を含むだけの行の側に並べる(直す先の一覧に混ぜない)
+        self.assertIn('3 of them are resolved by instantiations to other symbols -> probably not the query: Other::Tick (3)'
+                      ' (listed one per line under "lines the index resolves to other symbols")\n', rest)
+        tail = rest[rest.index('== lines the index resolves to other symbols named "Tick"'):]
+        self.assertIn('  src/t.h:3  ?::Tick, Other::Tick  | t.Tick(0);\n', tail)
+        self.assertNotIn('src/t.h', rest[:rest.index('== lines the index resolves to other symbols')])
+        # 全部並んだ結果の残りは、空(見出しと coverage だけ)
+        out, rest, n_all, n_listed = self.refs_and_rest('Base::Tick', '--all')
+        self.assertEqual(n_all, n_listed)
+        self.assertEqual(self.positions(rest), [])
+        self.assertIn(f'== coverage: 0 lines here + {n_all} in the refs result = all {n_all} lines', rest)
 
     def test_shift_jis_source(self):
         # ltidx は UTF-8 でないソースを記録したコードページ(932)で UTF-8 に直して解析する。列番号は直した後のバイト位置

@@ -129,8 +129,9 @@ class ServerTest(unittest.TestCase):
             self.assertIn('== coverage: all 3 lines that contain the word "Run" are listed above', f.read())
 
     def test_complete_list_is_written_when_lines_are_only_counted(self):
-        # 結果に 1 行ずつ並べきれないとき(上限に収めるために件数にまとめたとき)は、名前を含む行を全部並べた一覧を
-        # 索引の隣に書き、結果の最後の行でその場所を知らせる(名前を変えるときに、直す先を漏らさない)
+        # 結果に 1 行ずつ並べきれないとき(上限に収めるために件数にまとめたとき)は、並べなかった行の一覧を
+        # 索引の隣に書き、結果の最後の行でその場所を知らせる(名前を変えるときに、直す先を漏らさない)。
+        # 結果と一覧を合わせると、名前を含む行がどれも 1 回ずつ出る(一覧は、1 回で読める大きさに収める)
         refs = os.path.join(self.root, '.index', 'refs')
         text = self.refs_text()
         self.assertTrue(text.endswith('== coverage: all 3 lines that contain the word "Run" are listed above, one per line' + SCOPE + '\n'))
@@ -140,17 +141,23 @@ class ServerTest(unittest.TestCase):
         text = self.refs_text()
         self.assertLessEqual(len(text.encode('utf-8')), 1400)
         m = re.search(r'\n== coverage: 2 of 42 lines that contain the word "Run" are listed above, one per line'
-                      + re.escape(SCOPE) + r'; the rest are'
-                      r' only counted\. Every line, one per line: "([^"]+)" \(read it before a rename or a signature'
-                      r' change\)\n$', text)
+                      + re.escape(SCOPE) + r'; the other 40 lines are listed, one per line, in "([^"]+)" \(1 KB: read it'
+                      r' whole in one call\)\. Before a rename or a signature change, read it instead of searching the'
+                      r' sources again\n$', text)
         self.assertTrue(m, text[-400:])
         self.assertEqual(os.path.dirname(m.group(1)), refs)
         with open(m.group(1), encoding='utf-8') as f:
             listing = f.read()
         for n in range(4, 44):
             self.assertIn(f'    src/a.cpp:{n}  | // Run\n', listing)
-        self.assertIn('== coverage: all 42 lines that contain the word "Run" are listed above, one per line' + SCOPE + '\n', listing)
-        # 同じ問い合わせは同じファイルを書き換える(limit が違っても同じ一覧)。古い一覧は消す
+        for n in (1, 3):  # 結果に並べた行は、一覧に入れない
+            self.assertNotIn(f'src/a.cpp:{n} ', listing)
+            self.assertIn(f'src/a.cpp:{n} ', text)
+        self.assertTrue(listing.startswith('query: Run\n  (the lines that contain the name and are not listed in the refs result,'
+                                           ' one per line; with that result, every line is listed once)\n'), listing[:200])
+        self.assertTrue(listing.endswith('\n== coverage: 40 lines here + 2 in the refs result = all 42 lines that contain the word'
+                                         ' "Run", each listed once' + SCOPE + '\n'), listing[-200:])
+        # 同じ結果は同じファイルを書き換える(limit が違っても、並べた行が同じなら同じ一覧)。古い一覧は消す
         old = os.path.join(refs, 'Old-0123abcd.txt')
         with open(old, 'w') as f:
             f.write('x')
@@ -159,12 +166,12 @@ class ServerTest(unittest.TestCase):
         with open(keep, 'w') as f:
             f.write('x')
         os.utime(keep, (1000, 1000))
-        r = self.send('tools/call', {'name': 'refs', 'arguments': {'name': 'Run', 'limit': 5}})['result']
+        r = self.send('tools/call', {'name': 'refs', 'arguments': {'name': 'Run', 'limit': 100}})['result']
         self.assertIn(f'"{m.group(1)}"', r['content'][0]['text'])
         self.assertEqual(sorted(os.listdir(refs)), sorted([os.path.basename(m.group(1)), 'notes.txt']))
         # path を付けると、その先だけの一覧(別のファイル)
         r = self.send('tools/call', {'name': 'refs', 'arguments': {'name': 'Run', 'path': ['src']}})['result']
-        other = re.search(r'Every line, one per line: "([^"]+)"', r['content'][0]['text']).group(1)
+        other = re.search(r'listed, one per line, in "([^"]+)"', r['content'][0]['text']).group(1)
         self.assertNotEqual(other, m.group(1))
         # 中身が同じなら書き直さない(ファイルを差し替えない)
         ino = os.stat(m.group(1)).st_ino
@@ -176,13 +183,13 @@ class ServerTest(unittest.TestCase):
         # エージェントが読める作業ツリーの中で、テキスト検索には掛からない所。git には無視させる
         self.many_comments()
         self.restart(['--root', self.root, '--max-output-bytes', '1400'])
-        first = re.search(r'Every line, one per line: "([^"]+)"', self.refs_text()).group(1)
+        first = re.search(r'listed, one per line, in "([^"]+)"', self.refs_text()).group(1)
         out = os.path.join(self.root, 'out')
         shutil.copytree(os.path.join(self.root, '.index'), out, ignore=shutil.ignore_patterns('refs'))
         args = ['--root', self.root, '--index', os.path.join(out, 'index.tsv'), '--max-output-bytes', '1600']
         self.restart(args)
         text = self.refs_text()
-        where = re.search(r'Every line, one per line: "([^"]+)"', text).group(1)
+        where = re.search(r'listed, one per line, in "([^"]+)"', text).group(1)
         home = os.path.join(self.root, '.cxxref')
         self.assertEqual(os.path.dirname(where), os.path.join(home, 'refs'))
         self.assertNotIn('outside the workspace', text)
@@ -191,7 +198,7 @@ class ServerTest(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(out, 'refs')))
         self.assertNotEqual(os.path.basename(where), os.path.basename(first))  # 索引が違えば、別の一覧
         with open(where, encoding='utf-8') as f:  # 索引のファイル自体の行は、一覧に入らない
-            self.assertIn('== coverage: all 42 lines', f.read())
+            self.assertIn(' = all 42 lines', f.read())
         # 作業ツリーに書けないときだけ、一時フォルダに書く(作業ツリーの外なので、読めないときの手を添える)
         shutil.rmtree(home)
         with open(home, 'w') as f:
@@ -200,9 +207,10 @@ class ServerTest(unittest.TestCase):
         self.addCleanup(shutil.rmtree, tmp)
         self.restart(args, env={'TMPDIR': tmp, 'TEMP': tmp, 'TMP': tmp})
         text = self.refs_text()
-        where = re.search(r'Every line, one per line: "([^"]+)"', text).group(1)
+        where = re.search(r'listed, one per line, in "([^"]+)"', text).group(1)
         self.assertEqual(os.path.dirname(where), os.path.join(tmp, 'cxxref-refs'))
-        self.assertIn('; it is outside the workspace: if you cannot read it, pass path to list one folder at a time)\n', text)
+        self.assertTrue(text.endswith(' (outside the workspace: if you cannot read it, pass path to list one folder at a time)\n'),
+                        text[-300:])
 
     def test_complete_lists_are_capped_in_number(self):
         # 一覧の数に上限がある(新しい順に残し、古いものから消す)
@@ -489,9 +497,9 @@ class ReuseTest(unittest.TestCase):
         self.assertEqual(self.cfg.last_list, path)
         with open(path, encoding='utf-8') as f:
             listing = f.read()
-        self.assertTrue(listing.startswith('index: '), listing[:200])
+        self.assertTrue(listing.startswith('query: Run\n'), listing[:200])  # 索引の状態(index: の行)は結果にある
         self.assertNotIn('is older than this plugin', listing)
-        self.assertIn('== coverage: all 42 lines', listing)
+        self.assertIn(' = all 42 lines', listing)
         self.assertEqual(os.stat(path).st_ino, ino)
 
     def test_index_is_reused_while_unchanged(self):
@@ -624,6 +632,229 @@ class ReuseTest(unittest.TestCase):
         tree = next(iter(self.cfg._trees.values()))[0]
         if os.name == 'nt':
             self.assertEqual(tree.rescans, 1)  # 最初の 1 回のほかは、知らせだけで追った
+
+
+def nbytes(text):
+    return len(text.encode('utf-8'))
+
+
+class ListFilesTest(unittest.TestCase):
+    """並べきれなかった行の一覧: 1 回で読める大きさのファイルに分け、結果と合わせると名前を含む行が全部出るか。"""
+
+    def setUp(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(SERVER)))
+        import server  # noqa: E402
+        self.server = server
+        self.root = tempfile.mkdtemp()
+        self.cfg = None
+
+    def tearDown(self):
+        if self.cfg:
+            self.cfg.close()
+        shutil.rmtree(self.root)
+
+    def family(self, n=30, far=20, comments=4):
+        """Base::Tick と、それを上書きする D00..::Tick(宣言は src/d.h、定義と Base::Tick の呼び出しは src/d.cpp)。
+        実体化で別の記号に解決されたテンプレートの中の呼び出し(src/t.h)が far 行、コメントの中の一致(src/c.cpp)が comments 行。
+        名前を含む行は 1 + n(d.h)+ n + 1(d.cpp)+ far + comments。"""
+        src = os.path.join(self.root, 'src')
+        os.makedirs(src)
+        os.makedirs(os.path.join(self.root, '.index'))
+        base = os.path.join(self.root, '.index', 'index.tsv')
+        files = {
+            'd.h': 'struct Base { virtual void Tick(int); };\n'
+                   + ''.join(f'struct D{i:02} : Base {{ void Tick(int) override; }};\n' for i in range(n)),
+            'd.cpp': ''.join(f'void D{i:02}::Tick(int v) {{ Base::Tick(v); }}\n' for i in range(n))
+                     + 'void All(D00* d) { d->Tick(1); }\n',
+            't.h': 'template <class T> void Each(T& t) {\n' + '  t.Tick(0);\n' * far + '}\n',
+            'c.cpp': '// Tick in a comment\n' * comments,
+        }
+        for name, text in files.items():
+            with open(os.path.join(src, name), 'w', encoding='utf-8', newline='\n') as f:
+                f.write(text)
+            os.utime(os.path.join(src, name), (1000, 1000))
+        rows = [('Base::Tick', 'decl', '', 'src/d.h:1:28', 'struct Base { virtual void Tick(int); };')]
+        for i in range(n):
+            decl = f'struct D{i:02} : Base {{ void Tick(int) override; }};'
+            body = f'void D{i:02}::Tick(int v) {{ Base::Tick(v); }}'
+            rows += [(f'D{i:02}::Tick', 'decl', '', f'src/d.h:{i + 2}:26', decl),
+                     (f'D{i:02}::Tick', 'override', 'Base::Tick', f'src/d.h:{i + 2}:26', decl),
+                     (f'D{i:02}::Tick', 'def', '', f'src/d.cpp:{i + 1}:11', body),
+                     ('Base::Tick', 'call', f'D{i:02}::Tick', f'src/d.cpp:{i + 1}:31', body)]
+        rows += [('D00::Tick', 'call', 'All', f'src/d.cpp:{n + 1}:23', 'void All(D00* d) { d->Tick(1); }')]
+        for k in range(far):
+            rows += [('?::Tick', 'call-dep', 'Each', f'src/t.h:{k + 2}:5', 't.Tick(0);'),
+                     ('Other::Tick', 'call', 'Each', f'src/t.h:{k + 2}:5', 't.Tick(0);')]
+        with open(base, 'w', encoding='utf-8', newline='\n') as f:
+            f.write(''.join('\t'.join(r) + '\n' for r in rows))
+        with open(base + '.skip.tsv', 'w', encoding='utf-8', newline='\n') as f:
+            f.write('path\tkind\tbegin\tend\n'
+                    + ''.join(f'src/c.cpp\tcomment\t{k}:1\t{k}:21\n' for k in range(1, comments + 1)))
+        with open(base + '.tu.tsv', 'w', encoding='utf-8', newline='\n') as f:
+            f.write('file\tok\terrors\tsec\trefs\tfirst_error\n'
+                    + ''.join(f'{os.path.join(src, t)}\t1\t0\t0.1\t1\t\n' for t in ('d.cpp', 'c.cpp')))
+        for p in ('', '.skip.tsv', '.tu.tsv'):
+            os.utime(base + p, (2000, 2000))
+
+    def refs(self, max_bytes, part_bytes, **args):
+        if self.cfg:
+            self.cfg.close()
+        self.cfg = self.server.Config(self.root, None, None, max_bytes=max_bytes, part_bytes=part_bytes)
+        code, text = self.server.call_tool(self.cfg, 'refs', dict(name='Base::Tick', **args))
+        self.assertEqual(code, 0, text)
+        self.assertLessEqual(nbytes(text), max_bytes)
+        return text
+
+    def read(self, path):
+        with open(path, encoding='utf-8', newline='') as f:
+            return f.read()
+
+    def positions(self, text):
+        """文面に 1 行ずつ出ている位置(パス:行)。上書きの行は宣言と定義の 2 つ。"""
+        return set(re.findall(r'(?:^ +(?:\w[\w-]* +)?| (?:decl|def) )(src/[\w./]+:\d+)', text, re.M))
+
+    def test_rest_is_split_into_files_read_in_one_call(self):
+        # 大きな階層の virtual: 結果には直接の呼び出しを全部と上書きを 10 個、残りの上書きは 1 回で読める大きさのファイルに。
+        # 名前を含むだけの行(コメント、別の記号に解決された行)は、直す先の一覧に混ぜず、別のファイルに
+        self.family()
+        text = self.refs(6000, 1500)
+        # 上書きの族を絞る形を、節ごとの行数を減らす形より先に試す(直接の呼び出しを削らない)
+        self.assertIn('== calls (resolved by clang): 30\n', text)
+        for i in range(30):
+            self.assertIn(f'  call   src/d.cpp:{i + 1}  [in D{i:02}::Tick]', text)
+        self.assertIn('    D09::Tick  decl src/d.h:11  def src/d.cpp:10\n    ... 20 more overrides', text)
+        files = self.cfg.last_lists
+        self.assertEqual([os.path.basename(p).split('.', 1)[1] for p in files], ['1.txt', '2.txt', 'more.txt'])
+        self.assertEqual(self.cfg.last_list, files[0])
+        m = re.search(r'\n== coverage: 42 of 86 lines that contain the word "Tick" are listed above, one per line'
+                      + re.escape(SCOPE) + r'; the other 44 lines are listed, one per line, in 2 files to read whole, one call'
+                      r' each, in parallel: "([^"]+)", "([^"]+)", and the lines the index does not resolve to the query \(text'
+                      r' matches, other symbols with the same name\) in "([^"]+)" \(2 KB: too large to read whole; search it'
+                      r' with grep, or pass path to list one folder\)\. Before a rename or a signature change, read the first 2'
+                      r' instead of searching the sources again\n$', text)
+        self.assertTrue(m, text[-900:])
+        self.assertEqual(list(m.groups()), files)
+        texts = [self.read(p) for p in files]
+        for k, t in enumerate(texts):
+            self.assertTrue(t.startswith(f'file {k + 1} of 3 of this list (the refs result names all of them)\n'), t[:100])
+        for t in texts[:2]:
+            self.assertLessEqual(nbytes(t), 1500)
+        self.assertIn('    D10::Tick  decl src/d.h:12  def src/d.cpp:11\n', texts[0])
+        self.assertIn('    D29::Tick  decl src/d.h:31  def src/d.cpp:30\n', texts[0])
+        self.assertNotIn('D09::Tick', ''.join(texts))  # 結果に並べた上書きは、一覧に入れない
+        for word in ('src/t.h', 'src/c.cpp'):
+            self.assertNotIn(word, texts[0] + texts[1])
+        self.assertIn('  src/t.h:21  ?::Tick, Other::Tick  | t.Tick(0);\n', texts[2])
+        self.assertIn('    src/c.cpp:4  | // Tick in a comment\n', texts[2])
+        self.assertTrue(texts[2].endswith('\n== coverage: 44 lines here + 42 in the refs result = all 86 lines that contain the'
+                                          ' word "Tick", each listed once' + SCOPE + '\n'), texts[2][-200:])
+        # 結果と一覧を合わせると、名前を含む行が全部
+        self.assertEqual(len(self.positions(text)), 42)
+        self.assertEqual(len(self.positions(text + ''.join(texts))), 86)
+
+        # 結果の形が違えば(並べた行が違えば)、同じ名前でも別のファイル。先に知らせた一覧は書き換えない
+        # (同じサーバーを使う別のエージェントが読んでいる途中でも、結果と一覧が食い違わない)
+        self.refs(4500, 1500)
+        files2 = self.cfg.last_lists
+        self.assertTrue(files2)
+        self.assertFalse(set(files) & set(files2))
+        self.assertEqual([self.read(p) for p in files], texts)
+        # 同じ結果なら同じファイル(書き直さない)。同じ一覧の、前の分け方のファイルは消す
+        stale = files[0][:-len('1.txt')] + '9.txt'
+        with open(stale, 'w') as f:
+            f.write('x')
+        ino = [os.stat(p).st_ino for p in files]
+        self.assertEqual(self.refs(6000, 1500), text)
+        self.assertEqual(self.cfg.last_lists, files)
+        self.assertEqual([os.stat(p).st_ino for p in files], ino)
+        self.assertFalse(os.path.exists(stale))
+        for p in files2:
+            self.assertTrue(os.path.exists(p))
+
+    def test_rest_that_fits_is_one_file(self):
+        # 残りが 1 回で読める大きさなら、1 つのファイル(名前を含むだけの行も一緒)
+        self.family(n=12, far=3)
+        text = self.refs(3300, 18000)
+        files = self.cfg.last_lists
+        self.assertEqual(len(files), 1)
+        self.assertRegex(os.path.basename(files[0]), r'^Base_Tick-[0-9a-f]{8}[.]txt$')
+        self.assertTrue(text.endswith(f'in "{files[0]}" (2 KB: read it whole in one call). Before a rename or a signature'
+                                      ' change, read it instead of searching the sources again\n'), text[-400:])
+        listing = self.read(files[0])
+        self.assertTrue(listing.startswith('query: Base::Tick\n'))
+        self.assertEqual(len(self.positions(text + listing)), 1 + 12 + 13 + 3 + 4)
+        self.assertFalse(self.positions(text) & {f'src/t.h:{k}' for k in range(2, 5)})
+
+    def test_result_cut_names_the_complete_list(self):
+        # どの形でも上限を超えるときは末尾を切り、名前を含む行を全部並べた一覧(同じ分け方)の場所を添える
+        self.family()
+        text = self.refs(1500, 1500)
+        files = self.cfg.last_lists
+        self.assertEqual([os.path.basename(p).split('.', 1)[1] for p in files], ['1.txt', '2.txt', '3.txt', 'more.txt'])
+        self.assertTrue(text.endswith('... output cut at 1500 bytes (the client limit). Every line, one per line: '
+                                      + ', '.join(f'"{p}"' for p in files) + ' (3 KB: search it with grep). Ask for a narrower'
+                                      ' name, or pass path / exclude / limit to see the rest.\n'), text[-700:])
+        self.assertEqual(len(self.positions(''.join(self.read(p) for p in files))), 86)
+
+    def test_plan_list(self):
+        s = self.server
+        intro = 'query: X\n  (intro)\n\n'
+        calls = ('== calls (resolved by clang): 40\n' + ''.join(f'  call   src/a.cpp:{i}  | X();\n' for i in range(40)) + '\n')
+        virt = ('== virtual dispatch\n  overridden by (...): 40\n' + ''.join(f'    D{i:02}::X  decl src/d.h:{i}\n' for i in range(40))
+                + '  calls resolved to the overrides (...): 2\n    call   src/b.cpp:1  D00::X  | d->X();\n'
+                + '    call   src/b.cpp:2  D01::X  | d->X();\n\n')
+        word = ('== text matches of "X" not in the index: 3 of 90 word matches\n  inside comments -> not code: 3\n'
+                + ''.join(f'    src/c.cpp:{i}  | // X\n' for i in range(3)) + '\n== coverage: 3 lines here\n')
+        text = intro + calls + virt + word
+
+        def data(t):  # 位置のある行(見出し・小見出し・空行でない行)
+            return [x for x in t.splitlines() if ' src/' in x]
+
+        # 収まれば 1 つ(添え字なし)
+        self.assertEqual(s.plan_list(text, 100000), ([('', text, True)], False))
+        # 収まらなければ、問い合わせの記号の行を 1 回で読める大きさに分け、名前を含むだけの行は別のファイルに
+        plan, word_only = s.plan_list(text, 1200)
+        self.assertEqual([sfx for sfx, _, _ in plan], ['.1', '.2', '.3', '.4'])
+        self.assertTrue(all(ok and nbytes(t) <= 1200 for _, t, ok in plan), [nbytes(t) for _, t, _ in plan])
+        for k, (_, t, _) in enumerate(plan):
+            self.assertTrue(t.startswith(f'file {k + 1} of 4 of this list (the refs result names all of them)\n'))
+        self.assertTrue(plan[0][1].split('\n', 1)[1].startswith(intro + '== calls (resolved by clang): 40\n  call   src/a.cpp:0 '))
+        # 節の途中で分けたら、次のファイルの頭に見出し(小見出しのある節ではその小見出しも)を足す
+        self.assertTrue(plan[1][1].split('\n', 1)[1].startswith('== calls (resolved by clang): 40 (continued)\n  call '))
+        self.assertTrue(plan[2][1].split('\n', 1)[1].startswith(
+            '== virtual dispatch (continued)\n  overridden by (...): 40 (continued)\n    D'), plan[2][1][:200])
+        self.assertEqual(plan[3][1].split('\n', 1)[1], intro + word)
+        self.assertEqual(data(''.join(t for _, t, _ in plan)), data(text))  # 行は落とさず、重ねず、順も変えない
+        # 問い合わせの記号の行が PARTS_MAX 個に収まらなければ、残りを 1 つの大きなファイルに(名前を含むだけの行もそこへ)
+        plan, word_only = s.plan_list(text, 600)
+        self.assertEqual([(sfx, ok) for sfx, _, ok in plan], [('.1', True), ('.2', True), ('.3', True), ('.more', False)])
+        self.assertFalse(word_only)
+        self.assertTrue(all(nbytes(t) <= 600 for _, t, ok in plan if ok))
+        more = plan[3][1].split('\n', 1)[1]
+        self.assertTrue(more.startswith(intro + '== '), more[:100])
+        self.assertIn(' (continued)\n', more[len(intro):].split('\n', 1)[0] + '\n')
+        self.assertTrue(more.endswith(word))
+        self.assertEqual(data(''.join(t for _, t, _ in plan)), data(text))
+        # 問い合わせの記号の行が無ければ(全体が、名前を含むだけの行)、1 つの大きなファイル
+        self.assertEqual(s.plan_list(intro + word, 100), ([('', intro + word, False)], True))
+
+    def test_list_hint(self):
+        # 小さいファイルは「丸ごと読む」、大きいファイルは「検索する」と言い分ける
+        hint = self.server.list_hint
+        tail = '. Before a rename or a signature change, read {} instead of searching the sources again'
+        self.assertEqual(hint([('a', 900, True)], False, 5, False),
+                         '; the other 5 lines are listed, one per line, in "a" (1 KB: read it whole in one call)' + tail.format('it'))
+        self.assertEqual(hint([('a', 900, True), ('b', 900, True)], True, 5, False),
+                         '; the other 5 lines are listed, one per line, in 2 files to read whole, one call each, in parallel:'
+                         ' "a", "b"' + tail.format('them'))
+        big = '"m" (6.0 MB: too large to read whole; search it with grep, or pass path to list one folder)'
+        self.assertEqual(hint([('a', 16000, True), ('m', 6291456, False)], False, 5, False),
+                         '; the other 5 lines are listed, one per line, in "a" (16 KB: read it whole in one call), and the'
+                         ' remaining lines in ' + big + tail.format('the first one'))
+        self.assertEqual(hint([('m', 6291456, False)], True, 5, True),
+                         '; the other 5 lines the index does not resolve to the query (text matches, other symbols with the'
+                         ' same name) are listed, one per line, in ' + big
+                         + ' (outside the workspace: if you cannot read it, pass path to list one folder at a time)')
 
 
 if __name__ == '__main__':

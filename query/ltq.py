@@ -46,6 +46,11 @@ OTHER_LIST = 10  # 短い出力(--compact 1 つ)で、ソースでないファ�
 UNREAD_LIST = 20  # 読めなかったファイルを並べる数(--all では全部)
 # 件数にまとめた行があるときに、出力の最後の行(coverage)の末尾に付ける案内(MCP サーバーは、一覧のファイルの場所に置き換える)
 ALL_HINT = '; the rest are only counted (refs --all lists every line)'
+# 節の見出しの頭(MCP サーバーが、残りの一覧をファイルに分けるときに見る)
+# WORD_ONLY: 索引が問い合わせの記号に結び付けていない行の節(名前を含むだけの行。ここから後ろは、名前によっては数 MB になる)
+WORD_ONLY = ('== text matches of ', '== matches of ', '== lines the index resolves to other symbols ')
+# NESTED: 字下げ 2 文字の小見出しの下に、字下げ 4 文字で行を並べる節
+NESTED = ('== virtual dispatch', '== text matches of ')
 
 
 def is_other(ext, size):
@@ -1167,8 +1172,14 @@ def more_by_folder(paths, indent):
         print(indent + s)
 
 
-def section(title, items, limit, pos, listed):
-    """pos は items と同じ順の、行の位置 (パス, 行)。1 行ずつ出した位置を listed に足す。"""
+def section(title, items, limit, pos, listed, skip=None):
+    """pos は items と同じ順の、行の位置 (パス, 行)。1 行ずつ出した位置を listed に足す。
+    skip(残りの一覧を作るとき。もう並べた位置の集合)を渡すと、その位置の行を省き、1 行も残らなければ節ごと出さない。"""
+    if skip is not None:
+        keep = [i for i, p in enumerate(pos) if p not in skip]
+        items, pos = [items[i] for i in keep], [pos[i] for i in keep]
+        if not items:
+            return
     print(f'\n== {title}: {len(items)}')
     for s in items[:limit]:
         print('  ' + s)
@@ -1181,9 +1192,16 @@ def cmd_refs(a, idx):
     name = a.name.lstrip(':')
     short = re.split(r'::', name)[-1]
     sb = short.encode('utf-8')
-    if a.all:  # 1 行も件数にまとめない(名前やシグネチャを変えるときに、直す先を漏らさないための一覧)
-        a.limit, a.compact = sys.maxsize, 0
+    # skip: 残りの一覧(MCP サーバーが、結果に並べきれなかった行をファイルに書くときに使う)。前の結果が 1 行ずつ並べた位置の
+    # 集合で、その行を省いて --all と同じに並べる。結果と合わせると、名前を含む行がどれも 1 回ずつ出る
+    skip = getattr(a, 'skip', None)
+    remain = skip is not None
+    if a.all or remain:  # 1 行も件数にまとめない(名前やシグネチャを変えるときに、直す先を漏らさないための一覧)
+        a.all, a.limit, a.compact = True, sys.maxsize, 0
     listed = set()  # 1 行ずつ出した行の位置 (パス, 行)。最後に、名前を含む行のうち何行を並べたかを出す
+
+    def fresh(p, ln):
+        return not remain or (p, ln) not in skip
 
     def match(sym):
         return sym == name or sym.endswith('::' + name)
@@ -1248,45 +1266,54 @@ def cmd_refs(a, idx):
 
     if tail:  # 修飾名なら、末尾の名前だけの一致(O3DE の Create で数千ファイル)ではなく、修飾名を書いたファイルと結果のファイル
         focus = {h[0] for h in hits if named(h[3])} | {r[3] for r in target + deps}
-    idx.header(focus)
-    print(f'query: {a.name}')
-    if inpath:
-        print('  (--path: only lines in ' + ', '.join(a.path) + ' are listed and counted)')
-    if a.all:
-        print('  (--all: every line that contains the name is listed, one per line; nothing is folded into counts)')
-    if a.compact:
-        # 1 段目は、コードでありうる分類(無効な #if・マクロの定義・読まれていないファイル・その他)を 1 行ずつ並べる。
-        # 2 段目(--compact を 2 つ)は、それもフォルダごとの件数にする
-        print('  (compact output: comments, strings, local names'
-              + (', inactive #if, macro bodies' if a.compact > 1 else '')
-              + ' and matches that resolve to other symbols are summarized as counts; '
-              + (f'calls, likely calls and lines that spell {"::".join(parts[-2:])}' if tail else 'calls and likely calls')
-              + ' are listed in full'
-              + (f', other text matches up to {COMPACT_LIST} per group' if a.compact == 1 else '') + ')')
-    if not syms:
-        print('  no symbol in the index matches this name.')
-    elif show_sym:
-        # 短い名前は数百の記号に当たる(O3DE の Activate で 47 KB の 1 行)。行の多い順に上限まで並べ、残りは件数にする。
-        # 行そのものは下の節に記号つきで出るので、ここで省いても見えなくなる行は無い
-        per = collections.Counter(r[0] for r in target)
-        top = sorted(syms, key=lambda s: (-per[s], s))
-        cap = len(top) if len(top) <= SYM_LIST + 5 else SYM_LIST
-        print('  matched symbols: ' + ', '.join(f'{s} ({per[s]})' for s in top[:cap])
-              + (f', ... {len(top) - cap} more symbols ({sum(per[s] for s in top[cap:])} rows; each row below names'
-                 ' its symbol. Ask with a qualified name to narrow)' if len(top) > cap else ''))
+
+    def intro():
+        idx.header(focus)
+        print(f'query: {a.name}')
+        if inpath:
+            print('  (--path: only lines in ' + ', '.join(a.path) + ' are listed and counted)')
+        if a.all:
+            print('  (--all: every line that contains the name is listed, one per line; nothing is folded into counts)')
+        if a.compact:
+            # 1 段目は、コードでありうる分類(無効な #if・マクロの定義・読まれていないファイル・その他)を 1 行ずつ並べる。
+            # 2 段目(--compact を 2 つ)は、それもフォルダごとの件数にする
+            print('  (compact output: comments, strings, local names'
+                  + (', inactive #if, macro bodies' if a.compact > 1 else '')
+                  + ' and matches that resolve to other symbols are summarized as counts; '
+                  + (f'calls, likely calls and lines that spell {"::".join(parts[-2:])}' if tail else 'calls and likely calls')
+                  + ' are listed in full'
+                  + (f', other text matches up to {COMPACT_LIST} per group' if a.compact == 1 else '') + ')')
+        if not syms:
+            print('  no symbol in the index matches this name.')
+        elif show_sym:
+            # 短い名前は数百の記号に当たる(O3DE の Activate で 47 KB の 1 行)。行の多い順に上限まで並べ、残りは件数にする。
+            # 行そのものは下の節に記号つきで出るので、ここで省いても見えなくなる行は無い
+            per = collections.Counter(r[0] for r in target)
+            top = sorted(syms, key=lambda s: (-per[s], s))
+            cap = len(top) if len(top) <= SYM_LIST + 5 else SYM_LIST
+            print('  matched symbols: ' + ', '.join(f'{s} ({per[s]})' for s in top[:cap])
+                  + (f', ... {len(top) - cap} more symbols ({sum(per[s] for s in top[cap:])} rows; each row below names'
+                     ' its symbol. Ask with a qualified name to narrow)' if len(top) > cap else ''))
+        else:
+            print(f'  symbol: {syms[0]}' + ('  (a macro)' if is_macro else ''))
+        if renamed:
+            print(f'  the macro {short} renames it to {", ".join(sorted(renamed))}; the results below are for that name')
+        if aliased:
+            cnt = collections.Counter((r[0], r[1]) for r in aliased)
+            per = collections.Counter(r[0] for r in aliased)
+            by = {}
+            for (s, role), n in cnt.items():
+                by.setdefault(s, []).append(f'{role} {n}')
+            top = sorted(by.items(), key=lambda kv: -per[kv[0]])
+            print(f'  where the macro {short} is expanded, clang sees: '
+                  + ', '.join(f'{s} ({", ".join(v)})' for s, v in top[:10]) + (' ...' if len(top) > 10 else ''))
+
+    if remain:
+        print(f'query: {a.name}')
+        print('  (the lines that contain the name and are not listed in the refs result, one per line;'
+              ' with that result, every line is listed once)')
     else:
-        print(f'  symbol: {syms[0]}' + ('  (a macro)' if is_macro else ''))
-    if renamed:
-        print(f'  the macro {short} renames it to {", ".join(sorted(renamed))}; the results below are for that name')
-    if aliased:
-        cnt = collections.Counter((r[0], r[1]) for r in aliased)
-        per = collections.Counter(r[0] for r in aliased)
-        by = {}
-        for (s, role), n in cnt.items():
-            by.setdefault(s, []).append(f'{role} {n}')
-        top = sorted(by.items(), key=lambda kv: -per[kv[0]])
-        print(f'  where the macro {short} is expanded, clang sees: '
-              + ', '.join(f'{s} ({", ".join(v)})' for s, v in top[:10]) + (' ...' if len(top) > 10 else ''))
+        intro()
 
     key = lambda r: (r[3], r[4], r[5], r[1].endswith('-using'))
     # 同じ位置に直接の解決と using 越しの解決があれば、直接のほうだけ残す
@@ -1299,7 +1326,7 @@ def cmd_refs(a, idx):
         uniq.append(r)
     target = uniq
     n_alt = sum(1 for r in target + deps if r[9])
-    if n_alt:
+    if n_alt and not remain:
         print(f'  {n_alt} lines below are marked [inactive: #if ...]: code the indexed configuration does not compile, parsed'
               ' with that condition forced on (best effort). Still code: include them when renaming or changing a signature')
     # 行ごとの索引の行(at)。テキストの一致のうち索引に行の無いもの(loose)のファイルと、無効な #if の中として解析した行の
@@ -1318,24 +1345,42 @@ def cmd_refs(a, idx):
     expands = [r for r in target if r[1] == 'expand']
     defs = sorted((r for r in target if r[1].startswith(DEFS) or r[1] == 'macro'), key=key)
     uses = sorted((r for r in target if not r[1].startswith(('call',) + DEFS) and r[1] not in ('expand', 'macro')), key=key)
-    section('calls (resolved by clang)', [show(r, show_sym) for r in calls], a.limit, [(r[3], r[4]) for r in calls], listed)
-    if calls:
+    section('calls (resolved by clang)', [show(r, show_sym) for r in calls], a.limit, [(r[3], r[4]) for r in calls], listed, skip)
+    if calls and not remain:
         print('  (exact: clang resolved each call from the real type of its receiver, whatever the variable is named)')
-    if any(r[1].endswith('-using') for r in target):
+    if any(r[1].endswith('-using') for r in target) and not remain:
         print('  (call-using: a call through a using-declaration inside a template, resolved from its instantiations)')
     if expands:
         section('macro expansions (where the macro name is written in the code)', [show(r, show_sym) for r in expands],
-                a.limit, [(r[3], r[4]) for r in expands], listed)
+                a.limit, [(r[3], r[4]) for r in expands], listed, skip)
     section('other references (address taken, template arguments, writes, #ifdef, ...)',
-            [show(r, show_sym) for r in uses], a.limit, [(r[3], r[4]) for r in uses], listed)
-    section('definitions and declarations', [show(r, show_sym) for r in defs], a.limit, [(r[3], r[4]) for r in defs], listed)
+            [show(r, show_sym) for r in uses], a.limit, [(r[3], r[4]) for r in uses], listed, skip)
+    section('definitions and declarations', [show(r, show_sym) for r in defs], a.limit, [(r[3], r[4]) for r in defs], listed, skip)
 
     # 基底のポインタや参照越しの呼び出しは、clang が基底のメソッドに解決する。実行時に上書きへ届くかは型次第
     bases, derived = closure(syms, up), closure(syms, down)
-    if bases or derived:
+    via = sorted((r for r in rows if r[0] in bases and r[1].startswith('call') and (not inpath or inpath(r[3]))
+                  and fresh(r[3], r[4])), key=key)
+    # 上書きの族: 上書きごとの宣言と定義の場所と、上書きへ解決された呼び出し。引数を変えるときは、どれも直す先になる。
+    # 上書き 1 つを 1 行にして、宣言と定義の場所を並べる(別の節に 1 行ずつ出すと、記号の名前とソースの行が重なって倍になる。
+    # UE5 の FAnimNode_Base::Update_AnyThread は上書き 59 個で、宣言の一覧 8 KB と定義の一覧 14 KB に分かれていた)
+    fam_at, fam_calls = {}, []
+    for r in sorted((r for r in rows if r[0] in derived), key=key):
+        if r[1].startswith(DEFS):
+            fam_at.setdefault(r[0], {}).setdefault((r[3], r[4]), r[1] + (' [inactive]' if r[9] else ''))
+        elif r[1].startswith('call') and (not inpath or inpath(r[3])) and fresh(r[3], r[4]):
+            fam_calls.append(r)
+    fam = []
+    for d in sorted(derived):
+        at_d = dict(fam_at.get(d, {}))
+        if d in ov_at:
+            at_d.setdefault(ov_at[d], 'decl')  # override の行は、クラスの中の宣言にある
+        ps = sorted(at_d.items(), key=lambda kv: (not kv[1].startswith('decl'), kv[0]))  # 宣言、定義の順
+        if (not inpath or any(inpath(p) for (p, _), _ in ps)) and any(fresh(p, ln) for (p, ln), _ in ps):
+            fam.append((d, ps))
+    if (bases and not remain) or via or fam or fam_calls:
         print('\n== virtual dispatch')
-    if bases:
-        via = sorted((r for r in rows if r[0] in bases and r[1].startswith('call') and (not inpath or inpath(r[3]))), key=key)
+    if bases and (via or not remain):
         print(f'  the query overrides {", ".join(sorted(bases))}. Calls to those may run the query at runtime,'
               ' depending on the dynamic type of the receiver; they are not counted above:'
               f' {len(via)}')
@@ -1344,34 +1389,52 @@ def cmd_refs(a, idx):
         listed.update((r[3], r[4]) for r in via[:a.limit])
         if len(via) > a.limit:
             more_by_folder([r[3] for r in via[a.limit:]], '    ')
-    if derived:
-        n = sum(1 for r in rows if r[0] in derived and r[1].startswith('call'))
-        print(f'  overridden by (calls through a pointer or reference to the query\'s class may run these instead;'
-              f' calls resolved to these, {n}, call the override, not the query):')
-        # 上書きの一覧は、呼び出し元を聞かれたときには要らないことが多く、大きな階層では結果の大半を占める
-        # (コードベース A の Object::GetType で 74 行・結果 22 KB の半分)。既定では 10 まで、--limit を下げればそれまで
-        cap = len(derived) if a.all else min(a.limit, 10)
-        for d in sorted(derived)[:cap]:
-            p, ln = ov_at.get(d, ('?', 0))
-            print(f'    {d}  {p}:{ln}')
-            listed.add((p, ln))
-        if len(derived) > cap:
-            print(f'    ... {len(derived) - cap} more overrides (refs <Class>::{short} for one of them)')
+    # 族は、呼び出し元を聞かれたときには要らないことが多く、大きな階層では結果の大半を占める(コードベース A の
+    # Object::GetType で 74 個)。全文では --limit まで並べ、短い形では 10 まで(--family で変えられる。MCP サーバーは、
+    # 全文が上限を超えたら、まず族だけを 10 に絞った形を試す)。並べなかった分は、残りの一覧(--all)に出る
+    cap = sys.maxsize if a.all else a.family if a.family is not None else a.limit if not a.compact else min(a.limit, 10)
+    if fam:
+        print(f'  overridden by (calls through a pointer or reference to the query\'s class may run these instead; each line'
+              f' names an override and where it is declared and defined: change them with the query): {len(fam)}')
+        for d, ps in fam[:cap]:
+            print(f'    {d}  ' + '  '.join(f'{role} {p}:{ln}' for (p, ln), role in ps))
+            listed.update(pos for pos, _ in ps)
+        if len(fam) > cap:
+            # 上書きごとに refs を呼び直すと往復が増えるだけ(宣言・定義・呼び出しは、この結果と残りの一覧に全部ある)
+            print(f'    ... {len(fam) - cap} more overrides (the last line says where the rest is listed, with the calls'
+                  ' to them; asking refs about each override adds nothing)')
+    if fam_calls:
+        print(f'  calls resolved to the overrides (they call the override, not the query; a signature change reaches them'
+              f' too): {len(fam_calls)}')
+        for r in fam_calls[:cap]:
+            print('    ' + show(r, True))
+        listed.update((r[3], r[4]) for r in fam_calls[:cap])
+        if len(fam_calls) > cap:
+            print(f'    ... {len(fam_calls) - cap} more calls to the overrides (the last line says where the rest is'
+                  ' listed), by folder:')
+            for s in top_dirs([r[3] for r in fam_calls[cap:]], 5):
+                print('    ' + s)
 
     # dep 行: テンプレート本体では未解決。実体化で解決された位置は、その解決先を添える
     target_pos = {(r[3], r[4]) for r in target}
     def_files = {r[3] for r in defs}
-    dep_lines, dep_paths, dep_dup, dep_other, other_paths = [], [], 0, {}, []
+    dep_lines, dep_paths, dep_dup, dep_other, other_paths, dep_far = [], [], 0, {}, [], set()
     for r in sorted(deps, key=key):
         if (r[3], r[4]) in target_pos:
             dep_dup += 1  # 実体化で対象に解決済み。上の calls に載っている
             continue
+        if not fresh(r[3], r[4]):
+            continue
         resolved = sorted({x[0] for x in at[(r[3], r[4])]
                            if x[0] != r[0] and not x[1].startswith(DEFS + (OVERRIDE,)) and x[1] not in MACRO_ROLES})
-        if resolved and a.compact:  # 短い出力では、別の記号に解決された行は件数とフォルダごとの件数にする
+        if resolved and (a.compact or a.all):
+            # 別の記号に解決された行。短い出力では、件数とフォルダごとの件数にする。--all と残りの一覧では、最後の節
+            # (索引が別の記号に解決した行)に 1 行ずつ出す(UE5 の Initialize で 2261 行ある。問い合わせの記号の行の間に
+            # 並べると、直す先を読む相手に、関係の薄い行を 50 KB 読ませる)
             for s in resolved:
                 dep_other[s] = dep_other.get(s, 0) + 1
             other_paths.append(r[3])
+            dep_far.add((r[3], r[4]))
             continue
         if resolved:
             mark = '  (instantiations resolve it to ' + ', '.join(resolved) + ' -> probably not the query)'
@@ -1380,16 +1443,19 @@ def cmd_refs(a, idx):
         dep_lines.append(show(r, False) + mark)
         dep_paths.append((r[3], r[4]))
     n_other = len(other_paths)  # 1 行が複数の記号に解決されることがあるので、記号ごとの件数の和ではなく行の数
-    print(f'\n== unresolved template calls named "{short}" (dep): {len(dep_lines) + n_other}'
-          + (f' (+{dep_dup} already listed in calls)' if dep_dup else ''))
+    if dep_lines or n_other or not remain:
+        print(f'\n== unresolved template calls named "{short}" (dep): {len(dep_lines) + n_other}'
+              + (f' (+{dep_dup} already listed in calls)' if dep_dup and not remain else ''))
     if dep_lines:
         print('  clang could not resolve these inside templates. Decide from the source line and the')
         print('  enclosing function whether each one calls the queried symbol; they are not counted above.')
     if dep_other:
         top = sorted(dep_other.items(), key=lambda kv: -kv[1])
         print(f'  {n_other} of them are resolved by instantiations to other symbols -> probably not the query: '
-              + ', '.join(f'{s} ({n})' for s, n in top[:8]) + (f', ... {len(top) - 8} more symbols' if len(top) > 8 else ''))
-        for s in top_dirs(other_paths, 5):  # rg なら出る行。どこにあるかは残す(--path で 1 行ずつ出る)
+              + ', '.join(f'{s} ({n})' for s, n in top[:8]) + (f', ... {len(top) - 8} more symbols' if len(top) > 8 else '')
+              + (' (listed one per line under "lines the index resolves to other symbols")'
+                 if a.all else ''))
+        for s in [] if a.all else top_dirs(other_paths, 5):  # rg なら出る行。どこにあるかは残す(--path で 1 行ずつ出る)
             print('    ' + s)
     for s in dep_lines[:a.limit]:
         print('  ' + s)
@@ -1459,8 +1525,11 @@ def cmd_refs(a, idx):
     # (UE5 の Initialize では 1 万行あり、出し直しのたびに 0.7 秒かかっていた)
     cats = idx.cached(('cats', a.name, tuple(sorted(a.exclude)), tuple(a.path)), classify)
 
-    print(f'\n== text matches of "{short}" not in the index: '
-          f'{sum(len(v) for v in cats.values())} of {len(hits)} word matches')
+    if remain:  # 残りの一覧: もう並べた行を省く(分類は使い回すので、写しを絞る)
+        cats = {k: [it for it in v if (it[0], it[3]) not in skip] for k, v in cats.items()}
+    if not remain or any(cats.values()):
+        print(f'\n== text matches of "{short}" not in the index: '
+              f'{sum(len(v) for v in cats.values())} of {len(hits)} word matches')
     no_alt = [p for p in idx.parts if not p.alt_ok]
     groups = [
         ('comment', 'inside comments -> not code; do not report these', False),
@@ -1476,7 +1545,10 @@ def cmd_refs(a, idx):
         ('unparsed', 'in files no indexed TU includes -> not analyzed; read them if they matter', False),
         ('other', 'other -> not explained by the index; read them if they matter', False),
     ]
-    folded = bool(other_paths)  # 上の dep 行をフォルダごとの件数にしたか
+    if remain:  # 残りの一覧は頭から読まれる。コードでありうる分類を先に、コードでない分類を後に置く
+        code = ('inactive', 'dropped', 'macro', 'unparsed', 'other')
+        groups.sort(key=lambda g: g[0] not in code)
+    folded = bool(other_paths) and not a.all  # 上の dep 行をフォルダごとの件数にしたか
     for k, title, fold in groups:
         items = cats[k]
         if not items:
@@ -1522,6 +1594,10 @@ def cmd_refs(a, idx):
     extra = idx.cached(('other', short, tuple(sorted(a.exclude))), lambda: other_hits(idx, short, set(a.exclude), bad))
     if inpath:
         extra = [h for h in extra if inpath(h[0])]
+    # 名前を含む行(rg -w なら出る行)。下で、そのうち何行を 1 行ずつ並べたかを出す
+    hit_pos = {(h[0], h[1]) for h in hits} | {(p, ln) for p, ln, _ in extra}
+    if remain:
+        extra = [h for h in extra if (h[0], h[1]) not in skip]
     if extra:
         print(f'\n== matches of "{short}" in files that are not C/C++ sources (scripts, build files, docs, other languages'
               f' -> not analyzed; update them too when renaming): {len(extra)}')
@@ -1535,17 +1611,16 @@ def cmd_refs(a, idx):
             folded = True
     if folded:
         print('  (to list the lines of a folder that is shown as a count, ask again with --path <folder>)')
-    if others:
+    if others and not remain:
         top = sorted(others.items(), key=lambda kv: -kv[1])
         print(f'\n== other symbols named "{short}" (not the query): ' +
               ', '.join(f'{s} ({n})' for s, n in top[:15]) + (' ...' if len(top) > 15 else ''))
-    # 名前を含む行(rg -w なら出る行)のうち、上に 1 行ずつ出した行の数。残りは、フォルダ・ファイル・記号ごとの件数にしか出ていない
-    hit_pos = {(h[0], h[1]) for h in hits} | {(p, ln) for p, ln, _ in extra}
+    # 名前を含む行のうち、上に 1 行ずつ出した行の数。残りは、フォルダ・ファイル・記号ごとの件数にしか出ていない
     if a.all:
         # まだ並べていない行: 索引が同じ名前の別の記号に解決した行(修飾名で問うたとき)と、上書き・基底の記号の行。
         # 問い合わせの記号ではないが、rg なら出る行なので 1 行ずつ出す(無効な #if の中を仮に有効にした解析は、型を取り違えて
         # 別の記号に解決することがある。件数にまとめると、その行がどこにあるか分からなくなる)
-        left = sorted(hit_pos - listed)
+        left = sorted((hit_pos | dep_far) - listed - (skip or frozenset()))
         if left:
             src_of = {(h[0], h[1]): h[3] for h in hits}
             print(f'\n== lines the index resolves to other symbols named "{short}" (not the query; listed so that no line'
@@ -1572,6 +1647,15 @@ def cmd_refs(a, idx):
              + (', the index files' if idx.own() else '')
              + (', --exclude ' + ', '.join(sorted(a.exclude)) if a.exclude else '')
              + (f', {len(unread)} file{"s" if len(unread) > 1 else ""} that could not be read' if unread else '') + ')')
+    # MCP サーバーが、この結果に並べた位置を次の呼び出し(残りの一覧)の skip に渡す
+    idx.last_refs = (frozenset(listed), n_all, n_listed)
+    if remain:
+        n_before = len(hit_pos & skip)
+        n_here = len((hit_pos & listed) - skip)
+        print(f'\n== coverage: {n_here} lines here + {n_before} in the refs result = '
+              + ('all ' if n_before + n_here == n_all else f'{n_before + n_here} of ')
+              + f'{n_all} lines that contain the word "{short}", each listed once' + scope)
+        return
     print(f'\n== coverage: {"all " if n_listed == n_all else f"{n_listed} of "}{n_all} lines that contain the word'
           f' "{short}" are listed above, one per line' + scope + ('' if n_listed == n_all else ALL_HINT))
 
@@ -1651,9 +1735,10 @@ def find_root(start):
         d = parent
 
 
-def main(argv=None, idx=None):
+def main(argv=None, idx=None, skip=None):
     """戻り値は終了コード。結果は標準出力に書く(MCP サーバーはこれを取り込んで返す)。
-    idx を渡すと、索引を探さずにそれを引く(MCP サーバーが鮮度を確かめるのに作ったものを使い回す)。"""
+    idx を渡すと、索引を探さずにそれを引く(MCP サーバーが鮮度を確かめるのに作ったものを使い回す)。
+    skip(refs だけ。位置 (パス, 行) の集合)を渡すと、その行を省いた残りを --all の形で並べる(cmd_refs の skip を参照)。"""
     ap = argparse.ArgumentParser(prog='ltq', description='C++ reference index query (ltidx TSV)')
     ap.add_argument('--index', action='append',
                     help='index TSV; repeat it for several configurations (default: every index in <root>/.index)')
@@ -1670,6 +1755,9 @@ def main(argv=None, idx=None):
     r.add_argument('--all', action='store_true',
                    help='list every line that contains the name, one per line (no --limit, no folder counts, lines that '
                         'resolve to other symbols included): the complete list for a rename or a signature change')
+    r.add_argument('--family', type=int, default=None,
+                   help='max overrides, and max calls resolved to the overrides, listed under "virtual dispatch" '
+                        '(default: --limit, or 10 with --compact)')
     r.add_argument('--compact', action='count', default=0,
                    help='summarize low-value sections (comments, strings, local names, template calls resolved to '
                         'other symbols, matches resolved elsewhere) into counts per folder. Give it twice to also '
@@ -1692,6 +1780,8 @@ def main(argv=None, idx=None):
             print(f'index not found: {os.path.abspath(where)}  (build it with ltidx, or pass --index)')
             return 2
         idx = Index(indexes, a.root)
+    if a.cmd == 'refs':
+        a.skip = skip
     (cmd_refs if a.cmd == 'refs' else cmd_check)(a, idx)
     return 0
 
