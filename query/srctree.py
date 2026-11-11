@@ -14,6 +14,7 @@ import ctypes
 import os
 import re
 import threading
+import time
 
 from ctypes import wintypes
 
@@ -27,10 +28,12 @@ NOTIFY = 0x1 | 0x2 | 0x8 | 0x10
 SHORT_NAME = re.compile(r'(?:^|\\)[^\\~]{1,6}~[0-9][^\\]*(?:\\|$)')  # 8.3 形式の短い名前の部分(PROGRA~1 など)
 MARK_PREFIX = os.path.join('.index', '.cxxref-watch-')  # current() が作る印のファイル(ルートからの相対パス)
 ACTION_MODIFIED = 3  # FILE_ACTION_MODIFIED(ほかは 1 追加・2 削除・4 改名の前・5 改名の後)
+ACTION_REMOVED = 2
+ACTION_RENAMED_OLD = 4
 BUF_BYTES = 1 << 20  # ローカルのドライブでは 64 KB を超えてよい【公式: ReadDirectoryChangesW の注記はネットワーク越しのみ 64 KB】
 
 
-def scan(root, sub, exts, out, other=None, out_other=None):
+def scan(root, sub, exts, out, other=None, out_other=None, sizes=None):
     """root\\sub の下を走査して out に足す(ltq.Index.sources() と同じ規則)。other を渡すと、拡張子が exts に無く
     other(拡張子, 大きさ)が真のファイルを out_other に足す。"""
     n = len(root) + 1
@@ -49,11 +52,18 @@ def scan(root, sub, exts, out, other=None, out_other=None):
                     else:
                         ext = os.path.splitext(e.name)[1].lower()
                         if ext in exts:
-                            out[e.path[n:].replace('\\', '/')] = (e.path, e.stat().st_mtime)
+                            st = e.stat()
+                            rel = e.path[n:].replace('\\', '/')
+                            out[rel] = (e.path, st.st_mtime)
+                            if sizes is not None:
+                                sizes[rel] = st.st_size
                         elif other is not None:
                             st = e.stat()
                             if other(ext, st.st_size):
-                                out_other[e.path[n:].replace('\\', '/')] = (e.path, st.st_mtime)
+                                rel = e.path[n:].replace('\\', '/')
+                                out_other[rel] = (e.path, st.st_mtime)
+                                if sizes is not None:
+                                    sizes[rel] = st.st_size
                 except OSError:
                     continue
 
@@ -70,6 +80,7 @@ class SourceTree:
         self.exts = exts
         self.other = other
         self._others = {}
+        self.sizes = {}  # 相対パス -> 大きさ(単語のフィルタが、更新日時と合わせて変更の判定に使う)
         self.sync_timeout = sync_timeout
         self._lock = threading.Lock()
         self._cond = threading.Condition(self._lock)
@@ -85,7 +96,25 @@ class SourceTree:
         self.rescans = 0  # 全体を走査した回数(計測と試験のため)
         self.mark_dir = os.path.join(self.root, '.index')
         if watch and os.name == 'nt' and os.path.isdir(self.mark_dir):
+            self._clean_marks()
             self._start()
+
+    def _clean_marks(self, age=60):
+        """前のサーバーが作って消さずに終わった印のファイル(作ってから消すまでの間に殺された)を消す。
+        同じルートを見ているほかのサーバーの、作ったばかりの印は消さない。"""
+        try:
+            names = os.listdir(self.mark_dir)
+        except OSError:
+            return
+        prefix = os.path.basename(MARK_PREFIX)
+        for n in names:
+            if n.startswith(prefix):
+                p = os.path.join(self.mark_dir, n)
+                try:
+                    if time.time() - os.stat(p).st_mtime > age:
+                        os.remove(p)
+                except OSError:
+                    pass
 
     # --- 監視のスレッド ---
     def _start(self):
@@ -188,9 +217,9 @@ class SourceTree:
             overflow, self._overflow = self._overflow or not synced, not self.watching
             self._marks.clear()  # 前の印を消した知らせなど
         if overflow:
-            files, others = {}, {}
-            scan(self.root, '', self.exts, files, self.other, others)
-            self._files, self._others = files, others
+            files, others, sizes = {}, {}, {}
+            scan(self.root, '', self.exts, files, self.other, others, sizes)
+            self._files, self._others, self.sizes = files, others, sizes
             self.rescans += 1
             return self._files
         for p, acts in pending.items():
@@ -206,6 +235,12 @@ class SourceTree:
         parts = rel.split('/')
         if any(d.startswith('.') for d in parts[:-1]) or not rel:
             return  # 走査で除くフォルダの下
+        if acts & {ACTION_REMOVED, ACTION_RENAMED_OLD}:
+            # Windows の stat は大文字小文字を区別しないので、Foo.cpp → foo.cpp の改名で古い名前の stat が成功し、
+            # 古い名前が一覧に残っていた。新しい名前は別の知らせ(追加・改名の後)で来る
+            self._forget(rel, exact=True)
+            if not acts - {ACTION_REMOVED, ACTION_RENAMED_OLD}:
+                return
         fp = os.path.join(self.root, name)
         try:
             st = os.stat(fp, follow_symlinks=False)
@@ -216,28 +251,36 @@ class SourceTree:
                 return  # 中身が変わっただけのフォルダ。中のファイルの知らせは別に来る
             # 名前を変えて来たフォルダ・作られたフォルダ: 下を調べ直す(中のファイルの知らせは来ないことがある)
             self._drop_under(rel)
-            scan(self.root, name, self.exts, self._files, self.other, self._others)
+            scan(self.root, name, self.exts, self._files, self.other, self._others, self.sizes)
             return
         if st is None:  # 消えた・名前を変えて去った(ファイルかフォルダか、もう分からない)
-            self._files.pop(rel, None)
-            self._others.pop(rel, None)
-            self._drop_under(rel)
+            self._forget(rel)
             return
         ext = os.path.splitext(parts[-1])[1].lower()
         if ext in self.exts:
             try:
-                self._files[rel] = (fp, os.stat(fp).st_mtime)
+                st = os.stat(fp)
+                self._files[rel] = (fp, st.st_mtime)
+                self.sizes[rel] = st.st_size
             except OSError:
-                self._files.pop(rel, None)
+                self._forget(rel)
         elif self.other is not None:
             if self.other(ext, st.st_size):
                 self._others[rel] = (fp, st.st_mtime)
+                self.sizes[rel] = st.st_size
             else:
                 self._others.pop(rel, None)  # 大きくなりすぎた
+                self.sizes.pop(rel, None)
 
-    def _drop_under(self, rel):
+    def _forget(self, rel, exact=False):
+        """rel(ファイルかフォルダ)を一覧から外す。exact なら大文字小文字も合うものだけ(改名前の名前)。"""
+        for d in (self._files, self._others, self.sizes):
+            d.pop(rel, None)
+        self._drop_under(rel, exact)
+
+    def _drop_under(self, rel, exact=False):
         pre = rel + '/'
         low = pre.lower()
-        for d in (self._files, self._others):
-            for k in [k for k in d if k.lower().startswith(low)]:
+        for d in (self._files, self._others, self.sizes):
+            for k in [k for k in d if (k.startswith(pre) if exact else k.lower().startswith(low))]:
                 del d[k]

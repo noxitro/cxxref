@@ -28,6 +28,23 @@ class CliTest(unittest.TestCase):
             self.assertEqual(ltq.sym_short(s), s.rsplit(b'::', 1)[-1])
 
 
+class GrepTest(unittest.TestCase):
+    def test_many_needles_in_one_pass_match_one_by_one(self):
+        d = tempfile.mkdtemp()
+        try:
+            p = os.path.join(d, 'index.tsv')
+            lines = [f'S{i % 17}\tcall\tC\tsrc/f{i % 11}.cpp:{i}:3\tx(); f{i % 5}' for i in range(2000)]
+            with open(p, 'w', encoding='utf-8', newline='\n') as f:
+                f.write('\n'.join(lines))
+            needles = [b'\tsrc/f1.cpp:', b'\tsrc/f10.cpp:', b'\tsrc/f3.cpp:', b'S4\t', b'f4']
+            one = {}
+            for n in needles:
+                one.update(ltq.grep_found(p, [n]))
+            self.assertEqual(ltq.grep_found(p, needles), one)
+        finally:
+            shutil.rmtree(d)
+
+
 class NameDirTest(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()
@@ -77,6 +94,21 @@ class NameDirTest(unittest.TestCase):
             nd2.close()
         nd3 = namedir.NameDir(self.path)
         self.assertFalse(nd3.open())
+
+    def test_corrupt_directory_is_rebuilt(self):
+        # 書きかけ・壊れた目次は開けない(例外にしない)。作り直せる
+        nd = namedir.NameDir(self.path)
+        self.assertTrue(nd.build(workers=2))
+        nd.close()
+        with open(nd.cache_path, 'r+b') as f:
+            data = f.read()
+            f.seek(0)
+            f.truncate()
+            f.write(data[:len(data) // 3])
+        nd2 = namedir.NameDir(self.path)
+        self.assertFalse(nd2.open())
+        self.assertTrue(nd2.build(workers=2))
+        nd2.close()
 
     def _line(self, off):
         with open(self.path, 'rb') as f:
@@ -137,6 +169,29 @@ class WordFilterTest(unittest.TestCase):
         self.assertTrue(wf2.may_contain('Fresh_word')('f0.cpp', files['f0.cpp'][1]))
         # コードページが変わったら作り直す
         self.assertEqual(wf2.update(files, 'cp932'), 31)
+
+    def test_same_mtime_with_a_different_size_is_read_again(self):
+        # 更新日時を保ったまま中身を入れ替えるコピー・同期のツールがある。大きさも見る
+        p = self.write('a.cpp', b'Old_word\n')
+        os.utime(p, (5000, 5000))
+        files = {'a.cpp': (p, os.stat(p).st_mtime)}
+        sizes = {'a.cpp': os.stat(p).st_size}
+        wf = wordfilter.WordFilter()
+        wf.update(files, None, sizes)
+        self.assertFalse(wf.may_contain('New_word', sizes)('a.cpp', files['a.cpp'][1]))
+        self.write('a.cpp', b'New_word and more\n')
+        os.utime(p, (5000, 5000))
+        sizes = {'a.cpp': os.stat(p).st_size}
+        self.assertTrue(wf.may_contain('New_word', sizes)('a.cpp', files['a.cpp'][1]))  # 読み直すまでは絞らない
+        self.assertEqual(wf.update(files, None, sizes), 1)
+        self.assertTrue(wf.may_contain('New_word', sizes)('a.cpp', files['a.cpp'][1]))
+
+    def test_cache_is_written_the_first_time_even_for_few_files(self):
+        p = self.write('a.cpp', b'x\n')
+        wf = wordfilter.WordFilter(os.path.join(self.dir, 'w.cache'))
+        wf.load(None)
+        wf.update({'a.cpp': (p, os.stat(p).st_mtime)}, None)
+        self.assertTrue(os.path.exists(os.path.join(self.dir, 'w.cache')))
 
     def test_words_are_taken_after_conversion(self):
         # Shift_JIS の「ソ」(0x83 0x5C)と「ア」(0x83 0x41)。2 バイト目の英字を単語に数えない
@@ -226,8 +281,30 @@ class SourceTreeTest(unittest.TestCase):
         self.assertIn('src/empty.txt', self.tree.others())
         os.remove(os.path.join(self.root, 'src', 'readme.txt'))
         self.check()
+        # 大文字小文字だけの改名(Windows の stat は大文字小文字を区別しないので、古い名前の stat が成功する)
+        os.rename(os.path.join(self.root, 'src', 'a.cpp'), os.path.join(self.root, 'src', 'A.cpp'))
+        self.check()
+        self.assertNotIn('src/a.cpp', self.tree.current())
+        os.rename(os.path.join(self.root, 'src', 'notes.md'), os.path.join(self.root, 'src', 'Notes.md'))
+        self.check()
         self.assertEqual(self.tree.rescans, 1)  # ここまで全体を走査し直していない
         self.assertFalse([n for n in os.listdir(os.path.join(self.root, '.index')) if n.startswith('.cxxref-watch-')])
+
+    def test_old_marks_are_removed_at_start(self):
+        # 作ってから消すまでの間に殺されたサーバーの印は、次に起動したときに消す(作ったばかりの印は残す)
+        old = os.path.join(self.root, '.index', '.cxxref-watch-1-1')
+        new = os.path.join(self.root, '.index', '.cxxref-watch-2-1')
+        for p in (old, new):
+            with open(p, 'w') as f:
+                f.write('')
+        os.utime(old, (1000, 1000))
+        t = srctree.SourceTree(self.root, ltq.SRC_EXT)
+        try:
+            self.assertFalse(os.path.exists(old))
+            self.assertTrue(os.path.exists(new))
+        finally:
+            t.close()
+            os.remove(new)
 
     def test_without_index_folder_rescans_every_time(self):
         root = tempfile.mkdtemp()

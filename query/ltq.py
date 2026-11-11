@@ -173,6 +173,15 @@ def grep_found(path, needles, found=None):
     if not needles or size == 0:
         return found
     with open(path, 'rb') as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as m:
+        if len(needles) > 2 and not any(n[:1] == b'\n' for n in needles):
+            # 針ごとに全体を 1 周すると、索引の後に変わったファイルが N 個あれば N 周になる(O3DE の 900 MB で 1 周 0.5 秒)
+            for mt in re.finditer(b'|'.join(re.escape(n) for n in sorted(set(needles), key=len, reverse=True)), m):
+                i = mt.start()
+                b = m.rfind(b'\n', 0, i) + 1
+                if b not in found:
+                    e = m.find(b'\n', i)
+                    found[b] = m[b:size if e < 0 else e].rstrip(b'\r')
+            return found
         for n in needles:
             head = n[:1] == b'\n'
             if head and m[:len(n) - 1] == n[1:]:
@@ -397,7 +406,7 @@ class Index:
                 else:
                     lines = grep_lines(part.path + (ALT if alt else ''), list(needles) + stale_needles)
                 for raw in lines:
-                    hit = keep(raw)
+                    hit = keep(raw) and (name is None or sym_short(raw.split(b'\t', 1)[0]) == name)
                     if not hit:
                         q = raw.split(b'\t', 4)
                         if len(q) < 5 or q[3].rsplit(b':', 2)[0] not in sb:
@@ -808,8 +817,9 @@ def text_hits(idx, short, excludes):
     test = None
     if idx.words is not None:
         try:
-            idx.words.update(idx.sources(), idx.codec())
-            test = idx.words.may_contain(short)
+            sizes = getattr(idx.tree, 'sizes', None)
+            idx.words.update(idx.sources(), idx.codec(), sizes)
+            test = idx.words.may_contain(short, sizes)
         except Exception as e:  # 子のプロセスが落ちたなど。絞らずに全部読む
             print(f'ltq: word filter unavailable ({type(e).__name__}: {e}); reading every source', file=sys.stderr)
     if test is not None:  # 名前の単語が無いと分かっているファイルは読まない
@@ -867,8 +877,9 @@ def other_hits(idx, short, excludes):
     items = list(walk_sources(idx, excludes, idx.others()))
     if idx.other_words is not None:  # 長く動くプロセスでは、名前の単語が無いと分かっているファイルを読まない(ソースと同じ)
         try:
-            idx.other_words.update(idx.others(), idx.codec())
-            test = idx.other_words.may_contain(short)
+            sizes = getattr(idx.tree, 'sizes', None)
+            idx.other_words.update(idx.others(), idx.codec(), sizes)
+            test = idx.other_words.may_contain(short, sizes)
         except Exception as e:  # 子のプロセスが落ちたなど。絞らずに全部読む
             print(f'ltq: word filter unavailable ({type(e).__name__}: {e}); reading every file', file=sys.stderr)
             test = None
@@ -1039,7 +1050,7 @@ def cmd_refs(a, idx):
     aliased, renamed = [], set()
     for s in to:
         b = s.encode('utf-8')
-        got = idx.cached(('rows', s), lambda: [r for r in idx.rows([b + b'\t'], lambda raw: True)
+        got = idx.cached(('rows', s), lambda: [r for r in idx.rows([b + b'\t'], lambda raw: True, name=b)
                                                if r[0].rsplit('::', 1)[-1] == s])
         aliased += [r for r in got if (r[3], r[4], r[5]) in exp_pos and r[1] not in MACRO_ROLES + (OVERRIDE,)]
         if len(parts) > 1 and not any(match(r[0]) for r in rows if r[1] not in MACRO_ROLES):

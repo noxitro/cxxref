@@ -21,7 +21,7 @@ IDENT = re.compile(r'[A-Za-z0-9_]+')
 K = 3  # 1 つの単語で立てるビットの数
 BITS_PER_WORD = 8  # 単語 1 つあたりのビット数の目安(K=3 で外れは 3% ほど)
 ALWAYS = -1  # 絞らないファイル(UTF-16・読めない)の印
-MAGIC = b'cxxref-words 2\n'  # 作り方を変えたら上げる(古い一覧を読まない)
+MAGIC = b'cxxref-words 3\n'  # 作り方を変えたら上げる(古い一覧を読まない)
 
 
 def _positions(word, m):
@@ -67,7 +67,7 @@ class WordFilter:
     def __init__(self, cache_path=None):
         self.cache_path = cache_path
         self.codec = None
-        self._f = {}  # 相対パス -> (更新日時, ビット数, フィルタ)
+        self._f = {}  # 相対パス -> ((更新日時, 大きさ), ビット数, フィルタ)。大きさが分からなければ -1
         self._masks = {}
         self._dirty = False
 
@@ -90,9 +90,9 @@ class WordFilter:
                 pos += 16
                 rel = data[pos:pos + n].decode('utf-8')
                 pos += n
-                (mt,) = struct.unpack_from('<d', data, pos)
-                pos += 8
-                out[rel] = (mt, m, int.from_bytes(data[pos:pos + nb], 'little'))
+                mt, sz = struct.unpack_from('<dq', data, pos)
+                pos += 16
+                out[rel] = ((mt, sz), m, int.from_bytes(data[pos:pos + nb], 'little'))
                 pos += nb
         except (struct.error, UnicodeDecodeError):
             return
@@ -102,10 +102,10 @@ class WordFilter:
         if not self.cache_path or not self._dirty:
             return
         parts = [MAGIC + f'{self.codec}\n'.encode()]
-        for rel, (mt, m, b) in self._f.items():
+        for rel, ((mt, sz), m, b) in self._f.items():
             r = rel.encode('utf-8')
             nb = 0 if m == ALWAYS else m >> 3
-            parts.append(struct.pack('<Iqi', len(r), m, nb) + r + struct.pack('<d', mt)
+            parts.append(struct.pack('<Iqi', len(r), m, nb) + r + struct.pack('<dq', mt, sz)
                          + (b.to_bytes(nb, 'little') if nb else b''))
         tmp = f'{self.cache_path}.{os.getpid()}.tmp'
         try:
@@ -119,16 +119,18 @@ class WordFilter:
             except OSError:
                 pass
 
-    def update(self, files, codec, workers=None, pool_min=200, save_min=500):
+    def update(self, files, codec, sizes=None, workers=None, pool_min=200, save_min=500):
         """files({相対パス: (絶対パス, 更新日時)})に合わせる。新しい・変わったファイルだけを読む。
-        戻り値は読んだファイルの数。多いときはプロセスを分けて読む。"""
+        sizes({相対パス: 大きさ})を渡すと、更新日時に加えて大きさも変更の判定に使う(更新日時を保ったまま中身を
+        入れ替えるコピー・同期のツールがある)。戻り値は読んだファイルの数。多いときはプロセスを分けて読む。"""
         if codec != self.codec:
             self._f, self.codec, self._dirty = {}, codec, True
         for rel in [r for r in self._f if r not in files]:
             del self._f[rel]
             self._dirty = True
+        sz = sizes.get if sizes is not None else (lambda rel, d=-1: -1)
         todo = [(rel, fp) for rel, (fp, mt) in files.items()
-                if rel not in self._f or self._f[rel][0] != mt]
+                if rel not in self._f or self._f[rel][0] != (mt, sz(rel, -1))]
         if not todo:
             return 0
         if len(todo) < pool_min:
@@ -140,24 +142,27 @@ class WordFilter:
                 res = [x for part in ex.map(_work, ((todo[i:i + size], codec) for i in range(0, len(todo), size)))
                        for x in part]
         for rel, m, b in res:
-            self._f[rel] = (files[rel][1], m, b)
+            self._f[rel] = ((files[rel][1], sz(rel, -1)), m, b)
         self._dirty = True
-        if len(todo) >= save_min:  # 少しの変更では書かない(次の起動で、変わったファイルだけ読み直す)
+        # 少しの変更では書かない(次の起動で、変わったファイルだけ読み直す)。まだ無ければ、小さなリポジトリでも書く
+        if len(todo) >= save_min or (self.cache_path and not os.path.exists(self.cache_path)):
             self.save()
         return len(todo)
 
-    def may_contain(self, word):
+    def may_contain(self, word, sizes=None):
         """(相対パス, 更新日時) を受けて「word の一致がありうるか」を返す関数。word で絞れなければ None。
-        フィルタを作ったときと更新日時が違うファイルは、絞らない。"""
+        フィルタを作ったときと更新日時(sizes を渡せば大きさも)が違うファイルは、絞らない。"""
         if not IDENT.fullmatch(word):
             return None
         wb = word.encode('ascii')
         masks = {}
         f = self._f
 
+        sz = sizes.get if sizes is not None else (lambda rel, d=-1: -1)
+
         def test(rel, mtime):
             e = f.get(rel)
-            if e is None or e[1] == ALWAYS or e[0] != mtime:
+            if e is None or e[1] == ALWAYS or e[0] != (mtime, sz(rel, -1)):
                 return True
             mask = masks.get(e[1])
             if mask is None:

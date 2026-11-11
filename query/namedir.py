@@ -90,9 +90,14 @@ class NameDir:
             head = f.read(len(key) + 4)
             if not head.startswith(key):
                 return False
-            (n,) = struct.unpack('<I', head[len(key):])
-            lens = struct.unpack(f'<{n}Q', f.read(8 * n))
-            mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+            try:  # 書きかけ・壊れた目次は「無い」として作り直させる(例外にすると、その版の索引では二度と使われない)
+                (n,) = struct.unpack('<I', head[len(key):])
+                lens = struct.unpack(f'<{n}Q', f.read(8 * n))
+                if len(key) + 4 + 8 * n + 8 * sum(lens) > os.fstat(f.fileno()).st_size:
+                    return False
+                mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+            except (struct.error, ValueError, OverflowError, OSError):
+                return False
         base = len(key) + 4 + 8 * n
         mv = memoryview(mm)
         runs = []

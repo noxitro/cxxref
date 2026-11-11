@@ -191,7 +191,7 @@ class Config:
     def open_index(self, paths, root):
         """索引を開く。前の呼び出しと同じ索引で、索引のファイル(本体と隣のファイル)の大きさと更新日時が変わっていなければ、
         前に開いた Index を使い回す(TU の記録と、TU が読んだファイルの一覧を読み直さない。UE5 で 1 回 30 秒ほど)。
-        ソースの走査と鮮度の確認は、呼ぶたびにやり直す。"""
+        鮮度の確認は、呼ぶたびにやり直す(ソースの一覧は attach() が渡す SourceTree が変更の知らせで保つ)。"""
         key = (tuple(os.path.normcase(os.path.abspath(p)) for p in paths), os.path.normcase(os.path.abspath(root)))
         sig = ltq.index_signature(paths)
         if self.opened and self.opened[0] == key and self.opened[1] == sig:
