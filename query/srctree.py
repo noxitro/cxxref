@@ -269,7 +269,7 @@ class SourceTree:
                 self._others[rel] = (fp, st.st_mtime)
                 self.sizes[rel] = st.st_size
             else:
-                self._others.pop(rel, None)  # 大きくなりすぎた
+                self._others.pop(rel, None)  # 空になった(探す中身が無い)
                 self.sizes.pop(rel, None)
 
     def _forget(self, rel, exact=False):

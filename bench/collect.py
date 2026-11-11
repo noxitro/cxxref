@@ -44,9 +44,11 @@ for line in open(os.path.join(bench, "runs", "index.jsonl"), encoding="utf-8-sig
         continue
     ev = [json.loads(l) for l in open(os.path.join(home, "session-state", r["session"], "events.jsonl"), encoding="utf-8")]
     tools = collections.Counter(e["data"]["toolName"] for e in ev if e["type"] == "tool.execution_start")
-    result_chars = 0
+    result_chars = tool_errors = 0
     for e in ev:
         if e["type"] == "tool.execution_complete":
+            # 失敗したツール呼び出し(MCP サーバーの例外など)。答えが合っていても、道具が働いていない回を見分ける
+            tool_errors += not e["data"].get("success", True)
             res = e["data"].get("result")
             result_chars += len(json.dumps(res, ensure_ascii=False)) if res is not None else 0
     answer = [e["data"].get("content", "") for e in ev if e["type"] == "assistant.message"][-1:] or [""]
@@ -63,7 +65,8 @@ for line in open(os.path.join(bench, "runs", "index.jsonl"), encoding="utf-8-sig
         "model_calls": calls, "tool_calls": sum(tools.values()), "view": tools["view"], "lsp": tools["lsp"],
         "shell": tools["powershell"],
         "mcp": sum(n for t, n in tools.items() if t.startswith(("code-ref-index", "serena", "clang-index-mcp", "clast", "clangd-mcp", "mcp-language-server"))),
-        "search": tools["rg"] + tools["grep"] + tools["glob"], "tool_result_chars": result_chars,
+        "search": tools["rg"] + tools["grep"] + tools["glob"], "tool_errors": tool_errors,
+        "tool_result_chars": result_chars,
         "input_tokens": inp, "cache_read": cache, "uncached_input": inp - cache, "output_tokens": out,
         "credits": round(credits, 4), "tp": len(got & truth), "fp": len(got - truth), "fn": len(truth - got),
         "correct": int(got == truth), "missed": " ".join(sorted(truth - got)), "extra": " ".join(sorted(got - truth)),
@@ -88,4 +91,4 @@ for rd, c in sorted({(x["round"], x["cond"]) for x in rows}):
           f"  {m('input_tokens'):11.0f}  {m('uncached_input'):8.0f}  {m('output_tokens'):6.0f}  {m('credits'):.3f}  {m('sec'):4.0f}")
 for x in rows:
     print(f"{x['name']:10} ok={x['correct']} tp={x['tp']} fp={x['fp']} fn={x['fn']} calls={x['model_calls']} tools={x['tool_calls']}"
-          f"(view {x['view']}, lsp {x['lsp']}, search {x['search']}, shell {x['shell']}, mcp {x['mcp']}) in={x['input_tokens']} out={x['output_tokens']} cr={x['credits']}")
+          f"(view {x['view']}, lsp {x['lsp']}, search {x['search']}, shell {x['shell']}, mcp {x['mcp']}, failed {x['tool_errors']}) in={x['input_tokens']} out={x['output_tokens']} cr={x['credits']}")

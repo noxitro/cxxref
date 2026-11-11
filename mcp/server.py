@@ -18,6 +18,10 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'query'))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # -I ではスクリプトのフォルダが入らない
+import hashlib  # noqa: E402
+import tempfile  # noqa: E402
+import time  # noqa: E402
+
 import ltq  # noqa: E402
 import autoupdate  # noqa: E402
 import namedir  # noqa: E402
@@ -31,6 +35,13 @@ PROTOCOL = '2025-06-18'
 # 計測で 21.2 KB 以上が退かされ、18,000 バイト以下は退かされなかった】。少し下回らせる
 MAX_BYTES = 18000
 FIT_LIMITS = (60, 25, 10, 5, 2)  # 短い形でも上限を超えるときに、順に試す --limit(1 節に並べる行数)
+# 結果に 1 行ずつ並べきれなかったとき(上限に収めるために件数にまとめた行があるとき)は、名前を含む行を全部 1 行ずつ並べた一覧
+# (ltq refs --all)をファイルに書き、結果の最後の行でその場所を知らせる。名前やシグネチャを変えるときに、直す先を漏らさないため
+LIST_DIR = 'refs'  # 一覧を置くフォルダの名前(索引のあるフォルダか、LIST_HOME の下)
+LIST_HOME = '.cxxref'  # 索引がルートの隠しフォルダに無いときに、一覧を置くルートの下のフォルダ
+LIST_KEEP = 7 * 86400  # 一覧のファイルを残す秒数。これより古いものは、次に書くときに消す
+LIST_MAX = 200  # 1 つのフォルダに残す一覧の数。超えた分は、古いものから消す(1 つが数 MB になる名前がある)
+LIST_NAME = re.compile(r'-[0-9a-f]{8}\.txt(\.\d+\.tmp)?$')
 
 # 定義は、モデルを呼ぶたびに毎回送られる(C++ でないリポジトリでも)。言っていることは変えずに短く保つ
 ROOT_ARG = {'type': 'string', 'description': 'Absolute path of your working folder (the server may run elsewhere)'}
@@ -49,8 +60,9 @@ TOOLS = [
             'virtual overrides, unresolved template calls (decide from the line), and text matches of the name that '
             'are not in the index, with the reason (comment, inactive #if, dropped macro argument, local name, macro, '
             'string, file not analyzed). Code in #if branches the build does not compile is included, marked '
-            '[inactive: #if ...]. Matches in non-C/C++ files (scripts, build files, docs) are listed too. Lines over the '
-            'limit are counted by folder; pass path to list them. Macros (#define and expansions) are symbols too.'),
+            '[inactive: #if ...]. Matches in non-C/C++ files (scripts, build files, docs) are listed too. Lines that do '
+            'not fit are counted by folder; the last line then names a file that lists every line (read it before a '
+            'rename or a signature change), or pass path to list a folder. Macros (#define and expansions) are symbols too.'),
         'inputSchema': {
             'type': 'object',
             'properties': {
@@ -133,6 +145,7 @@ class Config:
         self.max_bytes = max_bytes  # 結果の大きさの上限(0 なら切らない)
         self.opened = None  # (鍵, 索引のファイルの状態, ltq.Index)。最後に引いた索引を 1 つだけ保つ
         self.told_ltidx = False  # 取ってきた ltidx が古いことを、もう知らせたか(1 回だけ)
+        self.last_list = None  # 最後の呼び出しで書いた、漏れのない一覧のファイル(書かなかったら None)
         # 呼び出しをまたいで保つもの(False なら、呼ぶたびにソースと索引を全部読む)
         self.resident = resident
         self._trees = {}  # ルート -> (srctree.SourceTree, wordfilter.WordFilter)
@@ -150,7 +163,7 @@ class Config:
         if key not in self._trees:
             words = wordfilter.WordFilter(paths[0] + '.words.cache')
             words.load(idx.codec())
-            other_words = wordfilter.WordFilter(paths[0] + '.words-other.cache')  # C/C++ 以外のファイル
+            other_words = wordfilter.WordFilter(paths[0] + '.words-other.cache', other=True)  # C/C++ 以外のファイル
             other_words.load(idx.codec())
             self._trees[key] = (srctree.SourceTree(root, ltq.SRC_EXT, other=ltq.is_other), words, other_words)
         idx.tree, idx.words, idx.other_words = self._trees[key]
@@ -219,6 +232,70 @@ class Config:
         return root, note
 
 
+def list_dirs(paths, root):
+    """一覧を置くフォルダの候補を、試す順に [(フォルダ, git に無視させるフォルダか None)] で返す。
+    エージェントが読める所(作業ツリーの中)で、テキスト検索に掛からない所(. で始まるフォルダの中。一覧が次の検索に
+    当たらない)に置く: 索引がルートの下の隠しフォルダ(既定の .index)にあればその隣、無ければ(索引がルートの外や、
+    検索に掛かるフォルダにある)<ルート>/.cxxref/refs。どちらにも書けないときだけ、一時フォルダ(作業ツリーの外)。"""
+    index_dir = os.path.dirname(os.path.abspath(paths[0]))
+    home = os.path.join(root, LIST_HOME)
+    return (([(os.path.join(index_dir, LIST_DIR), None)] if ltq.tree_place(index_dir, root) == 'hidden' else [])
+            + [(os.path.join(home, LIST_DIR), home), (os.path.join(tempfile.gettempdir(), 'cxxref-' + LIST_DIR), None)])
+
+
+def same_text(path, text):
+    try:
+        with open(path, encoding='utf-8', newline='') as f:
+            return f.read() == text
+    except (OSError, UnicodeDecodeError):
+        return False
+
+
+def write_list(paths, root, args, text):
+    """漏れのない一覧(ltq refs --all の文面)をファイルに書く。(パス, None) か (None, 誤り)。置く所は list_dirs。
+    ファイル名は「名前-ルート・索引・引数のハッシュ」。同じ問い合わせなら同じファイルを書き換えるので、増え続けない。
+    中身が前と同じなら書き直さない(更新日時だけ新しくする。読んでいる相手のファイルを差し替えない)。"""
+    key = [os.path.normcase(os.path.abspath(root))] + [os.path.normcase(os.path.abspath(p)) for p in paths]
+    skip = False
+    for x in args[1:]:  # --limit は一覧に効かない(同じ一覧になる)ので、鍵に入れない
+        if skip or x == '--limit':
+            skip = not skip
+            continue
+        key.append(x)
+    safe = re.sub(r'[^A-Za-z0-9_.-]+', '_', args[1]).strip('_.')[:60] or 'name'
+    fname = f'{safe}-{hashlib.sha1(chr(0).join(key).encode("utf-8")).hexdigest()[:8]}.txt'
+    err = None
+    for d, home in list_dirs(paths, root):
+        dst = os.path.join(d, fname)
+        tmp = f'{dst}.{os.getpid()}.tmp'
+        try:
+            os.makedirs(d, exist_ok=True)
+            ignore = home and os.path.join(home, '.gitignore')
+            if ignore and not os.path.exists(ignore):  # 作業ツリーに足したフォルダを、git の変更に見せない
+                with open(ignore, 'w', encoding='utf-8', newline='\n') as f:
+                    f.write('*\n')
+            if same_text(dst, text):
+                os.utime(dst)
+            else:
+                with open(tmp, 'w', encoding='utf-8', newline='\n') as f:
+                    f.write(text)
+                os.replace(tmp, dst)  # 読んでいる途中の相手に、書きかけを見せない
+        except OSError as e:
+            err = e
+            with contextlib.suppress(OSError):
+                os.remove(tmp)
+            continue
+        old, found = time.time() - LIST_KEEP, []
+        with contextlib.suppress(OSError):
+            found = sorted(((e.stat().st_mtime, e.path) for e in os.scandir(d) if LIST_NAME.search(e.name)), reverse=True)
+        for i, (mtime, p) in enumerate(found):  # 古いものと、数の上限を超えた分(新しい順に LIST_MAX 個を残す)を消す
+            if (mtime < old or i >= LIST_MAX) and p != dst:
+                with contextlib.suppress(OSError):
+                    os.remove(p)
+        return dst, None
+    return None, err
+
+
 def run_ltq(cfg, args, start=None):
     idx = None
     root, note = cfg.resolve(start)
@@ -264,7 +341,30 @@ def run_ltq(cfg, args, start=None):
                 code = e.code or 2
         return code, note + out.getvalue()
 
+    def over(t):
+        return bool(cfg.max_bytes) and len(t.encode('utf-8')) > cfg.max_bytes
+
     code, text = run([])
+    # 1 行ずつ並べきれない行があるとき(全文が上限を超えるか、全文でも件数にまとめた行があるとき)は、名前を含む行を全部並べた
+    # 一覧をファイルに書き、結果の最後の行(coverage)の案内をその場所に置き換える
+    cfg.last_list, listing = None, ''
+    if args[0] == 'refs' and code == 0 and paths and (over(text) or text.endswith(ltq.ALL_HINT + '\n')):
+        all_code, all_text = run(['--all'])
+        where, err = write_list(paths, root, args, all_text) if all_code == 0 else (None, 'refs --all failed')
+        cfg.last_list = where
+        if where:
+            # 一時フォルダに書いたとき(作業ツリーに書けなかった)は、エージェントが読めないことがあるので、別の手を添える
+            far = ltq.tree_place(os.path.dirname(where), root) == 'out'
+            listing = (f'; the rest are only counted. Every line, one per line: "{where}" (read it before a rename or a'
+                       ' signature change' + ('; it is outside the workspace: if you cannot read it, pass path to list'
+                                              ' one folder at a time' if far else '') + ')')
+        else:
+            listing = f'; the rest are only counted (the complete list could not be written: {err}; pass path to list a folder)'
+
+    def fit(t):
+        return t[:-len(ltq.ALL_HINT) - 1] + listing + '\n' if listing and t.endswith(ltq.ALL_HINT + '\n') else t
+
+    text = fit(text)
     # クライアントは大きな結果をモデルに渡さない(Copilot CLI は 20,480 バイトを超えるとファイルに退かせ、先頭だけを見せる)。
     # 超えたら、報告しない節(コメント・文字列など)を件数にまとめた短い形で出し直す。それでも超えたら、無効な #if の中や
     # マクロの定義の中の一致もフォルダごとの件数にし(どのフォルダに何件あるかは残り、path で 1 行ずつ出し直せる)、
@@ -274,12 +374,15 @@ def run_ltq(cfg, args, start=None):
     asked = int(args[args.index('--limit') + 1]) if '--limit' in args else 200
     for extra in (['--compact'], ['--compact'] * 2,
                   *(['--compact'] * 2 + ['--limit', str(n)] for n in FIT_LIMITS if n < asked)):
-        if cfg.max_bytes and len(text.encode('utf-8')) > cfg.max_bytes and args[0] == 'refs':
+        if over(text) and args[0] == 'refs':
             code, text = run(extra)
-    if cfg.max_bytes and len(text.encode('utf-8')) > cfg.max_bytes:
-        cut = text.encode('utf-8')[:cfg.max_bytes - 300].decode('utf-8', 'ignore')
-        text = cut[:cut.rfind('\n') + 1] + (f'... output cut at {cfg.max_bytes} bytes (the client limit). Ask for a '
-                                            'narrower name, or pass path / exclude / limit to see the rest.\n')
+            text = fit(text)
+    if over(text):
+        tail = (f'... output cut at {cfg.max_bytes} bytes (the client limit). '
+                + (f'Every line, one per line: "{cfg.last_list}". ' if cfg.last_list else '')
+                + 'Ask for a narrower name, or pass path / exclude / limit to see the rest.\n')
+        cut = text.encode('utf-8')[:max(0, cfg.max_bytes - len(tail.encode('utf-8')))].decode('utf-8', 'ignore')
+        text = cut[:cut.rfind('\n') + 1] + tail
     return code, text
 
 

@@ -15,6 +15,9 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 import ltq  # noqa: E402
 
+# 最後の行(coverage)の、探した範囲の書き方
+SCOPE = ' (searched: the root, except folders that start with ".")'
+
 A_CPP = """\
 void Run();
 void Main() {
@@ -149,6 +152,14 @@ class LtqTest(unittest.TestCase):
         self.index('release', self.COMMON, [self.COMMENT, ('src/a.cpp', 'inactive', '4:1', '6:7')])
         out = self.ltq('refs', 'Run')
         self.assertIn('local variables, parameters or template parameters with this name', out)
+
+    def test_unknown_range_kind_is_listed_as_other(self):
+        # 新しい ltidx が、この ltq の知らない種類の範囲を書いていても、エラーにせず「その他」に並べる
+        # (0.5.1 のサーバーは、後の版の索引の local で KeyError になり、refs が 1 つも返らなかった)
+        self.index('index', self.COMMON, [self.COMMENT, ('src/a.cpp', 'future-kind', '5:3', '5:6')])
+        out = self.ltq('refs', 'Run')
+        self.assertIn('other ->', out)
+        self.assertIn('src/a.cpp:5', out)
 
     def test_compact_lists_dropped_lines(self):
         # 捨てられたマクロの引数(属性やログの引数)は答えに入りうるので、短い形でもフォルダの件数にまとめない
@@ -462,26 +473,32 @@ class LtqTest(unittest.TestCase):
         os.makedirs(os.path.join(self.root, 'tools', 'gen'))
         self.write('tools/gen/Gen.cs', 'class Gen {\n  void Emit() { w.Write("Run();"); }\n}\n', self.t0 - 10)
         self.write('tools/build.cmake', '# Runner is another word\n' + 'add_step(Run)\n' * 13, self.t0 - 10)
+        # テキストかどうかは、rg と同じく中身で見分ける(拡張子や大きさでは除かない)
         with open(os.path.join(self.root, 'tools', 'blob.dat'), 'wb') as f:
-            f.write(b'\0\1\2 Run \0')  # 先頭に NUL のあるファイル(バイナリ)は飛ばす
-        self.write('tools/icon.png', 'Run\n')  # 拡張子でバイナリと分かるものは開かない
+            f.write(b'\0\1\2 Run \0')  # 先頭に NUL のあるファイル(バイナリ)には、探す部分が無い
+        with open(os.path.join(self.root, 'tools', 'mixed.bin'), 'wb') as f:
+            f.write(b'Run in the text part\n\0\1 Run \n')  # 最初の NUL より前だけを探す(rg は NUL に当たるまでの一致を出す)
+        self.write('tools/icon.png', 'Run\n')  # 拡張子はバイナリでも、中身がテキスト(Git LFS の実体を取っていないファイルなど)
         head = ('== matches of "Run" in files that are not C/C++ sources (scripts, build files, docs, other languages'
                 ' -> not analyzed; update them too when renaming): ')
         out = self.ltq('refs', 'Run')
-        self.assertIn(head + '14\n', out)
+        self.assertIn(head + '16\n', out)
         self.assertIn('  tools/gen/Gen.cs:2  | void Emit() { w.Write("Run();"); }\n', out)
         self.assertIn('  tools/build.cmake:14  | add_step(Run)\n', out)
+        self.assertIn('  tools/icon.png:1  | Run\n', out)
+        self.assertIn('  tools/mixed.bin:1  | Run in the text part\n', out)
+        self.assertNotIn('tools/mixed.bin:2', out)
         self.assertNotIn('tools/build.cmake:1 ', out)
         self.assertNotIn('blob.dat', out)
-        self.assertNotIn('icon.png', out)
         self.assertNotIn('matches in', out)
+        self.assertIn('== coverage: all 20 lines that contain the word "Run" are listed above, one per line' + SCOPE + '\n', out)
         # 短い形の 1 段目は 10 行まで並べ、残りはフォルダごとの件数。2 段目は全部フォルダごとの件数
         sec = self.ltq('refs', 'Run', '--compact').split(head, 1)[1]
         self.assertEqual(len(re.findall(r'^  tools/\S+:\d+  \| ', sec, re.M)), 10)
-        self.assertEqual(sum(int(n) for n in re.findall(r'/  (\d+) matches in', sec)), 4)
+        self.assertEqual(sum(int(n) for n in re.findall(r'/  (\d+) matches in', sec)), 6)
         self.assertIn('ask again with --path <folder>', sec)
         sec = self.ltq('refs', 'Run', '--compact', '--compact').split(head, 1)[1]
-        self.assertIn('14\n  tools/  13 matches in 1 files\n  tools/gen/  1 matches in 1 files\n', sec)
+        self.assertIn('16\n  tools/  15 matches in 3 files\n  tools/gen/  1 matches in 1 files\n', sec)
         self.assertNotIn('  | ', sec)
         # --path で絞れば、短い形でもその先の行が並ぶ
         sec = self.ltq('refs', 'Run', '--compact', '--compact', '--path', 'tools/gen').split(head, 1)[1]
@@ -491,6 +508,138 @@ class LtqTest(unittest.TestCase):
         self.assertNotIn('build.cmake', out)
         # --exclude はこの節にも効く
         self.assertNotIn(head, self.ltq('refs', 'Run', '--exclude', 'tools'))
+
+    def test_word_starts_matches_the_regex(self):
+        # 単語の位置を find で拾う部品は、正規表現の finditer と同じ位置を返す(前後が英数字・_ の一致は拾わない)
+        import random
+        rnd = random.Random(7)
+        for sb in (b'ab', b'a', b'aa', b'_a1', b'operator==', b'~ab'):
+            pat = re.compile(rb'(?<![A-Za-z0-9_])' + re.escape(sb) + rb'(?![A-Za-z0-9_])')
+            for _ in range(300):
+                data = bytes(rnd.choice(b'ab_1 =~.\n\x80') for _ in range(rnd.randrange(0, 60)))
+                data = rnd.choice((b'', sb)) + data + rnd.choice((b'', sb))
+                self.assertEqual(list(ltq.word_starts(data, sb)), [m.start() for m in pat.finditer(data)], (sb, data))
+
+    def test_utf16_and_long_lines_are_read_in_parts(self):
+        # UTF-16(BOM 付き)も分けて読み、UTF-8 に直して返す(全部を一度にメモリに載せない)
+        p = os.path.join(self.root, 'wide.txt')
+        text = ''.join(f'行 {i} filler\n' for i in range(900)) + 'Run ここ\n' + 'tail\n' * 20
+        with open(p, 'wb') as f:
+            f.write(text.encode('utf-16'))
+        got = list(ltq.other_chunks(p, 63))  # 奇数: 2 バイトの単位の途中で分かれる
+        self.assertGreater(len(got), 10)
+        self.assertEqual(b''.join(d for _, d in got).decode('utf-8'), text)
+        seen = 1
+        for first, data in got:
+            self.assertEqual(first, seen)
+            seen += data.count(b'\n')
+        # 行の区切りが無いまま大きくなったら、単語の途中でない所で分ける(1 行だけの大きなファイルを貯め続けない)
+        q = os.path.join(self.root, 'oneline.json')
+        one = b' '.join(b'token_%d' % i for i in range(3000)) + b' Run and Run end'
+        with open(q, 'wb') as f:
+            f.write(one)
+        self.index('index', self.COMMON, [self.COMMENT])
+        saved = ltq.READ_CHUNK, ltq.LONG_LINE
+        ltq.READ_CHUNK, ltq.LONG_LINE = 64, 256
+        try:
+            got = list(ltq.other_chunks(q))
+            out = self.ltq('refs', 'Run')
+        finally:
+            ltq.READ_CHUNK, ltq.LONG_LINE = saved
+        self.assertGreater(len(got), 10)
+        self.assertEqual(b''.join(d for _, d in got), one)
+        self.assertEqual({first for first, _ in got}, {1})
+        self.assertTrue(all(d.endswith(b' ') for _, d in got[:-1]))
+        self.assertEqual(out.count('  oneline.json:1  | '), 1)  # 同じ行の一致は、分かれても 1 行
+        self.assertIn('  wide.txt:901  | Run ここ\n', out)
+        self.assertEqual(len(re.findall(r'^  (?:oneline\.json|wide\.txt):', out, re.M)), 2)
+
+    def test_index_files_under_the_root_are_not_searched(self):
+        # 索引がテキスト検索の読む所(ルートの下の、. で始まらないフォルダ)にあっても、索引のファイル自体は探さない
+        # (索引の行はソースの行の写し。探すと、名前を含む行の数が増える)。隣の、索引でないファイルは探す
+        self.index('index', self.COMMON, [self.COMMENT])
+        base = self.ltq('refs', 'Run')
+        self.assertIn(SCOPE + '\n', base)
+        out_dir = os.path.join(self.root, 'out')
+        shutil.copytree(os.path.join(self.root, '.index'), out_dir)
+        self.write('out/notes.txt', 'Run\n', self.t0 - 10)
+        self.write('out/index.tsv.words.cache', 'Run\n', self.t0 - 10)
+        out = self.ltq('--index', os.path.join(out_dir, 'index.tsv'), 'refs', 'Run')
+        self.assertIsNone(re.search(r'out/index\.tsv[\w.]*:\d', out))
+        self.assertIn('  out/notes.txt:1  | Run\n', out)
+
+        def total(text):
+            return int(re.search(r'== coverage: all (\d+) lines', text).group(1))
+
+        self.assertEqual(total(out), total(base) + 1)
+        self.assertTrue(out.endswith(' (searched: the root, except folders that start with ".", the index files)\n'))
+        # --exclude で除いた所も、最後の行に書く
+        out = self.ltq('refs', 'Run', '--exclude', 'out', '--exclude', 'gen')
+        self.assertTrue(out.endswith(' (searched: the root, except folders that start with ".", --exclude gen, out)\n'))
+
+    def test_large_non_source_files_are_read_in_parts(self):
+        # 大きなファイルも、行の区切りで分けて全部読む(大きさで除かない)。行番号は通しで数える
+        p = os.path.join(self.root, 'big.txt')
+        lines = [b'filler line %d' % i for i in range(2000)]
+        lines[70] = b'Run here'
+        lines[1500] = b'x' * 300 + b' Run'  # 1 回に読む大きさより長い行
+        with open(p, 'wb') as f:
+            f.write(b'\n'.join(lines))  # 最後の行は改行で終わらない
+        got = list(ltq.other_chunks(p, 64))
+        self.assertGreater(len(got), 10)
+        self.assertEqual(b''.join(d for _, d in got), b'\n'.join(lines))
+        seen = 1
+        for first, data in got:
+            self.assertEqual(first, seen)
+            self.assertTrue(data.endswith(b'\n') or data is got[-1][1])
+            seen += data.count(b'\n')
+        self.index('index', self.COMMON, [self.COMMENT])
+        chunk, ltq.READ_CHUNK = ltq.READ_CHUNK, 64
+        try:
+            out = self.ltq('refs', 'Run')
+        finally:
+            ltq.READ_CHUNK = chunk
+        self.assertIn('  big.txt:71  | Run here\n', out)
+        self.assertIn('  big.txt:1501  | xxx', out)
+        self.assertEqual(out, self.ltq('refs', 'Run'))  # 1 つで読んだときと同じ
+
+    def test_all_lists_every_line_that_contains_the_name(self):
+        # --all は、名前を含む行(rg -w なら出る行)を 1 行も件数にまとめずに並べる(名前やシグネチャを変えるときの、直す先の一覧)。
+        # ふつうの出力は、最後の行で「名前を含む行のうち何行を 1 行ずつ並べたか」を言う
+        os.makedirs(os.path.join(self.root, 'lib'))
+        # lib/b.cpp: 2〜6 行目は別の記号 Other::Run の呼び出し、7〜18 行目は文字列の中(12 行。全文でも件数にまとめる)
+        self.write('lib/b.cpp', 'void Use(Other* o) {\n' + '  o->Run();\n' * 5 + '  Log("Run");\n' * 12 + '}\n', self.t0 - 10)
+        self.write('lib/notes.md', 'Run\n' * 3, self.t0 - 10)
+        rows = [('Mine::Run', 'decl', '', 'src/a.cpp:1:6', 'void Run();'),
+                ('Mine::Run', 'call', 'Main', 'src/a.cpp:3:3', 'Run();')]
+        rows += [('Other::Run', 'call', 'Use', f'lib/b.cpp:{n}:6', 'o->Run();') for n in range(2, 7)]
+        # 無効な #if の中(5 行目)を仮に有効にした解析が、別の記号に解決した行
+        self.index('index', rows, [self.COMMENT, self.INACTIVE], tus=('src/a.cpp', 'lib/b.cpp'),
+                   alt=[('Other::Run', 'call', 'Main', 'src/a.cpp:5:3', 'Run();')])
+        out = self.ltq('refs', 'Mine::Run')
+        self.assertIn('== other symbols named "Run" (not the query): Other::Run (6)\n', out)
+        self.assertNotIn('lib/b.cpp:2', out)
+        self.assertNotIn('src/a.cpp:5', out)
+        self.assertTrue(out.endswith('\n== coverage: 6 of 24 lines that contain the word "Run" are listed above, one per line' + SCOPE +
+                                     '; the rest are only counted (refs --all lists every line)\n'), out[-300:])
+        out = self.ltq('refs', 'Mine::Run', '--compact', '--compact', '--limit', '1')
+        self.assertIn('\n== coverage: 2 of 24 lines', out)
+        out = self.ltq('refs', 'Mine::Run', '--all', '--limit', '1')  # --all は --limit より強い
+        self.assertIn('(--all: every line that contains the name is listed', out)
+        self.assertIn('== lines the index resolves to other symbols named "Run" (not the query; listed so that no line'
+                      ' that contains the name is left out): 6\n', out)
+        self.assertIn('  lib/b.cpp:2  Other::Run  | o->Run();\n', out)
+        self.assertIn('  src/a.cpp:5  Other::Run  [inactive: #if defined(DEBUG_ONLY)]  | Run();\n', out)
+        for n in range(7, 19):
+            self.assertIn(f'    lib/b.cpp:{n}  | Log("Run");\n', out)
+        self.assertIn('  lib/notes.md:3  | Run\n', out)
+        self.assertNotIn('matches in', out)
+        self.assertNotIn(' more ', out)
+        self.assertTrue(out.endswith('\n== coverage: all 24 lines that contain the word "Run" are listed above, one per line' + SCOPE + '\n'))
+        # --path と合わせると、そのフォルダの行だけを数えて、全部並べる
+        out = self.ltq('refs', 'Mine::Run', '--all', '--path', 'lib')
+        self.assertTrue(out.endswith('\n== coverage: all 20 lines that contain the word "Run" are listed above, one per line'
+                                     ' (searched: --path lib, except folders that start with ".")\n'))
 
     def test_matched_symbols_are_capped_by_row_count(self):
         # 短い名前が多くの記号に当たっても、記号の一覧は行の多い順に上限まで。残りは件数(行は下の節に記号つきで出る)

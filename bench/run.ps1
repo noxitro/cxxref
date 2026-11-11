@@ -245,6 +245,11 @@ if ($Provider -eq 'anthropic') {
     $modelArgs = @()
 }
 
+# インストール済みのプラグインは読ませない(--plugin-dir で渡したものだけにする)。cxxref をプラグインとして入れてあると、
+# その中の古い MCP サーバーが同じ名前(code-ref-index)で起動され、--additional-mcp-config で渡したこのリポジトリの
+# サーバーは使われない(Copilot CLI 1.0.109、2026-11-11 実測。`copilot mcp list` が Plugin servers だけを出す)
+$oldPluginOnly = $env:COPILOT_PLUGIN_DIR_ONLY
+$env:COPILOT_PLUGIN_DIR_ONLY = 'true'
 $t0 = Get-Date
 Push-Location $ws
 try {
@@ -254,6 +259,7 @@ try {
 } finally {
     Pop-Location
     $env:PATH = $oldPath
+    $env:COPILOT_PLUGIN_DIR_ONLY = $oldPluginOnly
     foreach ($v in $providerVars) { [Environment]::SetEnvironmentVariable($v, $oldProvider[$v], 'Process') }
     # 裏の作り直し(自動更新)が続いていれば終わるまで待つ。次の実行が .index を消すとぶつかる
     $deadline = (Get-Date).AddMinutes(10)

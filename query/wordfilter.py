@@ -20,8 +20,9 @@ WORD = re.compile(rb'[A-Za-z0-9_]+')
 IDENT = re.compile(r'[A-Za-z0-9_]+')
 K = 3  # 1 つの単語で立てるビットの数
 BITS_PER_WORD = 8  # 単語 1 つあたりのビット数の目安(K=3 で外れは 3% ほど)
-ALWAYS = -1  # 絞らないファイル(UTF-16・読めない)の印
-MAGIC = b'cxxref-words 3\n'  # 作り方を変えたら上げる(古い一覧を読まない)
+ALWAYS = -1  # 絞らないファイル(UTF-16 のソース・読めない・単語の種類が多すぎる)の印
+MAX_WORDS = 1000000  # C/C++ 以外のファイルで、単語の種類がこれを超えたら絞らない(集合を貯め続けない。フィルタも 1 MB を超える)
+MAGIC = b'cxxref-words 4\n'  # 作り方を変えたら上げる(古い一覧を読まない)
 
 
 def _positions(word, m):
@@ -33,7 +34,10 @@ def _positions(word, m):
 
 def bloom_of(data):
     """(ビット数, フィルタの int)。data は UTF-8 に直した後のバイト列。"""
-    words = set(WORD.findall(data))
+    return bloom_of_words(set(WORD.findall(data)))
+
+
+def bloom_of_words(words):
     m = 64
     while m < BITS_PER_WORD * len(words):
         m <<= 1
@@ -45,11 +49,25 @@ def bloom_of(data):
 
 
 def _work(args):
-    """別のプロセスで動く。[(相対パス, 絶対パス)] の各ファイルの (相対パス, ビット数, フィルタ)。"""
-    items, codec = args
+    """別のプロセスで動く。[(相対パス, 絶対パス)] の各ファイルの (相対パス, ビット数, フィルタ)。
+    other が真なら、C/C++ 以外のファイルとして読む(ltq.other_chunks: バイナリは最初の NUL より前だけ、大きなファイルは分けて、
+    UTF-16 は UTF-8 に直して)。"""
+    items, codec, other = args
     import ltq  # 子のプロセスでは、親の sys.path が引き継がれる
     out = []
     for rel, fp in items:
+        if other:
+            words, always = set(), False
+            try:
+                for _, data in ltq.other_chunks(fp):
+                    words.update(WORD.findall(ltq.to_utf8(data, codec)))
+                    if len(words) > MAX_WORDS:  # 大きなデータの書き出しなど。残りを読まずに、毎回探すファイルにする
+                        always = True
+                        break
+            except OSError:
+                always = True  # 読めない。絞らない
+            out.append((rel, ALWAYS, 0) if always else (rel,) + bloom_of_words(words))
+            continue
         try:
             with open(fp, 'rb') as f:
                 data = f.read()
@@ -64,8 +82,9 @@ def _work(args):
 
 
 class WordFilter:
-    def __init__(self, cache_path=None):
+    def __init__(self, cache_path=None, other=False):
         self.cache_path = cache_path
+        self.other = other  # C/C++ 以外のファイルのフィルタか(読み方を ltq.other_hits に合わせる)
         self.codec = None
         self._f = {}  # 相対パス -> ((更新日時, 大きさ), ビット数, フィルタ)。大きさが分からなければ -1
         self._masks = {}
@@ -134,12 +153,12 @@ class WordFilter:
         if not todo:
             return 0
         if len(todo) < pool_min:
-            res = _work((todo, codec))
+            res = _work((todo, codec, self.other))
         else:
             n = workers or min(16, os.cpu_count() or 4)
             size = max(1, -(-len(todo) // (n * 8)))
             with ProcessPoolExecutor(max_workers=n) as ex:
-                res = [x for part in ex.map(_work, ((todo[i:i + size], codec) for i in range(0, len(todo), size)))
+                res = [x for part in ex.map(_work, ((todo[i:i + size], codec, self.other) for i in range(0, len(todo), size)))
                        for x in part]
         for rel, m, b in res:
             self._f[rel] = ((files[rel][1], sz(rel, -1)), m, b)
