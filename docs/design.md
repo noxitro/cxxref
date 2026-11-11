@@ -280,7 +280,7 @@ A・F は v6、G はコードベース A・B が v7、C が v8、R・U は v6 �
 - 中身: ルートの `plugin.json`・`mcp.json`(`python -I ${PLUGIN_ROOT}/mcp/server.py`)と、`com.github.copilot/rules/cxxref.mdc`(使い方の指示)。skill にしなかったのは、計測で効いたのが常に読まれる指示(G)だったため。rule は指示として毎回読まれる【実測: `copilot instruction list` の Plugin instructions に出る】
   - rule は `.mdc`(前置きに `description` が必須、`alwaysApply`・`globs`)。`.md` は読まれなかった【実測: 1.0.105。本体の component_discovery の文字列で形式を確かめた】
   - 条件は `globs`(対象ファイル)だけで、索引の有無では効かせ分けられない。そのため rule は「索引が無いと返ってきたら、ふだんどおり探す」と書き、索引を使うリポジトリだけで有効にする運用(リポジトリの `.github/copilot/settings.json` の `enabledPlugins`)を勧める
-  - **rule をやめた(2026-11-08、次の版から)**。中身は `scripts/cxxref-instructions.md` に移し、拡張の `/cxxref-enable on|off [local|project]`(`scripts/setup-instructions.ps1`)で、使うリポジトリだけに入れる。理由: rule はプラグインが有効なリポジトリのすべてで毎回読まれ、C++ でないリポジトリでも 1 回あたり約 950 トークン(rule とツールの定義)が上乗せされていた(v13)。`enabledPlugins` で切ると拡張(`/cxxref-index`)も使えなくなり、リポジトリごとに指示だけを足し外しできなかった
+  - **rule をやめた(2026-11-08、0.5.2 から)**。中身は `scripts/cxxref-instructions.md` に移し、拡張の `/cxxref-enable on|off [local|project]`(`scripts/setup-instructions.ps1`)で、使うリポジトリだけに入れる。理由: rule はプラグインが有効なリポジトリのすべてで毎回読まれ、C++ でないリポジトリでも 1 回あたり約 950 トークン(rule とツールの定義)が上乗せされていた(v13)。`enabledPlugins` で切ると拡張(`/cxxref-index`)も使えなくなり、リポジトリごとに指示だけを足し外しできなかった
     - ローカル(自分だけ)は `.github/instructions/cxxref.instructions.md` を置き、`.git/info/exclude` で git から外す。Copilot CLI には `*.local.md` にあたる手元だけの指示ファイルが無い【実測: 1.0.107 の本体の文字列に、読む指示ファイルとして `.github/copilot-instructions.md`・`.github/instructions/**/*.instructions.md`・`AGENTS.md`/`CLAUDE.md`/`GEMINI.md`・`~/.copilot/` の下だけがあった】。置いたファイルは `copilot instruction list` の Repository instructions に出て、`git status` には出ない【実測: 1.0.107。中身がモデルに渡るかは未確認】
     - 失うもの: 指示を入れていないリポジトリでは、モデルはツールの説明だけで決める(v13 の M: `refs` を呼んだのは 40 回中 24 回)。`root` も渡されず、セッションの記録から作業フォルダを取る
 - **プラグインの MCP サーバーの作業フォルダはプラグインの場所になる**。クライアントは roots の機能を名乗らず、`roots/list` は空、作業フォルダを示す環境変数も無い。`mcp.json` の `cwd` に `${workspaceFolder}` を書いても変わらない【実測: 1.0.105。調べ用のサーバーで初期化の要求と環境変数を記録した】
@@ -597,7 +597,7 @@ v12 までの偏り(問題の形・問題の選び方・cxxref にだけ手厚�
 
 ### 段階 1: C++ 以外のプロジェクトでの負担
 
-プラグインは C++ でないリポジトリでも有効になる。公開中の v0.5.1 をマーケットプレイスから入れた Copilot CLI 1.0.107(P)と、入れないもの(A)を、空の `COPILOT_HOME`・既定の道具一式(編集と shell を含む)で比べた。リポジトリは requests(Python)・Newtonsoft.Json(C#)・zod(TypeScript)と、索引の無いコードベース A。問題は各 3 問(使っている箇所を探す・引数を足して呼び出し側を直す・説明する)で、対象は乱数で選び、問題文は別のエージェントが書いた。gpt-6-luna、各 5 回、計 120 回【実測】
+プラグインは C++ でないリポジトリでも有効になる。v0.5.1(計測の時点で公開中)をマーケットプレイスから入れた Copilot CLI 1.0.107(P)と、入れないもの(A)を、空の `COPILOT_HOME`・既定の道具一式(編集と shell を含む)で比べた。リポジトリは requests(Python)・Newtonsoft.Json(C#)・zod(TypeScript)と、索引の無いコードベース A。問題は各 3 問(使っている箇所を探す・引数を足して呼び出し側を直す・説明する)で、対象は乱数で選び、問題文は別のエージェントが書いた。gpt-6-luna、各 5 回、計 120 回【実測】
 
 | | A(なし) | P(あり) |
 |---|---|---|
