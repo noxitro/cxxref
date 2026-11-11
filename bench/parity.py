@@ -43,6 +43,8 @@ import server  # noqa: E402
 LOC = re.compile(r'([^\s|\[\]()]+):(\d+)(?=\s|$)')
 DIR = re.compile(r'\s+(.+)/  (\d+) matches in \d+ files$')
 TAIL = re.compile(r'\s+\.\.\. \d+ more folders \(\d+ matches\) under: (.+)$')
+FILE = re.compile(r'\s+(\S+)  (\d+) matches$')  # 1 つのフォルダに収まるときの、ファイルごとの件数
+MOREFILES = re.compile(r'\s+\.\.\. \d+ more files \(\d+ matches\): (.+)$')
 MODES = (('full', []), ('c1', ['--compact']), ('c2', ['--compact', '--compact']))
 # 「索引に無い一致」の節の、分類の見出しの書き出し
 GROUPS = (('inside comments', 'comment'), ('inside inactive', 'inactive'), ('inside macro arguments', 'dropped'),
@@ -85,8 +87,8 @@ class Shown:
     def __init__(self, text):
         self.text = text
         self.size = len(text.encode('utf-8'))
-        self.locs, self.dirs, self.tops = {}, set(), set()
-        group = ''
+        self.locs, self.dirs, self.tops, self.files = {}, set(), set(), set()
+        group, last_dir = '', ''
         for line in text.splitlines():
             if line.startswith('== '):
                 group = 'nonsrc' if 'not C/C++ sources' in line else '' if line.startswith('== text matches') else 'index'
@@ -101,6 +103,18 @@ class Shown:
             m = DIR.match(line)
             if m:
                 self.dirs.add((m.group(1), group))
+                continue
+            m = FILE.match(line)
+            if m:
+                self.files.add((m.group(1), group))
+                last_dir = m.group(1).rsplit('/', 1)[0]
+                continue
+            m = MOREFILES.match(line)
+            if m:
+                for part in m.group(1).split(', '):
+                    t = re.match(r'(.+) \d+$', part)
+                    if t:
+                        self.files.add((f'{last_dir}/{t.group(1)}', group))
                 continue
             m = TAIL.match(line)
             if m:
@@ -117,7 +131,7 @@ class Shown:
         if (p, ln) in self.locs:
             return 'listed'
         d = p.rsplit('/', 1)[0] if '/' in p else '.'
-        if (d, group) in self.dirs:
+        if (d, group) in self.dirs or (p, group) in self.files:
             return 'folded'
         if any(g == group and (t == '.' and '/' not in d or d == t or d.startswith(t + '/')) for t, g in self.tops):
             return 'area'
@@ -164,6 +178,7 @@ def main():
     ap.add_argument('--sample', type=int, default=0, help='also take N names from <index>.alt.tsv')
     ap.add_argument('--under', default='', help='with --sample: only names that appear under this root-relative prefix')
     ap.add_argument('--no-ignore', action='store_true', help='pass --no-ignore to rg (also search files .gitignore hides)')
+    ap.add_argument('--rg-short', action='store_true', help='修飾名でも rg は末尾の名前で引く(別の記号に解決された行は other)')
     ap.add_argument('--rg', help='rg.exe (default: PATH, or the one bundled with Copilot CLI)')
     ap.add_argument('--out', help='write the lines that the MCP form does not list one by one (one per row) to this TSV')
     a = ap.parse_args()
@@ -196,8 +211,9 @@ def main():
     print('name\trg\t' + '\t'.join(f'{m}:listed' for m in forms) + '\tmcp:folded\tmcp:area\tmcp:hidden\tother\tmissing\tltq_only'
           '\tbytes(full/c1/c2/mcp)\tmcp_form\tmcp_sec')
     for name in names:
-        want = rg_lines(rg, root, name, ['--no-ignore'] if a.no_ignore else [])
         short = name.rsplit('::', 1)[-1]
+        # --rg-short: 修飾名で問うときも、rg は末尾の名前で引く(エージェントが呼び出し元を探すときの引き方)
+        want = rg_lines(rg, root, short if a.rg_short else name, ['--no-ignore'] if a.no_ignore else [])
         known = indexed_lines(idx, short)
         t0 = time.time()  # MCP の形を先に測る(この名前の初回。ソースの走査と文面の検索を含む時間)
         _, text = server.run_ltq(cfg, ['refs', name])

@@ -149,7 +149,8 @@ switch ($Cond) {
         if ($Cond -in 'G', 'H') { Copy-Item "$bench\mcp-instructions.md" "$ws\.github\copilot-instructions.md" }
         # 自動更新には .deps.tsv・.own.bin と作り方の記録(.recipe.json)が要る。記録はこの作業フォルダ向けに作る。
         # ハードリンクにはしない(自動更新が索引の時刻を進め、作り直すと、リンク先の元の索引まで変わる)
-        $parts = @('', '.tu.tsv', '.skip.tsv', '.deps.tsv', '.own.bin') | Where-Object { Test-Path "$IndexDir\$Index$_" }
+        # 索引の差分(.alt.tsv・.alt.json。無効な #if の中を仮に有効にして解析した行)もあれば写す
+        $parts = @('', '.tu.tsv', '.skip.tsv', '.deps.tsv', '.own.bin', '.alt.tsv', '.alt.json') | Where-Object { Test-Path "$IndexDir\$Index$_" }
         $sig = $Index + '|' + (($parts | ForEach-Object { $f = Get-Item "$IndexDir\$Index$_"; "$_=$($f.Length):$($f.LastWriteTimeUtc.Ticks)" }) -join ';')
         $same = (Test-Path "$keep\keep.txt") -and ((Get-Content "$keep\keep.txt" -Raw).Trim() -eq $sig)
         foreach ($s in $parts) {
@@ -173,16 +174,22 @@ switch ($Cond) {
         Get-FileHash "$ws\.index\index.tsv" | Out-Null
         $server = (Resolve-Path (Join-Path $bench '..\mcp\server.py')).Path
         $serverArgs = @('-I', $server) + $(if ($Cond -eq 'H') { @('--no-auto-update') } else { @() })
+        # 作業フォルダの .mcp.json には書かない。ユーザー設定(~/.copilot/mcp-config.json)に同じ名前のサーバー(ふだん使う
+        # 別のチェックアウト)があると、作業フォルダの .mcp.json があるときはそちらが起動され、このリポジトリのサーバーは
+        # 使われない(--additional-mcp-config を足しても同じ)。作業フォルダの外に書き、--additional-mcp-config だけで渡すと、
+        # このリポジトリのサーバーが使われる(Copilot CLI 1.0.108、2026-11-11 実測)
         if ($Cond -ne 'P') {
+            $mcpFile = "$bench\runs\$name.mcp.json"
+            New-Item -ItemType Directory -Force "$bench\runs" | Out-Null
             @{ mcpServers = @{ 'code-ref-index' = @{ type = 'local'; command = 'python'; args = $serverArgs; tools = @('*') } } } |
-                ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 "$ws\.mcp.json"
+                ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 $mcpFile
         }
         $tools = 'view', 'rg', 'grep', 'glob', 'code-ref-index'
         $allow = $tools
     }
 }
 if ($DryRun) {
-    foreach ($p in "$ws\.mcp.json", "$ws\.github\copilot-instructions.md") { if (Test-Path $p) { "== $p"; Get-Content $p -Raw -Encoding utf8 } }
+    foreach ($p in "$ws\.mcp.json", $mcpFile, "$ws\.github\copilot-instructions.md") { if ($p -and (Test-Path $p)) { "== $p"; Get-Content $p -Raw -Encoding utf8 } }
     "tools: $($tools -join ' ')"
     foreach ($p in "$ws\.github", "$ws\.index", "$ws\.mcp.json") { if (Test-Path $p) { Remove-Item -Recurse -Force $p } }
     if (Test-Path $cdbMark) { Remove-Item -Force "$ws\compile_commands.json", $cdbMark -ErrorAction SilentlyContinue }
@@ -190,6 +197,7 @@ if ($DryRun) {
 }
 # P はこのリポジトリ(plugin.json のあるルート)を --plugin-dir で読ませる。MCP サーバーは mcp.json の ${PLUGIN_ROOT} から起動される
 $pluginArgs = if ($Cond -eq 'P') { @('--plugin-dir', (Resolve-Path (Join-Path $bench '..')).Path) } else { @() }
+if ($mcpFile) { $pluginArgs += @('--additional-mcp-config', "@$mcpFile") }
 $oldPath = $env:PATH
 if ($Cond -eq 'E') { $env:PATH = "$ltq;$env:PATH" }
 

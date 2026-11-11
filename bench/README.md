@@ -9,7 +9,7 @@
 - C: ltidx の TSV 索引を rg で引く(使い方の指示付き)
 - D: LSP と、LSP を使えという指示
 - E: `../query` の CLI `ltq`(使い方の指示付き)。シェルを渡しますが、承認するのは `ltq` だけです
-- F: `../mcp` の MCP サーバー(指示なし)。作業フォルダの `.mcp.json` に登録します。シェルは渡しません
+- F: `../mcp` の MCP サーバー(指示なし)。`runs\<名前>.mcp.json` に書き、`--additional-mcp-config` で渡します。シェルは渡しません
 - G: F に使い方の指示(`mcp-instructions.md`)を足したもの
 - H: G の索引の自動更新を止めたもの(`--no-auto-update`)。コードを変えた後の問題(U1・U2)で、自動更新の効き目を G と比べます
 - P: このリポジトリをプラグインとして読ませたもの(`--plugin-dir`)。MCP サーバーと使い方の rule はプラグインから渡り、作業フォルダには指示のファイルも `.mcp.json` も置きません。G と比べて、チームで配る形でも同じ効き目かを見ます(v9。`../docs/design.md` の「プラグインとしての配布」)
@@ -66,7 +66,9 @@ python -I autoupdate_bench.py --workspace <写し> --index <索引.tsv> --reps 5
 - `-Round` は計測の回です。v1 は最初の計測、v2 は `dep` 行と指示の改善後、v3 は ltq、v4 は MCP、v5 はコードベース B での MCP の再計測、v6 は写しを固定して各問 5 回で測り直したもの、v7 は MCP サーバーに出力の大きさの上限を入れた後の G、v8 はコードベース C の問題文の範囲を言い直した後の A・G、v11 は clangd の準備を確かめてから測り直した B・D、v12 は Claude Haiku 5.5(BYOK)で A・G・Y とほかの MCP サーバー(I・K・L・M・N)を並べたものです。集計は回ごとに出ます
 - `-Index` は、条件 C・E・F・G・H で使う索引のファイル名です(`-IndexDir` 配下)。条件 F・G・H では `.deps.tsv` も写し、作業フォルダ向けの作り方の記録(`.recipe.json`)を作るので、自動更新が働きます(`compile_commands.json` は `-Cdb`、既定は `<作業フォルダ>\.cdb`)
 - 自動更新の作り直しが Copilot の終了後も続いているときは、終わるのを待ってから次に進みます
-- 条件 F・G の `.mcp.json` は、Copilot CLI が信頼済みのフォルダでしか読みません。`run.ps1` は `--trust-folder` を付けて実行します
+- 条件 F・G・H の MCP サーバーは、作業フォルダの `.mcp.json` ではなく `--additional-mcp-config` で渡します。ユーザー設定(`~/.copilot/mcp-config.json`)に同じ名前のサーバー(ふだん使う別のチェックアウト)が登録されていると、作業フォルダの `.mcp.json` があるときはユーザー設定のほうが起動され、このリポジトリのサーバーが使われませんでした(`--additional-mcp-config` を足しても同じ)。作業フォルダの `.mcp.json` を置かずに `--additional-mcp-config` だけで渡すと、このリポジトリのサーバーが使われます【実測: Copilot CLI 1.0.108、2026-11-11】。2026-11-11 より前の計測は、計測に使ったチェックアウトとユーザー設定のサーバーが同じだったので、影響は無かったと見ています【推測】
+- `run.ps1` は `--trust-folder` を付けて実行します(作業フォルダの指示のファイルを読ませるため)
+- 条件 F・G・H は、索引の差分(`.alt.tsv`・`.alt.json`)があれば一緒に写します
 - `collect.py` は `~/.copilot/session-store.db` と、各セッションの `events.jsonl` を読み取り専用で開き、`runs\summary.tsv` と条件ごとの平均を出します。`rep=0` は試運転として集計から外します
 - 問題と正解は `tasks-<名前>.json`(公開しないものは `local\` に置く。`collect.py` はすべて読むので、id はファイルをまたいで重ねません)、回答の書式は `answer-format.md` です。指示は、索引用が `index-instructions.md`(v1 の計測で使ったものは `index-instructions-v1.md`)、LSP 用が `lsp-instructions.md`(v1 の計測で使ったものは `lsp-instructions-v1.md`)、ltq 用が `cli-instructions.md` です
 
@@ -101,6 +103,7 @@ python -I parity.py --root <ソースのルート> --index <索引.tsv> --names 
 - `--sample N` は、差分の索引(`.alt.tsv`)に出てくる名前から N 個を、名前のハッシュの順で選びます(同じ索引なら同じ名前)
 - `--no-ignore` は、rg に `.gitignore` を無視させます
 - `--out` は、MCP の文面で 1 行ずつ出ていない rg の行を、分類つきで書きます
+- `--rg-short` は、修飾名で問うときも rg を末尾の名前で引きます(エージェントが呼び出し元を探すときの引き方)。索引が別の記号に解決している行は other に数えます(記号ごとの件数として出る行)
 
 結果(2026-11-11)【実測】:
 
@@ -109,8 +112,22 @@ python -I parity.py --root <ソースのルート> --index <索引.tsv> --names 
 | コードベース A(`runtime/` の名前) | 40 | 5,176 | 1,124 | 4,020 | 32 | 0 | 0 |
 | 同(`--no-ignore`) | 40 | 5,519 | 1,248 | 4,239 | 32 | 0 | 0 |
 | O3DE(30 個 + よくある名前 5 個) | 35 | 24,091 | 548 | 9,197 | 14,346 | 0 | 0 |
+| O3DE、修飾名 3 つ(`--rg-short`。rg は末尾の名前で引く) | 3 | 16,034 | 129 | 4,323 | 6,963 | 0 | 0 |
 
 MCP の 1 回の `refs` は、コードベース A で中央値 0.1 秒、O3DE で中央値 2.6 秒・最大 16.6 秒でした(最大はよくある名前。内訳は未調査)。O3DE では、MCP の文面が上限で末尾から切れた名前は 0 でした(前は 3 名)。ただし rg の行の 6 割は「上の階層の件数」にしか出ないので、そこを 1 行ずつ見るには `path` で絞って引き直す必要があります。
+
+修飾名 3 つ(`AZ::IO::FileIOBase::Create`・`AZ::Entity::Activate`・`AZ::DynamicModuleHandle::Create`)の rg の行 16,034 のうち 4,619 は、索引が別の記号に解決している行で、`other symbols named` の記号ごとの件数として出ます。2026-11-11 のレビューで見つかった、短い形で場所が消えていた行(テンプレートの中の別の記号に解決された呼び出しと、「別の記号らしい」テキストの一致)は、直した後はフォルダごとの件数に入ります。
+
+### E2E(Copilot CLI + MCP、2026-11-11)【実測】
+
+O3DE の O2(`AZ::DynamicModuleHandle::Create` の呼び出しを全部挙げる。正解 17 のうち 2 つは無効な `#if` の中、2 つはどの TU も読まないファイル)を、Claude Haiku 5.5(BYOK)で解かせた。
+
+| 条件 | 回 | 正答(最後の列挙) | 入力トークン(平均) | 秒(平均) |
+|---|---|---|---|---|
+| G(cxxref の MCP、索引の差分あり) | 3 | 3/3 | 80,401 | 36 |
+| A(rg だけ) | 1 | 1/1 | 66,393 | 36 |
+
+G の 3 回とも、`refs` の結果に `[inactive: #if ...]` の行があった。O2 は rg 向きの問題で、どちらも正解した。最初に流した回は、ユーザー設定の別のチェックアウトのサーバーが使われていた(上の `--additional-mcp-config` の項)。
 
 ## 計測に使うソースの写し
 

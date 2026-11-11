@@ -33,8 +33,8 @@ ALT = '.alt.tsv'  # 無効な #if の中を仮に有効にして解析した行(
 SIDE = ('.tu.tsv', '.skip.tsv', '.deps.tsv', ALT)  # 索引本体の隣に ltidx と altpass が書くファイル
 # C/C++ のソースでないファイルも、名前の一致だけは探す(rg なら出る行を落とさない: C# の生成器・ビルドの定義・文書など)。
 # 中身がテキストでないと分かっている拡張子は開かない。ほかは先頭に NUL があれば飛ばす(rg と同じ見分け方)
-BIN_EXT = {'.obj', '.o', '.a', '.lib', '.dll', '.exe', '.pdb', '.ilk', '.exp', '.pch', '.so', '.dylib', '.idb', '.ipch',
-           '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tif', '.tiff', '.ico', '.dds', '.tga', '.psd', '.exr', '.hdr', '.ktx',
+BIN_EXT = {'.obj', '.o', '.a', '.lib', '.dll', '.exe', '.pdb', '.ilk', '.pch', '.so', '.dylib', '.idb', '.ipch',
+           '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tif', '.tiff', '.ico', '.dds', '.tga', '.psd', '.exr', '.ktx',
            '.fbx', '.blend', '.uasset', '.umap', '.pak', '.zip', '.gz', '.7z', '.xz', '.bz2', '.tar', '.pdf',
            '.wav', '.mp3', '.ogg', '.mp4', '.ttf', '.otf', '.woff', '.woff2', '.class', '.jar', '.pyc', '.pack'}
 OTHER_MAX = 64 << 20  # これより大きいファイルは読まない
@@ -195,6 +195,12 @@ class Part:
         self.path = path
         self.name = os.path.splitext(os.path.basename(path))[0]
         self.mtime = os.path.getmtime(path)
+        # 差分(.alt.tsv)は本体の後に altpass が書く。本体より古ければ、本体を作り直した後(自動更新・-Update・altpass の
+        # 失敗)で行番号が合わないので使わない(無効な行は文字列の一致として出る)
+        try:
+            self.alt_ok = os.path.getmtime(path + ALT) >= self.mtime
+        except OSError:
+            self.alt_ok = False
 
 
 class Index:
@@ -340,7 +346,7 @@ class Index:
             sb = {p.encode('utf-8') for p in stale}
             anchors, picked = {}, []
             # 変わったファイルの行は、問い合わせに合わなくても行の付け直しの手がかりとして読む
-            for alt in (False, True):
+            for alt in ((False, True) if part.alt_ok else (False,)):
                 for raw in grep_lines(part.path + (ALT if alt else ''), list(needles) + [b'\t' + p + b':' for p in sb]):
                     hit = keep(raw)
                     if not hit:
@@ -741,7 +747,7 @@ def text_hits(idx, short, excludes):
                     data = f.read()
             except OSError:
                 continue
-            if sb in data:
+            if sb in data or data[:2] in (b'\xff\xfe', b'\xfe\xff'):  # UTF-16 は下で UTF-8 に直してから探す
                 out.append((rel, mtime, data))
         return out
 
@@ -845,6 +851,16 @@ def top_dirs(paths, n):
         c, files = agg.setdefault(d, [0, set()])
         agg[d][0] = c + 1
         files.add(p)
+    if len(agg) == 1 and len(next(iter(agg.values()))[1]) > 1:
+        # 1 つのフォルダに収まるときは、ファイルごとの件数にする(--path でそのフォルダを渡すと、同じ件数に戻って先へ
+        # 進めなくなる。O3DE の Code/Framework/AzCore/Tests/ で 231 行・24 ファイル)。ファイルは --path に渡せる
+        per = collections.Counter(paths)
+        files = sorted(per.items(), key=lambda kv: (-kv[1], kv[0]))
+        out = [f'{p}  {c} matches' for p, c in files[:n]]
+        if len(files) > n:
+            out.append(f'... {len(files) - n} more files ({sum(c for _, c in files[n:])} matches): '
+                       + ', '.join(f'{p.rsplit("/", 1)[-1]} {c}' for p, c in files[n:]))
+        return out
     top = sorted(agg.items(), key=lambda kv: (-kv[1][0], kv[0]))
     out = [f'{d}/  {c} matches in {len(fs)} files' for d, (c, fs) in top[:n]]
     if len(top) > n:
@@ -853,11 +869,15 @@ def top_dirs(paths, n):
     return out
 
 
-def path_filter(prefixes):
-    """--path の指定(ルートからの相対の、フォルダかファイル)に入るパスかを見る関数。指定が無ければ None。"""
+def path_filter(prefixes, root=None):
+    """--path の指定(ルートからの相対の、フォルダかファイル)に入るパスかを見る関数。指定が無ければ None。
+    ルートの下の絶対パスも受ける(MCP のクライアントは root を絶対パスで渡すので、path も絶対で来ることがある)。"""
+    base = (root or '').replace('\\', '/').rstrip('/').lower()
     pre = set()
     for p in prefixes:
         p = p.replace('\\', '/')
+        if base and (p.lower() == base or p.lower().startswith(base + '/')):
+            p = p[len(base):] or '.'
         while p.startswith('./'):
             p = p[2:]
         p = p.strip('/').lower()
@@ -969,7 +989,7 @@ def cmd_refs(a, idx):
     is_macro = all(r[1] in MACRO_ROLES for r in target)  # --path で絞る前に決める(絞って 0 行になっても変わらないように)
     # --path: 記号は索引の全体から決め、並べる行(索引の行とテキストの一致)だけを、指定のフォルダ・ファイルに絞る。
     # 短い出力でフォルダごとの件数にまとめた行を、1 行ずつ出し直すのに使う
-    inpath = path_filter(a.path)
+    inpath = path_filter(a.path, idx.root)
     if inpath:
         target = [r for r in target if inpath(r[3])]
         deps = [r for r in deps if inpath(r[3])]
@@ -1092,16 +1112,17 @@ def cmd_refs(a, idx):
     # dep 行: テンプレート本体では未解決。実体化で解決された位置は、その解決先を添える
     target_pos = {(r[3], r[4]) for r in target}
     def_files = {r[3] for r in defs}
-    dep_lines, dep_paths, dep_dup, dep_other = [], [], 0, {}
+    dep_lines, dep_paths, dep_dup, dep_other, other_paths = [], [], 0, {}, []
     for r in sorted(deps, key=key):
         if (r[3], r[4]) in target_pos:
             dep_dup += 1  # 実体化で対象に解決済み。上の calls に載っている
             continue
         resolved = sorted({x[0] for x in at[(r[3], r[4])]
                            if x[0] != r[0] and not x[1].startswith(DEFS + (OVERRIDE,)) and x[1] not in MACRO_ROLES})
-        if resolved and a.compact:  # 短い出力では、別の記号に解決された行は件数だけにする
+        if resolved and a.compact:  # 短い出力では、別の記号に解決された行は件数とフォルダごとの件数にする
             for s in resolved:
                 dep_other[s] = dep_other.get(s, 0) + 1
+            other_paths.append(r[3])
             continue
         if resolved:
             mark = '  (instantiations resolve it to ' + ', '.join(resolved) + ' -> probably not the query)'
@@ -1109,7 +1130,7 @@ def cmd_refs(a, idx):
             mark = '  (never instantiated; unknown target' + (', same file as the definition)' if r[3] in def_files else ')')
         dep_lines.append(show(r, False) + mark)
         dep_paths.append(r[3])
-    n_other = sum(dep_other.values())
+    n_other = len(other_paths)  # 1 行が複数の記号に解決されることがあるので、記号ごとの件数の和ではなく行の数
     print(f'\n== unresolved template calls named "{short}" (dep): {len(dep_lines) + n_other}'
           + (f' (+{dep_dup} already listed in calls)' if dep_dup else ''))
     if dep_lines:
@@ -1118,7 +1139,9 @@ def cmd_refs(a, idx):
     if dep_other:
         top = sorted(dep_other.items(), key=lambda kv: -kv[1])
         print(f'  {n_other} of them are resolved by instantiations to other symbols -> probably not the query: '
-              + ', '.join(f'{s} ({n})' for s, n in top[:8]) + (' ...' if len(top) > 8 else ''))
+              + ', '.join(f'{s} ({n})' for s, n in top[:8]) + (f', ... {len(top) - 8} more symbols' if len(top) > 8 else ''))
+        for s in top_dirs(other_paths, 5):  # rg なら出る行。どこにあるかは残す(--path で 1 行ずつ出る)
+            print('    ' + s)
     for s in dep_lines[:a.limit]:
         print('  ' + s)
     if len(dep_lines) > a.limit:
@@ -1178,7 +1201,7 @@ def cmd_refs(a, idx):
 
     print(f'\n== text matches of "{short}" not in the index: '
           f'{sum(len(v) for v in cats.values())} of {len(hits)} word matches')
-    no_alt = [p for p in idx.parts if not os.path.exists(p.path + ALT)]
+    no_alt = [p for p in idx.parts if not p.alt_ok]
     groups = [
         ('comment', 'inside comments -> not code; do not report these', False),
         ('inactive', 'inside inactive #if/#ifdef branches -> not compiled in the indexed configuration, not resolved;'
@@ -1193,7 +1216,7 @@ def cmd_refs(a, idx):
         ('unparsed', 'in files no indexed TU includes -> not analyzed; read them if they matter', False),
         ('other', 'other -> not explained by the index; read them if they matter', False),
     ]
-    folded = False
+    folded = bool(other_paths)  # 上の dep 行をフォルダごとの件数にしたか
     for k, title, fold in groups:
         items = cats[k]
         if not items:
@@ -1203,7 +1226,8 @@ def cmd_refs(a, idx):
         one, notes, rest, ndirs = [(p, s) for p, s, _ in items], [], [], 10
         print(f'  {title}: {len(items)}')
         if k == 'inactive' and no_alt:  # 古い索引か、-NoAlt で作った索引
-            print(f'    (no {os.path.basename(no_alt[0].path)}{ALT} next to the index, so these branches were not parsed;'
+            print(f'    ({os.path.basename(no_alt[0].path)}{ALT} is missing or older than the index, so these branches'
+                  ' were not parsed;'
                   ' rebuild the index with index-project to resolve the calls in them)')
         if a.compact and k != 'dropped':  # 捨てられた引数の行は答えに入りうるので、短い形でもまとめない(下の elif)
             # 短い出力: 問い合わせの呼び出しらしい行と修飾名の行は並べ、別の記号らしい行は件数にする。残りは、
@@ -1218,7 +1242,7 @@ def cmd_refs(a, idx):
             plain = [(p, s) for p, s, v in items if not v]
             keep = 0 if low else COMPACT_LIST if a.compact == 1 else len(plain) if len(items) <= 10 else 0
             one += plain[:keep]
-            rest, ndirs = [p for p, _ in plain[keep:]], 5 if low else 10
+            rest, ndirs = [p for p, _ in plain[keep:]] + [p for p, _, v in items if v == 'not'], 5 if low else 10
         elif a.compact:  # 短い形の dropped: 答えに入りうるので並べるが、上限に収まるよう 50 行まで
             one, rest = one[:50], [p for p, _ in one[50:]]
         elif fold and len(items) > 10:  # 全文でも、コードでない分類は 10 行を超えたらまとめる。手がかりの付いた行はまとめない
