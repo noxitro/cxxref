@@ -174,7 +174,9 @@ Copilot で C++ の呼び出し箇所を探すと、LSP(clangd)を渡しても�
 
 ### 版を出す(このリポジトリの保守)
 
-`plugin.json` と `.github\plugin\marketplace.json` の `version` を上げてコミットし、`v<版>` のタグを push します。CI が ltidx の配布物(`cxxref-ltidx-win-x64.zip` と `.sha256`)を作って、そのタグのリリースに載せます。タグと 2 つの `version` が食い違うと、リリースを作らずに止まります。
+`plugin.json` と `.github\plugin\marketplace.json` の `version` を上げて、main に入れます(PR のマージか push)。CI が、その版のリリースがまだ無ければ、そのコミットに `v<版>` のタグを付け、ltidx の配布物(`cxxref-ltidx-win-x64.zip` と `.sha256`)をリリースに載せます。タグを手で付ける必要はありません(手で `v<版>` のタグを push しても、同じようにリリースを作ります)。2 つの `version` が食い違う、または手で付けたタグが `version` と食い違うと、リリースを作らずに止まります。
+
+版を上げたら、必ずこの流れでリリースまで出します。`/cxxref-index` と MCP サーバーは、取ってきた ltidx の版をプラグインの版と比べるので、版だけ上がってリリースが無いと、`/cxxref-index` のたびに取り直しに失敗して警告が出ます。
 
 ## 動作確認
 

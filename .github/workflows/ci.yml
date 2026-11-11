@@ -4,7 +4,7 @@ name: CI
 on:
   push:
     branches: [main]
-    tags: ['v*']  # v<plugin.json の version> のタグで、ltidx の配布物をリリースに載せる(release ジョブ)
+    tags: ['v*']  # v<plugin.json の version> のタグを手で push したときも、ltidx の配布物をリリースに載せる(release ジョブ)
   pull_request:
   workflow_dispatch:
 
@@ -93,28 +93,50 @@ jobs:
             dist/cxxref-ltidx-win-x64.zip
             dist/cxxref-ltidx-win-x64.zip.sha256
 
-  # タグ v<版> のときだけ、配布物を GitHub のリリースに載せる。版は plugin.json と一致しなければ止める
+  # ltidx の配布物を GitHub のリリースに載せる。
+  # - main への push: plugin.json の版のリリースがまだ無ければ、タグ v<版> をそのコミットに付けて作る(版を上げることがリリースになる。
+  #   GITHUB_TOKEN で作ったタグでは別のワークフローが起動しないので、タグの作成とリリースはこのジョブでまとめて行う)。あれば何もしない
+  # - タグ v<版> の push(手で付けたとき): そのタグでリリースを作る。版は plugin.json と一致しなければ止める
+  # 取ってきた ltidx の版をプラグインの版と比べるので(/cxxref-index・MCP サーバー)、版を上げたのにリリースが無い状態を作らない
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'push' && (startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main')
     needs: [python, indexer]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v7
-      - name: Check the version
+      - name: Decide the release
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           v=$(python3 -c "import json; print(json.load(open('plugin.json'))['version'])")
           m=$(python3 -c "import json; print(json.load(open('.github/plugin/marketplace.json'))['plugins'][0]['version'])")
-          test "v$v" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME != plugin.json v$v"; exit 1; }
           test "$m" = "$v" || { echo "marketplace.json $m != plugin.json $v"; exit 1; }
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            test "v$v" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME != plugin.json v$v"; exit 1; }
+          fi
+          if gh release view "v$v" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "release v$v already exists; nothing to do"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "will release v$v at $GITHUB_SHA"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "tag=v$v" >> "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@v8
+        if: steps.plan.outputs.skip != 'true'
         with:
           name: cxxref-ltidx-win-x64
           path: dist
       - name: Create the release
+        if: steps.plan.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.plan.outputs.tag }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/cxxref-ltidx-win-x64.zip dist/cxxref-ltidx-win-x64.zip.sha256 \
-            --title "cxxref $GITHUB_REF_NAME" --notes "ltidx の配布物(LLVM 無しで使える)。scripts\\get-ltidx.bat が取ってきます。"
+          # タグがまだ無ければ(main への push)、--target のコミットにタグを作る
+          gh release create "$TAG" dist/cxxref-ltidx-win-x64.zip dist/cxxref-ltidx-win-x64.zip.sha256 \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "cxxref $TAG" --notes "ltidx の配布物(LLVM 無しで使える)。scripts\\get-ltidx.bat が取ってきます。"
