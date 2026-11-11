@@ -409,7 +409,9 @@ class ReuseTest(unittest.TestCase):
             self.assertEqual(self.server.call_tool(self.cfg, 'check', {'locations': ['src/a.cpp:3', 'src/a.cpp:4']}), want)
 
         same('Run', 'Main', 'Nothing')
-        self.assertTrue(self.cfg._trees and next(iter(self.cfg._trees.values()))[0].watching)
+        self.assertTrue(self.cfg._trees)
+        if os.name == 'nt':  # 変更の知らせは Windows だけ。ほかでは呼ぶたびに走査する(結果の比較はどちらでも行う)
+            self.assertTrue(next(iter(self.cfg._trees.values()))[0].watching)
         with open(self.src, 'w', encoding='utf-8', newline='\n') as f:  # 索引の後の編集(行が動く)
             f.write('// top\nvoid Run();\nvoid Main() {\n  Run();\n  // Run\n  Run(); Main();\n}\n')
         same('Run', 'Main')
@@ -423,7 +425,8 @@ class ReuseTest(unittest.TestCase):
         os.utime(self.base, (3000, 3000))
         same('Run', 'Main')
         tree = next(iter(self.cfg._trees.values()))[0]
-        self.assertEqual(tree.rescans, 1)  # 最初の 1 回のほかは、知らせだけで追った
+        if os.name == 'nt':
+            self.assertEqual(tree.rescans, 1)  # 最初の 1 回のほかは、知らせだけで追った
 
 
 if __name__ == '__main__':
