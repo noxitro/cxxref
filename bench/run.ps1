@@ -249,10 +249,10 @@ if ($Provider -eq 'anthropic') {
 # その中の古い MCP サーバーが同じ名前(code-ref-index)で起動され、--additional-mcp-config で渡したこのリポジトリの
 # サーバーは使われない(Copilot CLI 1.0.109、2026-11-11 実測。`copilot mcp list` が Plugin servers だけを出す)
 $oldPluginOnly = $env:COPILOT_PLUGIN_DIR_ONLY
-$env:COPILOT_PLUGIN_DIR_ONLY = 'true'
 $t0 = Get-Date
 Push-Location $ws
 try {
+    $env:COPILOT_PLUGIN_DIR_ONLY = 'true'  # try の中で設定する(前で設定すると、try に入る前に落ちたときに残る)
     copilot -p $prompt @modelArgs --trust-folder --available-tools @tools --allow-tool @allow -s @pluginArgs `
         --share "$bench\runs\$name.md" --log-level error *> "$bench\runs\$name.out.txt"
     $code = $LASTEXITCODE

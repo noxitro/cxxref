@@ -16,6 +16,7 @@ import re
 import sys
 import time
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # python -I ではスクリプトのフォルダが検索パスに入らない
 import ppcond  # noqa: E402
@@ -31,6 +32,10 @@ CP_CODECS = {65001: None, 51932: 'euc_jp', 20932: 'euc_jp', 28591: 'latin-1'}  #
 SKIP_SCAN_FILES = 64  # 範囲を引くファイルがこれより多ければ、.skip.tsv を 1 つずつ find せず、1 回通して読む
 ALT = '.alt.tsv'  # 無効な #if の中を仮に有効にして解析した行(scripts/altpass.py が書く。索引本体と同じ形)
 SIDE = ('.tu.tsv', '.skip.tsv', '.deps.tsv', ALT)  # 索引本体の隣に ltidx と altpass が書くファイル
+# 索引のファイルの名前の、索引のパスより後ろの部分: 本体(空)・隣のファイル・写し(.seen.cache など)と、それを書いている途中の
+# ファイル(.tmp・.<プロセス番号>.tmp)。索引の隣に書くファイルを増やしたら、ここにも足す(足さないと、テキスト検索がそれを読む)
+OWN_TAIL = re.compile(r'(\.(tu|skip|deps|alt)\.tsv|\.own\.bin|\.(alt|recipe)\.json'
+                      r'|\.(seen|words|words-other|names)\.cache)?(\.\d+)?(\.tmp)?\Z')
 # C/C++ のソースでないファイルも、名前の一致だけは探す(rg なら出る行を落とさない: C# の生成器・ビルドの定義・文書など)。
 # テキストかどうかは、rg と同じく中身で見分ける(other_chunks)。拡張子や大きさでは除かない: .obj には Wavefront の 3D モデルの
 # ようなテキストがあり、Git LFS の実体を取っていない .png は中身がテキスト。拡張子で除くと、rg なら出る行が出ないことがある
@@ -38,6 +43,7 @@ OTHER_HEAD = 8192  # バイナリかを見分けるために読む、先頭の�
 LONG_LINE = 1 << 20  # 行の区切りが無いままこれ(と 1 回に読む大きさ)を超えたら、行の途中で分ける
 WORD_TAIL = re.compile(rb'[A-Za-z0-9_\x80-\xff]*\Z')  # 末尾の、単語か複数バイトの文字の途中かもしれない部分
 OTHER_LIST = 10  # 短い出力(--compact 1 つ)で、ソースでないファイルの一致を 1 行ずつ並べる数
+UNREAD_LIST = 20  # 読めなかったファイルを並べる数(--all では全部)
 # 件数にまとめた行があるときに、出力の最後の行(coverage)の末尾に付ける案内(MCP サーバーは、一覧のファイルの場所に置き換える)
 ALL_HINT = '; the rest are only counted (refs --all lists every line)'
 
@@ -81,8 +87,9 @@ def other_chunks(fp, chunk=None):
         ln, buf = 1, dec.decode(head).encode('utf-8') if dec else head
         left = os.fstat(f.fileno()).st_size - len(head)
         while True:
-            # 残りより大きくは頼まない(read は頼んだ大きさのバッファを取る。小さなファイルごとに chunk の分を取ると遅い)
-            want = min(chunk, max(left, 0) + 1)
+            # 残りより大きくは頼まない(read は頼んだ大きさのバッファを取る。小さなファイルごとに chunk の分を取ると遅い)。
+            # 大きさを見た後に伸びたファイル(書いている途中のログなど)は、伸びた分を chunk ずつ読む
+            want = min(chunk, left + 1) if left >= 0 else chunk
             more = f.read(want)
             left -= len(more)
             end = len(more) < want
@@ -108,6 +115,8 @@ def word_starts(data, sb):
     正規表現 `(?<![A-Za-z0-9_])sb(?![A-Za-z0-9_])` の finditer と同じ位置になる。正規表現は前を見る条件が頭にあると
     1 バイトずつ試すので、大きなファイル(UE5 の 69 MB の .po など)では遅い(69 MB で 0.6 秒。スレッドでも並ばない)。
     find で候補へ飛べば、同じファイルが 0.02 秒で済む。"""
+    if not sb:  # 空の名前はどの位置にも一致し、find が進まない
+        return
     n, size = len(sb), len(data)
     pos = data.find(sb)
     while pos >= 0:
@@ -744,7 +753,13 @@ class Index:
 
     def _not_own(self, others):
         own = self.own()
-        return {k: v for k, v in others.items() if not os.path.normcase(k).startswith(own)} if own else others
+        if not own:
+            return others
+
+        def mine(rel):  # 索引のパスで始まるだけの別のファイル(index.tsv.md など)は外さない
+            rel = os.path.normcase(rel)
+            return any(rel.startswith(o) and OWN_TAIL.match(rel, len(o)) for o in own)
+        return {k: v for k, v in others.items() if not mine(k)}
 
     def header(self, focus=None):
         """索引の状態。focus(問い合わせの名前を含むファイルの集合)を渡すと、失敗した TU・変わったファイル・新しいファイルは
@@ -885,22 +900,26 @@ def lexical_hint(data, b, col):
     return None
 
 
-def text_hits(idx, short, excludes):
-    """ソース中の単語一致を (path, line, col, src, stale, hint) で返す。col は clang と同じ 1 始まりのバイト位置。"""
+def text_hits(idx, short, excludes, bad=None):
+    """ソース中の単語一致を (path, line, col, src, stale, hint) で返す。col は clang と同じ 1 始まりのバイト位置。
+    bad(集合)を渡すと、読めなかったファイルの相対パスを足す(その中の一致は出ないので、呼び出し側が伝える)。"""
     sb = short.encode('utf-8')
     hits = []
 
     def load(chunk):  # 読むのは並列にする(大きなコードでは読み込みの待ちが大半)
-        out = []
+        out, skipped = [], []
         for rel, fp, mtime in chunk:
             try:
                 with open(fp, 'rb') as f:
                     data = f.read()
-            except OSError:
+            except FileNotFoundError:  # 一覧を作った後に消えた(rg でも出ない)
+                continue
+            except OSError:  # ほかのプログラムが開いている・権限が無いなど
+                skipped.append(rel)
                 continue
             if sb in data or data[:2] in (b'\xff\xfe', b'\xfe\xff'):  # UTF-16 は下で UTF-8 に直してから探す
                 out.append((rel, mtime, data))
-        return out
+        return out, skipped
 
     files, test = idx.sources(), None
     if idx.words is not None:
@@ -916,8 +935,10 @@ def text_hits(idx, short, excludes):
     items = list(walk_sources(idx, excludes, files))
     size = max(1, -(-len(items) // 256))
     with ThreadPoolExecutor(max_workers=min(16, os.cpu_count() or 4)) as ex:
-        loaded = [x for part in ex.map(load, (items[i:i + size] for i in range(0, len(items), size))) for x in part]
-    for rel, mtime, data in loaded:
+        parts = list(ex.map(load, (items[i:i + size] for i in range(0, len(items), size))))
+    if bad is not None:
+        bad.update(rel for _, skipped in parts for rel in skipped)
+    for rel, mtime, data in (x for out, _ in parts for x in out):
         data = to_utf8(data, idx.codec())  # Shift_JIS の 2 バイト目が英字になる偽の一致も、直してから探せば出ない
         stale = mtime > idx.mtime
         ln, last = 1, 0
@@ -933,32 +954,63 @@ def text_hits(idx, short, excludes):
 
 
 def other_scan(args):
-    """[(相対パス, 絶対パス)] の各ファイルから、sb を単語として含む行を (path, line, src) で返す。別のプロセスでも動く。"""
+    """[(相対パス, 絶対パス)] の各ファイルから、sb を単語として含む行を (path, line, src) で探す。別のプロセスでも動く。
+    戻り値は (一致, 読めなかったファイルの相対パス)。"""
     items, sb, codec = args
-    out = []
+    out, skipped = [], []
     for rel, fp in items:
+        # 行の途中で分けた続き(1 行だけの大きなファイル)は、分け目の前後を合わせて見る。分け目は単語の途中でないだけなので、
+        # 記号や空白を含む名前(operator==・~Foo)は分け目をまたぐことがあり、分け目で終わる一致は次のバイトがまだ見えない
+        # - tail: 前の分の末尾(名前の長さまで)。次の分の頭に足す。またぐ一致と、その 1 つ前のバイトが見える
+        # - held: 分の末尾で終わった一致。次の分の最初のバイトが単語の文字でなければ(か、次の分が無ければ)一致
+        tail, held = b'', None
         try:
             for first, data in other_chunks(fp):
                 data = to_utf8(data, codec)
+                if held and data:
+                    if data[0] not in WORD_BYTE:
+                        out.append(held)
+                    held = None
+                seen = len(tail)
+                if tail:  # ふつうは空(行の区切りで分かれる)。大きな分を写さない
+                    data = tail + data
+                tail =data[-len(sb):].rpartition(b'\n')[2]  # 行の区切りで終わっていれば空
                 if sb not in data:
                     continue
                 ln, last = first, 0
                 for pos in word_starts(data, sb):
+                    if pos + len(sb) <= seen:
+                        continue  # 足した部分に収まる一致は、前の分で見た
                     ln += data.count(b'\n', last, pos)
                     last = pos
                     if out and out[-1][:2] == (rel, ln):
                         continue  # 同じ行の 2 つ目の一致
                     b = data.rfind(b'\n', 0, pos) + 1
                     e = data.find(b'\n', pos, b + 800)  # 見せるのは行の頭の 200 字まで。長い行を全部は写さない
-                    out.append((rel, ln, data[b:e if e >= 0 else b + 800].strip().decode('utf-8', 'replace')[:200]))
-        except OSError:
-            continue
-    return out
+                    hit = (rel, ln, data[b:e if e >= 0 else b + 800].strip().decode('utf-8', 'replace')[:200])
+                    if pos + len(sb) == len(data):
+                        held = hit
+                    else:
+                        out.append(hit)
+        except FileNotFoundError:  # 一覧を作った後に消えた(rg でも出ない)
+            pass
+        except OSError:  # ほかのプログラムが開いている・権限が無いなど。途中まで読めた分の一致は残す
+            skipped.append(rel)
+        if held:
+            out.append(held)
+    return out, skipped
 
 
-def other_hits(idx, short, excludes):
-    """C/C++ のソースでないファイルの単語一致を (path, line, src) で返す。中身は解析しない(rg と同じく、行を見せるだけ)。"""
+def other_hits(idx, short, excludes, bad=None):
+    """C/C++ のソースでないファイルの単語一致を (path, line, src) で返す。中身は解析しない(rg と同じく、行を見せるだけ)。
+    bad(集合)を渡すと、読めなかったファイルの相対パスを足す。"""
     sb = short.encode('utf-8')
+
+    def gather(parts):
+        parts = list(parts)  # 全部そろってから bad に足す(プロセスが落ちてスレッドで読み直すときに、2 度足さない)
+        if bad is not None:
+            bad.update(rel for _, skipped in parts for rel in skipped)
+        return [x for out, _ in parts for x in out]
     files, sizes = idx.others(), None
     if idx.other_words is not None:  # 長く動くプロセスでは、名前の単語が無いと分かっているファイルを読まない(ソースと同じ)
         try:
@@ -986,13 +1038,14 @@ def other_hits(idx, short, excludes):
             room -= sizes.get(rel, 0)
         try:
             with ProcessPoolExecutor(max_workers=n) as ex:
-                return [x for part in ex.map(other_scan, ((g, sb, codec) for g in groups)) for x in part]
-        except Exception as e:  # 子のプロセスを起こせない・落ちた。下のスレッドで読み直す
+                return gather(ex.map(other_scan, ((g, sb, codec) for g in groups)))
+        # 子のプロセスを起こせない・子が落ちた。下のスレッドで読み直す。子の中の検索が上げた例外(メモリ不足など)は、
+        # 読み直しても同じことになるので、ここでは受けない
+        except (OSError, ImportError, BrokenProcessPool) as e:
             print(f'ltq: worker processes unavailable ({type(e).__name__}: {e}); reading in threads', file=sys.stderr)
     size = max(1, -(-len(pairs) // 256))
     with ThreadPoolExecutor(max_workers=min(16, os.cpu_count() or 4)) as ex:
-        return [x for part in ex.map(other_scan, ((pairs[i:i + size], sb, codec) for i in range(0, len(pairs), size)))
-                for x in part]
+        return gather(ex.map(other_scan, ((pairs[i:i + size], sb, codec) for i in range(0, len(pairs), size))))
 
 
 def norm_src(s):
@@ -1139,7 +1192,9 @@ def cmd_refs(a, idx):
     rows = idx.cached(('rows', short), lambda: [r for r in idx.rows([sb + b'\t'], lambda raw: True, name=sb)
                                                  if r[0].rsplit('::', 1)[-1] == short])
     # テキストの一致(下の「索引に無い一致」で使う)。名前を含むファイルを先に知り、索引の状態はそのファイルの分だけ並べる
-    hits = idx.cached(('text', short, tuple(sorted(a.exclude))), lambda: text_hits(idx, short, set(a.exclude)))
+    # 読めなかったファイル(text_hits と other_hits が足す。一致の写しと同じ間だけ保つ)
+    bad = idx.cached(('unread', short, tuple(sorted(a.exclude))), set)
+    hits = idx.cached(('text', short, tuple(sorted(a.exclude))), lambda: text_hits(idx, short, set(a.exclude), bad))
     focus = {h[0] for h in hits} | {r[3] for r in rows}
     # 仮想関数の上書き(上書きするメソッド -> 上書きされる基底のメソッド)。同じ名前なので rows に入っている
     up, down, ov_at = {}, {}, {}
@@ -1464,7 +1519,7 @@ def cmd_refs(a, idx):
         folded = folded or bool(rest)
     # C/C++ のソースでないファイルの一致。索引も ltq も中身を解析しないが、rg なら出る行なので、あることは必ず伝える
     # (名前を変えるなら、生成器・ビルドの定義・スクリプトも直す先になる)
-    extra = idx.cached(('other', short, tuple(sorted(a.exclude))), lambda: other_hits(idx, short, set(a.exclude)))
+    extra = idx.cached(('other', short, tuple(sorted(a.exclude))), lambda: other_hits(idx, short, set(a.exclude), bad))
     if inpath:
         extra = [h for h in extra if inpath(h[0])]
     if extra:
@@ -1505,10 +1560,18 @@ def cmd_refs(a, idx):
                       f'  | {src_of.get((p, ln), rs[0][6] if rs else "")}')
             listed.update(left)
     n_all, n_listed = len(hit_pos), len(hit_pos & listed)
+    # 読めなかったファイルの中の行は、上のどこにも出ず、下の数にも入らない。黙って「全部」と言わない
+    unread = sorted(p for p in bad if not inpath or inpath(p))
+    if unread:
+        keep = len(unread) if a.all else UNREAD_LIST
+        print(f'\n== not searched: {len(unread)} file{"s" if len(unread) > 1 else ""} could not be read (in use by another'
+              ' program, or no permission); lines in them may be missing from the list and from the count below: '
+              + ', '.join(unread[:keep]) + (f' ... ({len(unread) - keep} more; refs --all lists them)' if unread[keep:] else ''))
     # 「全部」は、探した範囲の中での全部。探していない所(rg --hidden や、--exclude を付けない rg なら出る行)を言う
     scope = (f' (searched: {"--path " + ", ".join(a.path) if inpath else "the root"}, except folders that start with "."'
              + (', the index files' if idx.own() else '')
-             + (', --exclude ' + ', '.join(sorted(a.exclude)) if a.exclude else '') + ')')
+             + (', --exclude ' + ', '.join(sorted(a.exclude)) if a.exclude else '')
+             + (f', {len(unread)} file{"s" if len(unread) > 1 else ""} that could not be read' if unread else '') + ')')
     print(f'\n== coverage: {"all " if n_listed == n_all else f"{n_listed} of "}{n_all} lines that contain the word'
           f' "{short}" are listed above, one per line' + scope + ('' if n_listed == n_all else ALL_HINT))
 
@@ -1614,6 +1677,9 @@ def main(argv=None, idx=None):
     c = sub.add_parser('check', help='how the index treats each path:line[:col]')
     c.add_argument('locs', nargs='+')
     a = ap.parse_args(argv)
+    if a.cmd == 'refs' and not re.split(r'::', a.name.lstrip(':'))[-1]:  # ""・"::"・"Foo::"。探す単語が無い
+        print(f'refs needs a name after the last "::" (got "{a.name}")')
+        return 2
     if a.root is None:
         a.root = (None if a.index else find_root('.')) or '.'
         if os.path.abspath(a.root) != os.path.abspath('.'):
