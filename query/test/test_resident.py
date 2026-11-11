@@ -216,7 +216,15 @@ class WordFilterTest(unittest.TestCase):
         self.assertFalse(may('Blob_word', 'blob.dat'))
         self.assertTrue(may('Late_word', 'big.txt'))
         self.assertFalse(may('Missing_word', 'big.txt'))
-        self.assertTrue(may('Anything', 'u16.txt'))  # UTF-16 は絞らない
+        self.assertTrue(may('Wide_word', 'u16.txt'))  # UTF-16 も、UTF-8 に直して単語を取る
+        self.assertFalse(may('Missing_word', 'u16.txt'))
+        # 単語の種類が多すぎるファイルは、集合を貯め続けずに「絞らない」にする
+        many = self.write('many.txt', b' '.join(b'w%d' % i for i in range(50)))
+        cap, wordfilter.MAX_WORDS = wordfilter.MAX_WORDS, 10
+        try:
+            self.assertEqual(wordfilter._work(([('many.txt', many)], None, True)), [('many.txt', wordfilter.ALWAYS, 0)])
+        finally:
+            wordfilter.MAX_WORDS = cap
 
     def test_words_are_taken_after_conversion(self):
         # Shift_JIS の「ソ」(0x83 0x5C)と「ア」(0x83 0x41)。2 バイト目の英字を単語に数えない
@@ -261,7 +269,7 @@ class SourceTreeTest(unittest.TestCase):
         self.assertEqual(got_others, others)
         # ltq の走査と同じ一覧(ソースと、C/C++ 以外のファイル)
         idx = ltq.Index.__new__(ltq.Index)
-        idx.root, idx._sources, idx.tree = self.root, None, None
+        idx.root, idx._sources, idx.tree, idx._own = self.root, None, None, ()  # 索引のファイルは無い
         self.assertEqual({k: v[1] for k, v in idx.sources().items()}, src)
         self.assertEqual({k: v[1] for k, v in idx.others().items()}, others)
 

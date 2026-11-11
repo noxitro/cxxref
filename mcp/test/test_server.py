@@ -2,6 +2,8 @@
 
 usage: python -I -m unittest discover -s mcp/test   (リポジトリのルートで)
 """
+import contextlib
+import io
 import json
 import os
 import re
@@ -9,9 +11,12 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 SERVER = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'server.py')
+# 最後の行(coverage)の、探した範囲の書き方
+SCOPE = ' (searched: the root, except folders that start with ".")'
 
 
 class ServerTest(unittest.TestCase):
@@ -128,13 +133,14 @@ class ServerTest(unittest.TestCase):
         # 索引の隣に書き、結果の最後の行でその場所を知らせる(名前を変えるときに、直す先を漏らさない)
         refs = os.path.join(self.root, '.index', 'refs')
         text = self.refs_text()
-        self.assertTrue(text.endswith('== coverage: all 3 lines that contain the word "Run" are listed above, one per line\n'))
+        self.assertTrue(text.endswith('== coverage: all 3 lines that contain the word "Run" are listed above, one per line' + SCOPE + '\n'))
         self.assertFalse(os.path.exists(refs))  # 全部並んでいれば書かない
         self.many_comments()
         self.restart(['--root', self.root, '--max-output-bytes', '1400'])
         text = self.refs_text()
         self.assertLessEqual(len(text.encode('utf-8')), 1400)
-        m = re.search(r'\n== coverage: 2 of 42 lines that contain the word "Run" are listed above, one per line; the rest are'
+        m = re.search(r'\n== coverage: 2 of 42 lines that contain the word "Run" are listed above, one per line'
+                      + re.escape(SCOPE) + r'; the rest are'
                       r' only counted\. Every line, one per line: "([^"]+)" \(read it before a rename or a signature'
                       r' change\)\n$', text)
         self.assertTrue(m, text[-400:])
@@ -143,7 +149,7 @@ class ServerTest(unittest.TestCase):
             listing = f.read()
         for n in range(4, 44):
             self.assertIn(f'    src/a.cpp:{n}  | // Run\n', listing)
-        self.assertIn('== coverage: all 42 lines that contain the word "Run" are listed above, one per line\n', listing)
+        self.assertIn('== coverage: all 42 lines that contain the word "Run" are listed above, one per line' + SCOPE + '\n', listing)
         # 同じ問い合わせは同じファイルを書き換える(limit が違っても同じ一覧)。古い一覧は消す
         old = os.path.join(refs, 'Old-0123abcd.txt')
         with open(old, 'w') as f:
@@ -160,15 +166,62 @@ class ServerTest(unittest.TestCase):
         r = self.send('tools/call', {'name': 'refs', 'arguments': {'name': 'Run', 'path': ['src']}})['result']
         other = re.search(r'Every line, one per line: "([^"]+)"', r['content'][0]['text']).group(1)
         self.assertNotEqual(other, m.group(1))
-        # 索引が作業ツリーの検索に掛かる場所(ルートの下の、隠しでないフォルダ)にあるときは、一時フォルダに書く
-        # (一覧が次のテキスト検索に当たらないように)
+        # 中身が同じなら書き直さない(ファイルを差し替えない)
+        ino = os.stat(m.group(1)).st_ino
+        self.refs_text()
+        self.assertEqual(os.stat(m.group(1)).st_ino, ino)
+
+    def test_complete_list_goes_where_the_agent_can_read_it(self):
+        # 索引がルートの隠しフォルダに無いとき(作業ツリーの検索に掛かるフォルダや、ルートの外)は、<ルート>/.cxxref/refs に書く:
+        # エージェントが読める作業ツリーの中で、テキスト検索には掛からない所。git には無視させる
+        self.many_comments()
+        self.restart(['--root', self.root, '--max-output-bytes', '1400'])
+        first = re.search(r'Every line, one per line: "([^"]+)"', self.refs_text()).group(1)
         out = os.path.join(self.root, 'out')
         shutil.copytree(os.path.join(self.root, '.index'), out, ignore=shutil.ignore_patterns('refs'))
-        self.restart(['--root', self.root, '--index', os.path.join(out, 'index.tsv'), '--max-output-bytes', '1400'])
-        where = re.search(r'Every line, one per line: "([^"]+)"', self.refs_text()).group(1)
-        self.assertEqual(os.path.dirname(where), os.path.join(tempfile.gettempdir(), 'cxxref-refs'))
+        args = ['--root', self.root, '--index', os.path.join(out, 'index.tsv'), '--max-output-bytes', '1600']
+        self.restart(args)
+        text = self.refs_text()
+        where = re.search(r'Every line, one per line: "([^"]+)"', text).group(1)
+        home = os.path.join(self.root, '.cxxref')
+        self.assertEqual(os.path.dirname(where), os.path.join(home, 'refs'))
+        self.assertNotIn('outside the workspace', text)
+        with open(os.path.join(home, '.gitignore'), encoding='utf-8') as f:
+            self.assertEqual(f.read(), '*\n')
         self.assertFalse(os.path.exists(os.path.join(out, 'refs')))
-        os.remove(where)
+        self.assertNotEqual(os.path.basename(where), os.path.basename(first))  # 索引が違えば、別の一覧
+        with open(where, encoding='utf-8') as f:  # 索引のファイル自体の行は、一覧に入らない
+            self.assertIn('== coverage: all 42 lines', f.read())
+        # 作業ツリーに書けないときだけ、一時フォルダに書く(作業ツリーの外なので、読めないときの手を添える)
+        shutil.rmtree(home)
+        with open(home, 'w') as f:
+            f.write('x')  # 同じ名前のファイルがあって、フォルダを作れない
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp)
+        self.restart(args, env={'TMPDIR': tmp, 'TEMP': tmp, 'TMP': tmp})
+        text = self.refs_text()
+        where = re.search(r'Every line, one per line: "([^"]+)"', text).group(1)
+        self.assertEqual(os.path.dirname(where), os.path.join(tmp, 'cxxref-refs'))
+        self.assertIn('; it is outside the workspace: if you cannot read it, pass path to list one folder at a time)\n', text)
+
+    def test_complete_lists_are_capped_in_number(self):
+        # 一覧の数に上限がある(新しい順に残し、古いものから消す)
+        sys.path.insert(0, os.path.dirname(SERVER))
+        import server
+        index = os.path.join(self.root, '.index', 'index.tsv')
+        refs = os.path.join(self.root, '.index', 'refs')
+        cap, server.LIST_MAX = server.LIST_MAX, 2
+        try:
+            made = []
+            for i, name in enumerate(('A', 'B', 'C')):
+                where, err = server.write_list([index], self.root, ['refs', name], f'list of {name}\n')
+                self.assertIsNone(err)
+                os.utime(where, (time.time() - 100 + i, time.time() - 100 + i))
+                made.append(os.path.basename(where))
+            where, err = server.write_list([index], self.root, ['refs', 'D'], 'list of D\n')
+        finally:
+            server.LIST_MAX = cap
+        self.assertEqual(sorted(os.listdir(refs)), sorted([made[2], os.path.basename(where)]))
 
     def test_plugin_server_finds_the_workspace_from_the_copilot_session(self):
         # プラグインとして起動されると、作業フォルダはプラグインの場所(PLUGIN_ROOT)になる。Copilot CLI のセッションの
@@ -442,6 +495,39 @@ class ReuseTest(unittest.TestCase):
         text = self.refs()
         self.assertIn('1 source files changed after indexing', text)
         self.assertNotIn('not read by any indexed configuration', text)
+
+    def test_large_other_files_are_searched_in_worker_processes(self):
+        """C/C++ 以外のファイルで読む量が多いときは、プロセスを分けて探す。結果はスレッドで探すときと一字一句同じ。
+        プロセスを起こせないときは、スレッドで読み直す。"""
+        for i in range(12):
+            with open(os.path.join(self.root, 'src', f'n{i}.txt'), 'w', encoding='utf-8', newline='\n') as f:
+                f.write(f'line\nRun here {i}\nRunner\n' * 3)
+        want = self.refs()
+        self.assertIn('src/n11.txt:5  | Run here 11', want)
+        ltq = sys.modules['ltq']
+        real, made = ltq.ProcessPoolExecutor, []
+
+        def pool(*a, **k):
+            made.append(k)
+            return real(*a, **k)
+
+        def broken(*a, **k):
+            made.append(None)
+            raise OSError('no processes')
+
+        size, ltq.PROC_BYTES = ltq.PROC_BYTES, 1
+        try:
+            ltq.ProcessPoolExecutor = pool
+            self.assertEqual(self.refs(), want)
+            self.assertEqual(len(made), 1)
+            ltq.ProcessPoolExecutor = broken
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(self.refs(), want)
+            self.assertEqual(len(made), 2)
+            self.assertIn('worker processes unavailable', err.getvalue())
+        finally:
+            ltq.PROC_BYTES, ltq.ProcessPoolExecutor = size, real
 
     def test_resident_parts_give_the_same_answers(self):
         """保つ部品(ソースの一覧の監視・単語のフィルタ・名前の目次)があっても無くても、結果は一字一句同じ。

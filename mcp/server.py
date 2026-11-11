@@ -37,8 +37,10 @@ MAX_BYTES = 18000
 FIT_LIMITS = (60, 25, 10, 5, 2)  # 短い形でも上限を超えるときに、順に試す --limit(1 節に並べる行数)
 # 結果に 1 行ずつ並べきれなかったとき(上限に収めるために件数にまとめた行があるとき)は、名前を含む行を全部 1 行ずつ並べた一覧
 # (ltq refs --all)をファイルに書き、結果の最後の行でその場所を知らせる。名前やシグネチャを変えるときに、直す先を漏らさないため
-LIST_DIR = 'refs'  # 索引のあるフォルダの下の、一覧を置くフォルダ
+LIST_DIR = 'refs'  # 一覧を置くフォルダの名前(索引のあるフォルダか、LIST_HOME の下)
+LIST_HOME = '.cxxref'  # 索引がルートの隠しフォルダに無いときに、一覧を置くルートの下のフォルダ
 LIST_KEEP = 7 * 86400  # 一覧のファイルを残す秒数。これより古いものは、次に書くときに消す
+LIST_MAX = 200  # 1 つのフォルダに残す一覧の数。超えた分は、古いものから消す(1 つが数 MB になる名前がある)
 LIST_NAME = re.compile(r'-[0-9a-f]{8}\.txt(\.\d+\.tmp)?$')
 
 # 定義は、モデルを呼ぶたびに毎回送られる(C++ でないリポジトリでも)。言っていることは変えずに短く保つ
@@ -230,21 +232,30 @@ class Config:
         return root, note
 
 
-def searched(d, root):
-    """d が、作業ツリーのテキスト検索(ltq も rg も)に掛かる場所か(ルートの下で、. で始まるフォルダの中でない)。"""
+def list_dirs(paths, root):
+    """一覧を置くフォルダの候補を、試す順に [(フォルダ, git に無視させるフォルダか None)] で返す。
+    エージェントが読める所(作業ツリーの中)で、テキスト検索に掛からない所(. で始まるフォルダの中。一覧が次の検索に
+    当たらない)に置く: 索引がルートの下の隠しフォルダ(既定の .index)にあればその隣、無ければ(索引がルートの外や、
+    検索に掛かるフォルダにある)<ルート>/.cxxref/refs。どちらにも書けないときだけ、一時フォルダ(作業ツリーの外)。"""
+    index_dir = os.path.dirname(os.path.abspath(paths[0]))
+    home = os.path.join(root, LIST_HOME)
+    return (([(os.path.join(index_dir, LIST_DIR), None)] if ltq.tree_place(index_dir, root) == 'hidden' else [])
+            + [(os.path.join(home, LIST_DIR), home), (os.path.join(tempfile.gettempdir(), 'cxxref-' + LIST_DIR), None)])
+
+
+def same_text(path, text):
     try:
-        parts = os.path.relpath(d, root).replace('\\', '/').split('/')
-    except ValueError:  # 別のドライブ
+        with open(path, encoding='utf-8', newline='') as f:
+            return f.read() == text
+    except (OSError, UnicodeDecodeError):
         return False
-    return parts[0] != '..' and not any(p.startswith('.') and p != '.' for p in parts)
 
 
 def write_list(paths, root, args, text):
-    """漏れのない一覧(ltq refs --all の文面)をファイルに書く。(パス, None) か (None, 誤り)。
-    索引の隣の refs フォルダに書く。そこが作業ツリーの検索に掛かる場所(ルートの下の、隠しでないフォルダ)のとき
-    (一覧が次のテキスト検索に当たってしまう)と、書けないときは、一時フォルダに書く。
-    ファイル名は「名前-引数のハッシュ」。同じ問い合わせなら同じファイルを書き換えるので、増え続けない。"""
-    key = [os.path.normcase(os.path.abspath(root))]
+    """漏れのない一覧(ltq refs --all の文面)をファイルに書く。(パス, None) か (None, 誤り)。置く所は list_dirs。
+    ファイル名は「名前-ルート・索引・引数のハッシュ」。同じ問い合わせなら同じファイルを書き換えるので、増え続けない。
+    中身が前と同じなら書き直さない(更新日時だけ新しくする。読んでいる相手のファイルを差し替えない)。"""
+    key = [os.path.normcase(os.path.abspath(root))] + [os.path.normcase(os.path.abspath(p)) for p in paths]
     skip = False
     for x in args[1:]:  # --limit は一覧に効かない(同じ一覧になる)ので、鍵に入れない
         if skip or x == '--limit':
@@ -254,26 +265,34 @@ def write_list(paths, root, args, text):
     safe = re.sub(r'[^A-Za-z0-9_.-]+', '_', args[1]).strip('_.')[:60] or 'name'
     fname = f'{safe}-{hashlib.sha1(chr(0).join(key).encode("utf-8")).hexdigest()[:8]}.txt'
     err = None
-    near = os.path.join(os.path.dirname(os.path.abspath(paths[0])), LIST_DIR)
-    for d in ([] if searched(near, root) else [near]) + [os.path.join(tempfile.gettempdir(), 'cxxref-' + LIST_DIR)]:
-        tmp = os.path.join(d, f'{fname}.{os.getpid()}.tmp')
+    for d, home in list_dirs(paths, root):
+        dst = os.path.join(d, fname)
+        tmp = f'{dst}.{os.getpid()}.tmp'
         try:
             os.makedirs(d, exist_ok=True)
-            with open(tmp, 'w', encoding='utf-8', newline='\n') as f:
-                f.write(text)
-            os.replace(tmp, os.path.join(d, fname))  # 読んでいる途中の相手に、書きかけを見せない
+            ignore = home and os.path.join(home, '.gitignore')
+            if ignore and not os.path.exists(ignore):  # 作業ツリーに足したフォルダを、git の変更に見せない
+                with open(ignore, 'w', encoding='utf-8', newline='\n') as f:
+                    f.write('*\n')
+            if same_text(dst, text):
+                os.utime(dst)
+            else:
+                with open(tmp, 'w', encoding='utf-8', newline='\n') as f:
+                    f.write(text)
+                os.replace(tmp, dst)  # 読んでいる途中の相手に、書きかけを見せない
         except OSError as e:
             err = e
             with contextlib.suppress(OSError):
                 os.remove(tmp)
             continue
-        old = time.time() - LIST_KEEP
+        old, found = time.time() - LIST_KEEP, []
         with contextlib.suppress(OSError):
-            for e in os.scandir(d):
-                if LIST_NAME.search(e.name) and e.stat().st_mtime < old:
-                    with contextlib.suppress(OSError):
-                        os.remove(e.path)
-        return os.path.join(d, fname), None
+            found = sorted(((e.stat().st_mtime, e.path) for e in os.scandir(d) if LIST_NAME.search(e.name)), reverse=True)
+        for i, (mtime, p) in enumerate(found):  # 古いものと、数の上限を超えた分(新しい順に LIST_MAX 個を残す)を消す
+            if (mtime < old or i >= LIST_MAX) and p != dst:
+                with contextlib.suppress(OSError):
+                    os.remove(p)
+        return dst, None
     return None, err
 
 
@@ -334,8 +353,11 @@ def run_ltq(cfg, args, start=None):
         where, err = write_list(paths, root, args, all_text) if all_code == 0 else (None, 'refs --all failed')
         cfg.last_list = where
         if where:
+            # 一時フォルダに書いたとき(作業ツリーに書けなかった)は、エージェントが読めないことがあるので、別の手を添える
+            far = ltq.tree_place(os.path.dirname(where), root) == 'out'
             listing = (f'; the rest are only counted. Every line, one per line: "{where}" (read it before a rename or a'
-                       ' signature change)')
+                       ' signature change' + ('; it is outside the workspace: if you cannot read it, pass path to list'
+                                              ' one folder at a time' if far else '') + ')')
         else:
             listing = f'; the rest are only counted (the complete list could not be written: {err}; pass path to list a folder)'
 

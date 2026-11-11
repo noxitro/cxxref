@@ -20,8 +20,9 @@ WORD = re.compile(rb'[A-Za-z0-9_]+')
 IDENT = re.compile(r'[A-Za-z0-9_]+')
 K = 3  # 1 つの単語で立てるビットの数
 BITS_PER_WORD = 8  # 単語 1 つあたりのビット数の目安(K=3 で外れは 3% ほど)
-ALWAYS = -1  # 絞らないファイル(UTF-16・読めない)の印
-MAGIC = b'cxxref-words 3\n'  # 作り方を変えたら上げる(古い一覧を読まない)
+ALWAYS = -1  # 絞らないファイル(UTF-16 のソース・読めない・単語の種類が多すぎる)の印
+MAX_WORDS = 1000000  # C/C++ 以外のファイルで、単語の種類がこれを超えたら絞らない(集合を貯め続けない。フィルタも 1 MB を超える)
+MAGIC = b'cxxref-words 4\n'  # 作り方を変えたら上げる(古い一覧を読まない)
 
 
 def _positions(word, m):
@@ -49,22 +50,23 @@ def bloom_of_words(words):
 
 def _work(args):
     """別のプロセスで動く。[(相対パス, 絶対パス)] の各ファイルの (相対パス, ビット数, フィルタ)。
-    other が真なら、C/C++ 以外のファイルとして読む(ltq.other_chunks: バイナリは最初の NUL より前だけ、大きなファイルは分けて)。"""
+    other が真なら、C/C++ 以外のファイルとして読む(ltq.other_chunks: バイナリは最初の NUL より前だけ、大きなファイルは分けて、
+    UTF-16 は UTF-8 に直して)。"""
     items, codec, other = args
     import ltq  # 子のプロセスでは、親の sys.path が引き継がれる
     out = []
     for rel, fp in items:
         if other:
-            words, utf16 = set(), False
+            words, always = set(), False
             try:
                 for _, data in ltq.other_chunks(fp):
-                    if data[:2] in (b'\xff\xfe', b'\xfe\xff'):
-                        utf16 = True
-                        break
                     words.update(WORD.findall(ltq.to_utf8(data, codec)))
+                    if len(words) > MAX_WORDS:  # 大きなデータの書き出しなど。残りを読まずに、毎回探すファイルにする
+                        always = True
+                        break
             except OSError:
-                utf16 = True  # 読めない。絞らない
-            out.append((rel, ALWAYS, 0) if utf16 else (rel,) + bloom_of_words(words))
+                always = True  # 読めない。絞らない
+            out.append((rel, ALWAYS, 0) if always else (rel,) + bloom_of_words(words))
             continue
         try:
             with open(fp, 'rb') as f:
