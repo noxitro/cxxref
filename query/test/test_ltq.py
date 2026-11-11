@@ -400,7 +400,7 @@ class LtqTest(unittest.TestCase):
         out = self.ltq('refs', 'ns::Run', '--compact', '--compact')
         self.assertIn('lines that spell ns::Run are listed in full', out)
         self.assertRegex(out, r'inside inactive #if/#ifdef branches -> not compiled in the indexed configuration[^\n]*: 2\n'
-                              r'    \(no index\.tsv\.alt\.tsv[^\n]*\n'
+                              r'    \(index\.tsv\.alt\.tsv is missing[^\n]*\n'
                               r'    src/q\.cpp:3  \[#if 0\]  \| ns::Run\(\);\n    src/  1 matches in 1 files\n')
         self.assertNotIn('src/q.cpp:4', out)
         self.assertIn('ask again with --path <folder>', out)
@@ -571,12 +571,55 @@ class LtqTest(unittest.TestCase):
         # .alt.tsv が無い索引(古い索引、-NoAlt)では、無効な #if の中は解析されていないと知らせる
         self.index('index', self.COMMON, [self.COMMENT, self.INACTIVE])
         out = self.ltq('refs', 'Run')
-        self.assertIn('(no index.tsv.alt.tsv next to the index, so these branches were not parsed;', out)
+        self.assertIn('(index.tsv.alt.tsv is missing or older than the index, so these branches were not parsed;', out)
         self.assertIn('    src/a.cpp:5  [#if defined(DEBUG_ONLY)]', out)
         self.index('index', self.COMMON, [self.COMMENT, self.INACTIVE], alt=[])  # 差分パスは走ったが、この行は解析できなかった
         out = self.ltq('refs', 'Run')
         self.assertIn('inside inactive #if/#ifdef branches', out)
         self.assertNotIn('alt.tsv', out)
+
+    def test_alt_file_older_than_the_index_is_not_used(self):
+        # 本体を作り直した後(自動更新・-Update・差分パスの失敗)に残った古い差分は、行番号が合わないので使わない。
+        # 無効な行は文字列の一致として出る
+        self.index('index', self.COMMON, [self.COMMENT, self.INACTIVE], alt=[self.ALT_ROW])
+        alt = os.path.join(self.root, '.index', 'index.tsv.alt.tsv')
+        os.utime(alt, (self.t0 - 100, self.t0 - 100))
+        out = self.ltq('refs', 'Run')
+        self.assertNotIn('[inactive: #if', out)
+        self.assertIn('== calls (resolved by clang): 1\n', out)
+        self.assertIn('(index.tsv.alt.tsv is missing or older than the index', out)
+        self.assertIn('    src/a.cpp:5  [#if defined(DEBUG_ONLY)]  | Run();', out)
+
+    def test_utf16_sources_are_searched(self):
+        # UTF-16(BOM 付き)のソースも、UTF-8 に直してから名前を探す(rg は BOM 付き UTF-16 を直して探す)
+        self.index('index', self.COMMON, [self.COMMENT])
+        with open(os.path.join(self.root, 'src', 'u16.cpp'), 'wb') as f:
+            f.write('void X() {\n  Run();\n}\n'.encode('utf-16'))
+        out = self.ltq('refs', 'Run')
+        self.assertIn('src/u16.cpp:2', out)
+
+    def test_absolute_path_is_taken_relative_to_the_root(self):
+        # MCP のクライアントは root を絶対パスで渡すので、path も絶対で来る。ルートの下なら相対にして使う
+        self.index('index', self.COMMON, [self.COMMENT])
+        out = self.ltq('refs', 'Run', '--path', os.path.join(self.root, 'src'))
+        self.assertIn('call   src/a.cpp:3', out)
+
+    def test_one_folder_is_counted_by_file(self):
+        # 1 つのフォルダに収まるときは、ファイルごとの件数にする(--path でそのフォルダを渡しても、同じ件数に戻らない)
+        self.assertEqual(ltq.top_dirs(['t/a.cpp', 't/a.cpp', 't/b.cpp'], 5), ['t/a.cpp  2 matches', 't/b.cpp  1 matches'])
+        self.assertEqual(ltq.top_dirs(['t/a.cpp', 't/b.cpp', 't/c.cpp'], 1),
+                         ['t/a.cpp  1 matches', '... 2 more files (2 matches): b.cpp 1, c.cpp 1'])
+        self.assertEqual(ltq.top_dirs(['t/a.cpp', 't/a.cpp'], 5), ['t/  2 matches in 1 files'])  # 1 ファイルならフォルダのまま
+
+    def test_compact_keeps_the_folders_of_lines_that_resolve_elsewhere(self):
+        # 短い形で「別の記号らしい」行を件数にまとめても、どのフォルダにあるかは残す(rg なら出る行)
+        os.makedirs(os.path.join(self.root, 'other'))
+        self.write('other/x.cpp', 'void G() {\n' + '  g->Run();\n' * 12 + '}\n', self.t0 - 10)
+        self.index('index', [('Mine::Run', 'decl', '', 'src/a.cpp:1:6', 'void Run();'),
+                             ('Other::Run', 'call', 'H', 'src/a.cpp:9:6', 'g->Run();')], [self.COMMENT])
+        out = self.ltq('refs', 'Mine::Run', '--compact', '--compact')
+        self.assertIn('look like calls to other symbols', out)
+        self.assertIn('other/  12 matches in 1 files', out)
 
     def test_alt_row_does_not_duplicate_an_indexed_row(self):
         # 同じ位置が本体の索引にもあれば、本体の行だけにする(索引の後で差分だけが古くなっても、二重にしない)

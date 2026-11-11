@@ -374,6 +374,18 @@ def row_key(raw):
     return loc[0], int(loc[1]), int(loc[2]), raw
 
 
+def replace(src, dst, tries=20):
+    """os.replace。Windows では、問い合わせ(MCP サーバー)が dst を開いている間は置き換えられないので、少し待って繰り返す。"""
+    for i in range(tries):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if i == tries - 1:
+                raise
+            time.sleep(0.25)
+
+
 def read_alt(path):
     """前の差分を {path: [索引の行]} で。"""
     res = collections.defaultdict(list)
@@ -422,7 +434,7 @@ def run(a):
     tool = (ALT_VERSION, st.st_size, st.st_mtime_ns, a.passes, known is not None)
     alt, state_path = index + '.alt.tsv', index + '.alt.json'
     old_rows, old_units = {}, {}
-    if not a.force:
+    if not a.force or a.only:  # --only では、指定外のファイルの前の結果を残すので、--force でも読む
         try:
             with open(state_path, encoding='utf-8') as f:
                 old = json.load(f)
@@ -472,7 +484,7 @@ def run(a):
         sig = sha(tool, rel, hashlib.sha1(data).digest(), rs, tu, json.dumps(entry, sort_keys=True), dep_sig(tu),
                   sorted(known & set(re.findall(r'[A-Za-z_]\w*', data.decode('latin-1')))) if known else None)
         prev = old_units.get(rel)
-        if prev and prev.get('sig') == sig:
+        if prev and prev.get('sig') == sig and not a.force:
             units[rel] = (old_rows.get(rel, []), prev)
         else:
             todo.append((rel, tu, entry, data, sig, rs, groups))
@@ -506,12 +518,17 @@ def run(a):
                           + (f', -D {" ".join(s["defines"])}' if s['defines'] else ''), flush=True)
     finally:
         shutil.rmtree(work, ignore_errors=True)
+    if a.only:  # 指定外のファイルは解析していない。前の結果を残す(書き直すと消える)
+        only = set(a.only)
+        for rel, s in old_units.items():
+            if rel not in only and rel not in units:
+                units[rel] = (old_rows.get(rel, []), s)
     rows = sorted((r for rs, _ in units.values() for r in rs), key=row_key)
     tmp = alt + '.tmp'
     with open(tmp, 'wb') as f:
         for r in rows:
             f.write(r + b'\n')
-    os.replace(tmp, alt)
+    replace(tmp, alt)
     tot = collections.Counter()
     for _, s in units.values():
         for k in ('target', 'covered', 'rows', 'runs', 'errors', 'failed'):
@@ -522,7 +539,7 @@ def run(a):
     tmp = state_path + '.tmp'
     with open(tmp, 'w', encoding='utf-8') as f:
         json.dump(state, f, ensure_ascii=False, indent=1)
-    os.replace(tmp, state_path)
+    replace(tmp, state_path)
     print(f'alt pass: {len(units)} files with inactive #if branches ({len(todo)} analyzed, {len(units) - len(todo)} unchanged'
           + (f', {no_tu} without a TU' if no_tu else '') + f'); {tot["covered"]}/{tot["target"]} inactive lines parsed, '
           f'{len(rows)} rows -> {alt} ({time.time() - t0:.0f} s)')

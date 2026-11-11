@@ -245,6 +245,19 @@ class AltPassTest(unittest.TestCase):
         self.assertEqual(len(self.rows()), 5)
         self.assertIn('(2 analyzed, 0 unchanged)', self.alt('--force'))
 
+    def test_only_keeps_the_rows_of_other_files(self):
+        # --only で一部のファイルだけ解析し直しても、ほかのファイルの前の行は消さない
+        self.write('h.h', 'void Run();\n#ifdef NEVER\ninline void Off() { Run(); }\n#endif\n')
+        self.write('g.h', 'void Run();\n#ifdef NEVER\ninline void Off2() { Run(); }\n#endif\n')
+        self.write('a.cpp', '#include "h.h"\n#include "g.h"\n', [])
+        self.build()
+        self.alt()
+        first = self.rows()
+        self.assertEqual(len(first), 4)
+        self.alt('--only', 'h.h', '--force')
+        self.assertEqual(self.rows(), first)
+        self.assertEqual(sorted(self.state()['units']), ['g.h', 'h.h'])
+
     def test_every_branch_gets_parsed(self):
         self.write('a.cpp', 'void A(); void B(); void C(); void D();\nvoid Main() {\n#if defined(P1)\n  A();\n#elif defined(P2)\n'
                             '  B();\n#elif defined(P3)\n  C();\n#else\n  D();\n#endif\n}\n', [])
