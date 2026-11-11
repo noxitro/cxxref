@@ -193,6 +193,31 @@ class WordFilterTest(unittest.TestCase):
         wf.update({'a.cpp': (p, os.stat(p).st_mtime)}, None)
         self.assertTrue(os.path.exists(os.path.join(self.dir, 'w.cache')))
 
+    def test_other_files_are_read_like_the_text_search(self):
+        # C/C++ 以外のファイルのフィルタは、テキスト検索(ltq.other_chunks)と同じ部分を読む:
+        # バイナリは最初の NUL より前だけ、大きなファイルは分けて全部
+        mixed = self.write('mixed.bin', b'Before_word text\n\0\1 After_word\n')
+        blob = self.write('blob.dat', b'\0\1 Blob_word')
+        big = self.write('big.txt', b'pad\n' * 5000 + b'Late_word\n')
+        u16 = self.write('u16.txt', 'Wide_word'.encode('utf-16'))
+        files = {os.path.basename(p): (p, os.stat(p).st_mtime) for p in (mixed, blob, big, u16)}
+        wf = wordfilter.WordFilter(other=True)
+        chunk, ltq.READ_CHUNK = ltq.READ_CHUNK, 4096
+        try:
+            wf.update(files, None)
+        finally:
+            ltq.READ_CHUNK = chunk
+
+        def may(word, name):
+            return wf.may_contain(word)(name, files[name][1])
+
+        self.assertTrue(may('Before_word', 'mixed.bin'))
+        self.assertFalse(may('After_word', 'mixed.bin'))
+        self.assertFalse(may('Blob_word', 'blob.dat'))
+        self.assertTrue(may('Late_word', 'big.txt'))
+        self.assertFalse(may('Missing_word', 'big.txt'))
+        self.assertTrue(may('Anything', 'u16.txt'))  # UTF-16 は絞らない
+
     def test_words_are_taken_after_conversion(self):
         # Shift_JIS の「ソ」(0x83 0x5C)と「ア」(0x83 0x41)。2 バイト目の英字を単語に数えない
         p = self.write('sj.cpp', 'アB ok'.encode('cp932'))
@@ -269,13 +294,14 @@ class SourceTreeTest(unittest.TestCase):
         self.check()
         self.write('.hidden/x.cpp', 'h')  # . で始まるフォルダは数えない
         self.check()
-        # C/C++ 以外のファイル: 足す・書き換える・消す。バイナリの拡張子と空のファイルは数えない
+        # C/C++ 以外のファイル: 足す・書き換える・消す。空のファイルは数えない(拡張子では除かない。中身で見分ける)
         self.write('src/notes.md', 'Run')
         self.write('src/icon.png', 'x')
         self.write('src/empty.txt', '')
         self.check()
         self.assertIn('src/notes.md', self.tree.others())
-        self.assertNotIn('src/icon.png', self.tree.others())
+        self.assertIn('src/icon.png', self.tree.others())
+        self.assertNotIn('src/empty.txt', self.tree.others())
         self.write('src/empty.txt', 'now text')
         self.check()
         self.assertIn('src/empty.txt', self.tree.others())

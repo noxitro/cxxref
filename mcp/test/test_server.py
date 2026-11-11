@@ -118,6 +118,57 @@ class ServerTest(unittest.TestCase):
         self.assertLessEqual(len(text.encode('utf-8')), 400)
         self.assertTrue(text.startswith('index: .index/index.tsv'))  # 先頭(索引の状態)は残す
         self.assertIn('output cut at 400 bytes', text)  # 短い形の中身は ltq のテストで確かめる
+        # 切っても、名前を含む行を全部並べた一覧のファイルの場所は残る
+        path = re.search(r'Every line, one per line: "([^"]+)"', text).group(1)
+        with open(path, encoding='utf-8') as f:
+            self.assertIn('== coverage: all 3 lines that contain the word "Run" are listed above', f.read())
+
+    def test_complete_list_is_written_when_lines_are_only_counted(self):
+        # 結果に 1 行ずつ並べきれないとき(上限に収めるために件数にまとめたとき)は、名前を含む行を全部並べた一覧を
+        # 索引の隣に書き、結果の最後の行でその場所を知らせる(名前を変えるときに、直す先を漏らさない)
+        refs = os.path.join(self.root, '.index', 'refs')
+        text = self.refs_text()
+        self.assertTrue(text.endswith('== coverage: all 3 lines that contain the word "Run" are listed above, one per line\n'))
+        self.assertFalse(os.path.exists(refs))  # 全部並んでいれば書かない
+        self.many_comments()
+        self.restart(['--root', self.root, '--max-output-bytes', '1400'])
+        text = self.refs_text()
+        self.assertLessEqual(len(text.encode('utf-8')), 1400)
+        m = re.search(r'\n== coverage: 2 of 42 lines that contain the word "Run" are listed above, one per line; the rest are'
+                      r' only counted\. Every line, one per line: "([^"]+)" \(read it before a rename or a signature'
+                      r' change\)\n$', text)
+        self.assertTrue(m, text[-400:])
+        self.assertEqual(os.path.dirname(m.group(1)), refs)
+        with open(m.group(1), encoding='utf-8') as f:
+            listing = f.read()
+        for n in range(4, 44):
+            self.assertIn(f'    src/a.cpp:{n}  | // Run\n', listing)
+        self.assertIn('== coverage: all 42 lines that contain the word "Run" are listed above, one per line\n', listing)
+        # 同じ問い合わせは同じファイルを書き換える(limit が違っても同じ一覧)。古い一覧は消す
+        old = os.path.join(refs, 'Old-0123abcd.txt')
+        with open(old, 'w') as f:
+            f.write('x')
+        os.utime(old, (1000, 1000))
+        keep = os.path.join(refs, 'notes.txt')  # 一覧の名前でないファイルには触らない
+        with open(keep, 'w') as f:
+            f.write('x')
+        os.utime(keep, (1000, 1000))
+        r = self.send('tools/call', {'name': 'refs', 'arguments': {'name': 'Run', 'limit': 5}})['result']
+        self.assertIn(f'"{m.group(1)}"', r['content'][0]['text'])
+        self.assertEqual(sorted(os.listdir(refs)), sorted([os.path.basename(m.group(1)), 'notes.txt']))
+        # path を付けると、その先だけの一覧(別のファイル)
+        r = self.send('tools/call', {'name': 'refs', 'arguments': {'name': 'Run', 'path': ['src']}})['result']
+        other = re.search(r'Every line, one per line: "([^"]+)"', r['content'][0]['text']).group(1)
+        self.assertNotEqual(other, m.group(1))
+        # 索引が作業ツリーの検索に掛かる場所(ルートの下の、隠しでないフォルダ)にあるときは、一時フォルダに書く
+        # (一覧が次のテキスト検索に当たらないように)
+        out = os.path.join(self.root, 'out')
+        shutil.copytree(os.path.join(self.root, '.index'), out, ignore=shutil.ignore_patterns('refs'))
+        self.restart(['--root', self.root, '--index', os.path.join(out, 'index.tsv'), '--max-output-bytes', '1400'])
+        where = re.search(r'Every line, one per line: "([^"]+)"', self.refs_text()).group(1)
+        self.assertEqual(os.path.dirname(where), os.path.join(tempfile.gettempdir(), 'cxxref-refs'))
+        self.assertFalse(os.path.exists(os.path.join(out, 'refs')))
+        os.remove(where)
 
     def test_plugin_server_finds_the_workspace_from_the_copilot_session(self):
         # プラグインとして起動されると、作業フォルダはプラグインの場所(PLUGIN_ROOT)になる。Copilot CLI のセッションの
@@ -216,9 +267,9 @@ class ServerTest(unittest.TestCase):
     def test_compact_form_that_fits_is_not_cut(self):
         # 全文が上限を超え、短い形なら収まるときは、短い形をそのまま返す(切らない)
         self.many_comments()
-        self.restart(['--root', self.root, '--max-output-bytes', '1000'])
+        self.restart(['--root', self.root, '--max-output-bytes', '1400'])
         text = self.refs_text()
-        self.assertLessEqual(len(text.encode('utf-8')), 1000)
+        self.assertLessEqual(len(text.encode('utf-8')), 1400)
         self.assertIn('(compact output:', text)
         self.assertIn('call   src/a.cpp:3  [in Main]  | Run();', text)
         self.assertIn('inside comments -> not code; do not report these: 40', text)

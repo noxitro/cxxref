@@ -14,9 +14,11 @@
 folded・area・hidden は、ltq がその行に付けた分類ごとにも数える(コードでありうる分類: index・inactive・dropped・macro・unparsed・
 other・nonsrc、コードではない分類: comment・local・string・directive)。
 
-出力の形は 4 つ: full(全文)、c1(--compact)、c2(--compact を 2 つ)は 1 節の行数の上限を外して測る(形そのものの違い)。
+出力の形は 6 つ: full(全文)、c1(--compact)、c2(--compact を 2 つ)は 1 節の行数の上限を外して測る(形そのものの違い)。
 mcp は、MCP サーバーが実際に返す文面(mcp/server.py の run_ltq。既定の上限 200 行のまま、結果が 18,000 バイトを超えると
 full → c1 → c2 → c2 で 1 節 60・25・10・5・2 行、と短くし、それでも超えると末尾を切る)。エージェントが受け取るのはこの形。
+all は、漏れのない一覧(ltq refs --all。件数にまとめず、別の記号に解決された行も 1 行ずつ出す)。mcp+file は、MCP サーバーの
+文面と、その最後の行が指すファイル(サーバーが書いた all の一覧)を合わせたもの。この 2 つは、rg の行が全部 listed になるはず。
 
 --sample N は、差分の索引(<索引>.alt.tsv。無効な #if の中に出てくる名前)から N 個を、名前のハッシュの順で選ぶ
 (乱数を使わないので、同じ索引なら同じ名前になる)。--under を付けると、そのフォルダの行に出てくる名前だけ。
@@ -128,8 +130,6 @@ class Shown:
 
     def where(self, p, ln, group):
         """(p, ln) の行(分類は group)が、この出力のどこに出ているか。"""
-        if (p, ln) in self.locs:
-            return 'listed'
         d = p.rsplit('/', 1)[0] if '/' in p else '.'
         if (d, group) in self.dirs or (p, group) in self.files:
             return 'folded'
@@ -191,7 +191,8 @@ def main():
     cfg = server.Config(root, index, None)  # 自動更新なし。上限は既定(server.MAX_BYTES)
     idx = cfg.open_index([index], root)
     names = list(dict.fromkeys(a.names + sample(index, a.sample, a.under)))
-    forms = [m for m, _ in MODES] + ['mcp']
+    forms = [m for m, _ in MODES] + ['mcp', 'all', 'mcp+file']
+    files, file_bytes = 0, []
     total = {m: dict.fromkeys(CATS, 0) for m in forms}
     by_group = {m: collections.Counter() for m in forms}  # (分け方, 分類) -> 行数
     shape = collections.Counter()
@@ -225,6 +226,14 @@ def main():
         shape[form] += 1
         shown = {m: ltq_shown(idx, root, index, name, extra + ['--limit', '1000000']) for m, extra in MODES}
         shown['mcp'] = Shown(text)
+        shown['all'] = ltq_shown(idx, root, index, name, ['--all'])
+        listing = ''
+        if cfg.last_list:  # サーバーが書いた、漏れのない一覧
+            with open(cfg.last_list, encoding='utf-8') as f:
+                listing = f.read()
+            files += 1
+            file_bytes.append(len(listing.encode('utf-8')))
+        shown['mcp+file'] = Shown(text + '\n' + listing)
         full = shown['full']
         per = {m: dict.fromkeys(CATS, 0) for m in forms}
         for p, ln in sorted(want):
@@ -232,7 +241,9 @@ def main():
             # 全文での分類。全文でも 1 行ずつは出ない行(文字列・指令が 10 行を超えるとき)は、フォルダの件数の分類
             g = full.locs.get((p, ln)) or next((k for f, k in sorted(full.dirs) if f == d), None)
             for m in forms:
-                if g is not None:
+                if (p, ln) in shown[m].locs:
+                    c = 'listed'
+                elif g is not None:
                     c = shown[m].where(p, ln, g)
                 elif (p, ln) in known:
                     c = 'other'
@@ -262,11 +273,16 @@ def main():
 
     for m in forms:
         t = total[m]
-        label = 'mcp (what the MCP server returns)' if m == 'mcp' else f'{m} (no --limit)'
+        label = {'mcp': 'mcp (what the MCP server returns)', 'all': 'all (refs --all)',
+                 'mcp+file': 'mcp+file (the MCP text and the complete list it points to)'}.get(m, f'{m} (no --limit)')
         print(f'  {label}: listed {t["listed"]}, folded {t["folded"]}{groups(m, "folded")}, '
               f'area {t["area"]}{groups(m, "area")}, hidden {t["hidden"]}{groups(m, "hidden")}, '
               f'other {t["other"]}, missing {t["missing"]}')
     print('  form returned by the MCP server: ' + ', '.join(f'{k} {v}' for k, v in sorted(shape.items())))
+    if file_bytes:
+        b = sorted(file_bytes)
+        print(f'  complete lists written by the MCP server: {files} of {len(names)} names; '
+              f'size median {b[len(b) // 2]} bytes, max {b[-1]} bytes')
     if secs:
         s = sorted(secs)
         print(f'  MCP refs time per name: median {s[len(s) // 2]:.1f} s, max {s[-1]:.1f} s')
