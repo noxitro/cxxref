@@ -295,6 +295,11 @@ class ServerTest(unittest.TestCase):
         self.assertNotIn('error', r)
         self.assertTrue(r['result']['isError'])
         self.assertIn('needs "name"', r['result']['content'][0]['text'])
+        # 名前の最後の部分が空のときも、すぐに誤りを返す(探す単語が無い。前は検索が終わらなかった)
+        for name in ('Foo::', '::'):
+            r = self.send('tools/call', {'name': 'refs', 'arguments': {'name': name}})
+            self.assertTrue(r['result']['isError'])
+            self.assertIn('needs a name after the last "::"', r['result']['content'][0]['text'])
         self.assertIn('error', self.send('tools/call', {'name': 'nope', 'arguments': {}}))  # 本当に未知のツール
 
     def test_root_argument(self):
@@ -462,6 +467,33 @@ class ReuseTest(unittest.TestCase):
         self.assertIn('/cxxref-index', first)
         self.assertNotIn('is older than this plugin', second)
 
+    def test_complete_list_has_no_server_note(self):
+        # 一覧のファイルには、サーバーの注記(最初の 1 回だけ付くものがある)を入れない。同じ問い合わせなら中身が同じで、
+        # ファイルを書き直さない
+        from unittest import mock
+        with open(self.src, 'w', encoding='utf-8', newline='\n') as f:
+            f.write('void Run();\nvoid Main() {\n  Run();\n' + '  // Run\n' * 40 + '}\n')
+        os.utime(self.src, (1000, 1000))
+        with open(self.base + '.skip.tsv', 'w', encoding='utf-8', newline='\n') as f:
+            f.write('path\tkind\tbegin\tend\n' + ''.join(f'src/a.cpp\tcomment\t{4 + i}:3\t{4 + i}:9\n' for i in range(40)))
+        os.utime(self.base + '.skip.tsv', (2000, 2000))
+        self.cfg.close()
+        self.cfg = self.server.Config(self.root, None, None, max_bytes=1600)
+        with mock.patch.object(self.server.autoupdate, 'stale_ltidx', return_value=('0.5.1', '0.6.0')):
+            first = self.refs()
+            path = self.cfg.last_list
+            ino = os.stat(path).st_ino
+            second = self.refs()
+        self.assertIn('is older than this plugin', first)
+        self.assertNotIn('is older than this plugin', second)
+        self.assertEqual(self.cfg.last_list, path)
+        with open(path, encoding='utf-8') as f:
+            listing = f.read()
+        self.assertTrue(listing.startswith('index: '), listing[:200])
+        self.assertNotIn('is older than this plugin', listing)
+        self.assertIn('== coverage: all 42 lines', listing)
+        self.assertEqual(os.stat(path).st_ino, ino)
+
     def test_index_is_reused_while_unchanged(self):
         self.refs()
         first = self.cfg.opened[2]
@@ -498,7 +530,8 @@ class ReuseTest(unittest.TestCase):
 
     def test_large_other_files_are_searched_in_worker_processes(self):
         """C/C++ 以外のファイルで読む量が多いときは、プロセスを分けて探す。結果はスレッドで探すときと一字一句同じ。
-        プロセスを起こせないときは、スレッドで読み直す。"""
+        プロセスを起こせない・子が落ちたときは、スレッドで読み直す。子の中の検索が上げた例外は、読み直さずにそのまま上げる。"""
+        from concurrent.futures.process import BrokenProcessPool
         for i in range(12):
             with open(os.path.join(self.root, 'src', f'n{i}.txt'), 'w', encoding='utf-8', newline='\n') as f:
                 f.write(f'line\nRun here {i}\nRunner\n' * 3)
@@ -515,6 +548,23 @@ class ReuseTest(unittest.TestCase):
             made.append(None)
             raise OSError('no processes')
 
+        class Failing:  # map が例外を上げる(子が落ちた・子の中の検索が例外を上げた)
+            def __init__(self, error):
+                self.error = error
+
+            def __call__(self, *a, **k):
+                made.append(None)
+                return self
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def map(self, fn, it):
+                raise self.error
+
         size, ltq.PROC_BYTES = ltq.PROC_BYTES, 1
         try:
             ltq.ProcessPoolExecutor = pool
@@ -526,6 +576,16 @@ class ReuseTest(unittest.TestCase):
                 self.assertEqual(self.refs(), want)
             self.assertEqual(len(made), 2)
             self.assertIn('worker processes unavailable', err.getvalue())
+            ltq.ProcessPoolExecutor = Failing(BrokenProcessPool('a child died'))
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(self.refs(), want)
+            self.assertIn('worker processes unavailable (BrokenProcessPool', err.getvalue())
+            ltq.ProcessPoolExecutor = Failing(MemoryError('in the child'))
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err), self.assertRaises(MemoryError):
+                self.refs()
+            self.assertNotIn('worker processes unavailable', err.getvalue())
         finally:
             ltq.PROC_BYTES, ltq.ProcessPoolExecutor = size, real
 

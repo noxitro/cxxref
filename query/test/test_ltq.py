@@ -520,6 +520,111 @@ class LtqTest(unittest.TestCase):
                 data = rnd.choice((b'', sb)) + data + rnd.choice((b'', sb))
                 self.assertEqual(list(ltq.word_starts(data, sb)), [m.start() for m in pat.finditer(data)], (sb, data))
 
+    def test_name_without_a_word_is_refused(self):
+        # 名前の最後の部分が空("Foo::"・"::"・"")だと、探す単語が無い。空の名前はどの位置にも一致するので、
+        # 断らないと、単語の位置を拾う部品が終わらない
+        self.assertEqual(list(ltq.word_starts(b' a b', b'')), [])
+        self.assertEqual(list(ltq.word_starts(b'', b'')), [])
+        self.index('index', self.COMMON, [self.COMMENT])
+        for name in ('Foo::', '::', ''):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = ltq.main(['--root', self.root, 'refs', name])
+            self.assertEqual(code, 2, name)
+            self.assertEqual(out.getvalue(), f'refs needs a name after the last "::" (got "{name}")\n')
+
+    def test_names_with_symbols_are_found_across_a_cut_in_a_long_line(self):
+        # 長い 1 行を途中で分けるとき、分け目は単語の途中でないだけなので、記号や空白を含む名前は分け目をまたぐ。
+        # どこで分かれても、名前を含む行は正規表現で全体を探したときと同じになる
+        import random
+        from unittest import mock
+        rnd = random.Random(11)
+        p = os.path.join(self.root, 'long.txt')
+        with mock.patch.multiple(ltq, OTHER_HEAD=32, READ_CHUNK=16, LONG_LINE=32):
+            for sb in (b'operator==', b'~Foo', b'operator new', b'a.b', b'Foo'):
+                pat = re.compile(rb'(?<![A-Za-z0-9_])' + re.escape(sb) + rb'(?![A-Za-z0-9_])')
+                for _ in range(150):
+                    data = b''.join(rnd.choice((sb, sb[:-1], b'x', b'_', b' ', b'=', b'~', b'.', b'ab ', b'= ', b'\n'))
+                                    if rnd.random() < 0.3 else bytes([rnd.choice(b'ab1 =~.')])
+                                    for _ in range(rnd.randrange(1, 120)))
+                    with open(p, 'wb') as f:
+                        f.write(data)
+                    out, skipped = ltq.other_scan(([('long.txt', p)], sb, None))
+                    want = [i for i, line in enumerate(data.split(b'\n'), 1) if pat.search(line)]
+                    self.assertEqual([ln for _, ln, _ in out], want, (sb, data))
+                    self.assertEqual(skipped, [])
+
+    def test_file_that_grew_after_its_size_was_read_is_read_in_chunks(self):
+        # 大きさを見た後に伸びたファイル(書いている途中のログ)も最後まで読む。伸びた分を 1 バイトずつは読まない
+        from unittest import mock
+        p = os.path.join(self.root, 'growing.log')
+        data = b'line\n' * 4000
+        with open(p, 'wb') as f:
+            f.write(data)
+        reads = []
+
+        class Counting:
+            def __init__(self, f):
+                self.f = f
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                self.f.close()
+
+            def fileno(self):
+                return self.f.fileno()
+
+            def read(self, n=-1):
+                reads.append(n)
+                return self.f.read(n)
+
+        class Stat:
+            st_size = ltq.OTHER_HEAD + 100  # 実際より小さい(見た後に伸びた)
+
+        with mock.patch.object(ltq, 'open', lambda fp, mode: Counting(open(fp, mode)), create=True), \
+                mock.patch.object(ltq.os, 'fstat', lambda fd: Stat):
+            got = list(ltq.other_chunks(p))
+        self.assertEqual(b''.join(d for _, d in got), data)
+        self.assertLess(len(reads), 8, reads)
+
+    def test_files_that_cannot_be_read_are_reported(self):
+        # 読めなかったファイル(ほかのプログラムが開いている・権限が無い)の中の行は、出せない。黙って「全部」と言わず、
+        # どのファイルが読めなかったかを書く。一覧を作った後に消えたファイルは、rg でも出ないので書かない
+        from unittest import mock
+        self.index('index', self.COMMON, [self.COMMENT])
+        self.write('src/b.cpp', 'void F() { Run(); }\n', self.t0 - 10)
+        self.write('src/gone.cpp', 'void G() { Run(); }\n', self.t0 - 10)
+        self.write('locked.txt', 'Run\n', self.t0 - 10)
+        self.write('notes.txt', 'Run\n', self.t0 - 10)
+        base = self.ltq('refs', 'Run')
+        self.assertNotIn('not searched', base)
+        self.assertTrue(base.endswith(SCOPE + '\n'))
+        n_base = int(re.search(r'== coverage: all (\d+) lines', base).group(1))
+
+        def fake(fp, *a, **k):
+            name = os.path.basename(fp)
+            if name in ('b.cpp', 'locked.txt'):
+                raise PermissionError(13, 'used by another process', fp)
+            if name == 'gone.cpp':
+                raise FileNotFoundError(2, 'No such file', fp)
+            return open(fp, *a, **k)
+
+        with mock.patch.object(ltq, 'open', fake, create=True):
+            out = self.ltq('refs', 'Run')
+            src = self.ltq('refs', 'Run', '--path', 'src')
+        self.assertIn('\n== not searched: 2 files could not be read (in use by another program, or no permission); lines in'
+                      ' them may be missing from the list and from the count below: locked.txt, src/b.cpp\n', out)
+        self.assertTrue(out.endswith(f'== coverage: all {n_base - 3} lines that contain the word "Run" are listed above, one per'
+                                     ' line (searched: the root, except folders that start with ".", 2 files that could not'
+                                     ' be read)\n'), out[-300:])
+        self.assertIn('notes.txt:1  | Run\n', out)
+        # --path で絞れば、その先の読めなかったファイルだけを書く
+        self.assertIn('\n== not searched: 1 file could not be read (', src)
+        self.assertIn('count below: src/b.cpp\n', src)
+        self.assertTrue(src.endswith(', 1 file that could not be read)\n'), src[-200:])
+
     def test_utf16_and_long_lines_are_read_in_parts(self):
         # UTF-16(BOM 付き)も分けて読み、UTF-8 に直して返す(全部を一度にメモリに載せない)
         p = os.path.join(self.root, 'wide.txt')
@@ -564,14 +669,21 @@ class LtqTest(unittest.TestCase):
         shutil.copytree(os.path.join(self.root, '.index'), out_dir)
         self.write('out/notes.txt', 'Run\n', self.t0 - 10)
         self.write('out/index.tsv.words.cache', 'Run\n', self.t0 - 10)
+        self.write('out/index.tsv.words.cache.1234.tmp', 'Run\n', self.t0 - 10)  # 写しを書いている途中のファイル
+        # 索引のパスで始まるだけの、索引でないファイルは探す
+        self.write('out/index.tsv.md', 'Run\n', self.t0 - 10)
+        self.write('out/index.tsvx.txt', 'Run\n', self.t0 - 10)
         out = self.ltq('--index', os.path.join(out_dir, 'index.tsv'), 'refs', 'Run')
-        self.assertIsNone(re.search(r'out/index\.tsv[\w.]*:\d', out))
-        self.assertIn('  out/notes.txt:1  | Run\n', out)
+        for p in ('index.tsv', 'index.tsv.skip.tsv', 'index.tsv.tu.tsv', 'index.tsv.words.cache',
+                  'index.tsv.words.cache.1234.tmp'):
+            self.assertNotIn(f'out/{p}:', out)
+        for p in ('notes.txt', 'index.tsv.md', 'index.tsvx.txt'):
+            self.assertIn(f'  out/{p}:1  | Run\n', out)
 
         def total(text):
             return int(re.search(r'== coverage: all (\d+) lines', text).group(1))
 
-        self.assertEqual(total(out), total(base) + 1)
+        self.assertEqual(total(out), total(base) + 3)
         self.assertTrue(out.endswith(' (searched: the root, except folders that start with ".", the index files)\n'))
         # --exclude で除いた所も、最後の行に書く
         out = self.ltq('refs', 'Run', '--exclude', 'out', '--exclude', 'gen')

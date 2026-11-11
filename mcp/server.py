@@ -332,14 +332,14 @@ def run_ltq(cfg, args, start=None):
                         f' (first run "{os.path.join(autoupdate.SCRIPTS, "get-ltidx.bat")}" once to get ltidx.exe)')
                      + '\n')
 
-    def run(extra):
+    def run(extra, noted=True):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             try:
                 code = ltq.main(base + args + extra, idx=idx)  # idx が None なら ltq が探して、無ければ誤りを書く
             except SystemExit as e:  # argparse の誤り
                 code = e.code or 2
-        return code, note + out.getvalue()
+        return code, (note if noted else '') + out.getvalue()
 
     def over(t):
         return bool(cfg.max_bytes) and len(t.encode('utf-8')) > cfg.max_bytes
@@ -349,7 +349,8 @@ def run_ltq(cfg, args, start=None):
     # 一覧をファイルに書き、結果の最後の行(coverage)の案内をその場所に置き換える
     cfg.last_list, listing = None, ''
     if args[0] == 'refs' and code == 0 and paths and (over(text) or text.endswith(ltq.ALL_HINT + '\n')):
-        all_code, all_text = run(['--all'])
+        # 一覧のファイルには、サーバーの注記を入れない(最初の 1 回だけ付く注記があり、同じ問い合わせでも中身が変わる)
+        all_code, all_text = run(['--all'], noted=False)
         where, err = write_list(paths, root, args, all_text) if all_code == 0 else (None, 'refs --all failed')
         cfg.last_list = where
         if where:
