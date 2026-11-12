@@ -1165,6 +1165,17 @@ def call_kind(r, line=None):
     return kinds.pop() if len(kinds) == 1 and len(src) < SRC_MAX else ''
 
 
+def unform(rows):
+    """同じ呼び出し(記号・呼び出し元・位置が同じ)が、形の印の有無だけ違う行で 2 つあれば、印のある方だけを残す。
+    ltidx を上げた後に -update で作り直した索引では、変わらなかった TU の行(印なし)と、作り直した TU の行(印つき)が
+    同じヘッダーの位置に並ぶ。"""
+    marked = {(r[0], r[2], r[3], r[4], r[5], r[1].replace(DYNAMIC, '').replace(STATIC, ''))
+              for r in rows if DYNAMIC in r[1] or STATIC in r[1]}
+    if not marked:
+        return rows
+    return [r for r in rows if DYNAMIC in r[1] or STATIC in r[1] or (r[0], r[2], r[3], r[4], r[5], r[1]) not in marked]
+
+
 def fmt(r, show_sym, idx, ranges=None, tag=''):
     sym, role, caller, path, line, col, src, note, _, alt = r
     role = role.replace(DYNAMIC, '').replace(STATIC, '')  # 呼び出しの形は tag で言う(前の ltidx の索引の行と同じに見せる)
@@ -1256,7 +1267,7 @@ def cmd_refs(a, idx):
             up.setdefault(r[0], set()).add(r[2])
             down.setdefault(r[2], set()).add(r[0])
             ov_at.setdefault(r[0], (r[3], r[4]))
-    rows = [r for r in rows if r[1] != OVERRIDE]
+    rows = unform([r for r in rows if r[1] != OVERRIDE])
     parts = [p for p in name.split('::') if p]
     # 名前を置き換えるマクロ(windows.h の GetMessage -> GetMessageW など)。マクロ short の展開の位置にある、別の名前の行を引く。
     # 修飾名で問われてその記号が無ければ、同じ修飾の置き換え後の名前の記号を答えにする(Mail::GetMessage -> Mail::GetMessageW)

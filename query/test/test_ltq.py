@@ -317,6 +317,7 @@ class LtqTest(unittest.TestCase):
             ('Mid::Tick', 'call-static', 'Leaf::Tick', 'src/k.cpp:3:75', lines[2]),  # 印があれば文面を見ない
             ('Leaf::Tick', 'call-dynamic', 'Leaf::Tick', 'src/k.cpp:3:84', lines[2]),
             ('Base::Tick', 'call-dynamic', 'Run', 'src/k.cpp:4:32', lines[3]),
+            ('Base::Tick', 'call', 'Run', 'src/k.cpp:4:32', lines[3]),  # -update で残った前の ltidx の行(同じ呼び出し)
             ('Base::Plain', 'call', 'Run', 'src/k.cpp:4:45', lines[3]),
             ('Base::Tick', 'call', 'Old', 'src/k.cpp:5:24', lines[4]),  # 前の ltidx の行(印が無い)
             ('Base::Tick', 'call', 'Mixed', 'src/k.cpp:6:44', lines[5]),  # 名前が 2 つある。ソースの行と列で決める
@@ -325,6 +326,7 @@ class LtqTest(unittest.TestCase):
         out = self.ltq('refs', 'Base::Tick')
         self.assertIn('  call   src/k.cpp:2  [in Mid::Tick]  [super]  | struct Mid', out)
         self.assertIn('  call   src/k.cpp:4  [in Run]  [dynamic]  | void Run', out)  # 役割の -dynamic は見せない
+        self.assertEqual(out.count('src/k.cpp:4  [in Run]'), 1)  # 印の有無だけ違う同じ呼び出しは 1 行
         self.assertIn('  call   src/k.cpp:5  [in Old]  [dynamic]  | void Old', out)
         self.assertIn('  call   src/k.cpp:6  [in Mixed]  [static]  | void Mixed', out)
         self.assertIn('  call   src/k.cpp:8  [in Macro]  | void Macro', out)

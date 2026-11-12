@@ -224,6 +224,36 @@ class LtidxTest(unittest.TestCase):
         self.assertTrue(self.has('Iface::Adv', 'call-static', 'a.cpp:3:48'), rows)
         self.assertTrue(self.has('Iface::Plain', 'call', 'a.cpp:3:62'), rows)
 
+    def test_overloaded_virtual_call_in_a_template_has_one_form(self):
+        # 依存した引数のオーバーロードの組(UnresolvedMemberExpr・UnresolvedLookupExpr)と、実体化した呼び出し(MemberExpr)が
+        # 同じ位置に出る。形を揃えて 1 行にする(揃わないと、同じ位置に call と call-dynamic の 2 行ができていた)
+        self.write('a.cpp', 'struct H { virtual bool Is(int); virtual bool Is(long); };\n'
+                            'template <class T> bool Check(H* h, T v) { return h->Is(v); }\n'
+                            'template <class T> struct C : H { bool Me(T v) { return Is(v) && H::Is(v); } };\n'
+                            'bool Use(H* h, C<int>& c) { return Check(h, 1) && c.Me(2); }\n', [])
+        rc, err = self.run_ltidx()
+        self.assertEqual(rc, 0, err)
+        calls = sorted((r[1], r[3]) for r in self.rows() if r[0] == 'H::Is' and r[1].startswith('call'))
+        self.assertEqual(calls, [('call-dynamic', 'a.cpp:2:54'), ('call-dynamic', 'a.cpp:3:57'),
+                                 ('call-static', 'a.cpp:3:69')], calls)
+        # 組に、同じ修飾名の仮想でない関数テンプレートが混じる(O3DE の IRttiHelper::IsTypeOf)。組の候補ごとに行が出るので、
+        # 組に仮想関数があれば、どの候補の行にも同じ形を付ける(付けないと、同じ位置に call と call-dynamic が並ぶ)
+        self.write('b.cpp', 'struct Id { int v; };\n'
+                            'template <class T> struct Info { static Id Uuid() { return {}; } };\n'
+                            'struct Helper {\n'
+                            '  virtual bool IsTypeOf(const Id& id) const = 0;\n'
+                            '  template <typename Q> bool IsTypeOf() { return IsTypeOf(Info<Q>::Uuid()); }\n'
+                            '};\n'
+                            'struct Foo {};\n'
+                            'bool Use(Helper* h) { return h->IsTypeOf<Foo>(); }\n'
+                            'template <class C> bool Check(Helper* r) { return r ? r->IsTypeOf(Info<C>::Uuid()) : false; }\n'
+                            'bool Use2(Helper* h) { return Check<Foo>(h); }\n', [])
+        rc, err = self.run_ltidx()
+        self.assertEqual(rc, 0, err)
+        calls = sorted((r[1], r[3]) for r in self.rows() if r[0] == 'Helper::IsTypeOf' and r[1].startswith('call'))
+        self.assertEqual(calls, [('call', 'b.cpp:8:33'),  # 関数テンプレートの呼び出し(仮想でない)
+                                 ('call-dynamic', 'b.cpp:5:50'), ('call-dynamic', 'b.cpp:9:58')], calls)
+
     def test_update(self):
         self.write('h.h', '#pragma once\nvoid Shared();\n')
         self.write('a.cpp', '#include "h.h"\nvoid A() { Shared(); }\n', [])

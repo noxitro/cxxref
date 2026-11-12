@@ -145,16 +145,29 @@ std::string roleOf(index::SymbolRoleSet R) {
 // 仮想関数の呼び出しの形(役割の接尾辞)。-dynamic は限定名の無い呼び出し(p->f()・r.f()・クラスの中の f()。実行時に、
 // 受け手の動的な型の上書きが動く)、-static は限定名つき(Base::f()・Super::f()。上書きを経ずに、その関数そのものを呼ぶ)。
 // 呼び出しの式で決める。clang の Dynamic の印は MemberExpr にしか付かず、テンプレートの中の依存した式
-// (impl_->Advance() など。CXXDependentScopeMemberExpr を推測で解決したもの)には付かない(コードベース A の gtest で 17 行)。
+// (impl_->Advance() など。CXXDependentScopeMemberExpr を推測で解決したもの、オーバーロードの組)には付かない
+// (コードベース A の gtest で 17 行)。
 // 式が分からない呼び出しは、Dynamic の印だけを見る(付いていなければ、接尾辞なし)
 std::string callForm(const Decl *D, index::SymbolRoleSet R, const Expr *E) {
   using index::SymbolRole;
   if (!(R & (unsigned)SymbolRole::Call)) return "";
-  const auto *MD = dyn_cast<CXXMethodDecl>(D);
-  if (!MD || !MD->isVirtual()) return "";
+  auto isVirtual = [](const Decl *X) {
+    if (const auto *FT = dyn_cast_or_null<FunctionTemplateDecl>(X)) X = FT->getTemplatedDecl();
+    const auto *M = dyn_cast_or_null<CXXMethodDecl>(X);
+    return M && M->isVirtual();
+  };
+  // UnresolvedMemberExpr・UnresolvedLookupExpr(テンプレートの中のオーバーロードの組)。clang は組の候補ごとに行を出し、
+  // 修飾名は候補で同じなので、組に仮想関数があれば、どの候補の行にも同じ形を付ける(実体化した側は MemberExpr で
+  // -dynamic になる。揃えないと、同じ位置に call と call-dynamic が並ぶ。O3DE の IRttiHelper::IsTypeOf など 588 か所)
+  if (const auto *OE = dyn_cast_or_null<OverloadExpr>(E)) {
+    bool Virt = false;
+    for (const NamedDecl *N : OE->decls()) Virt = Virt || isVirtual(N->getUnderlyingDecl());
+    if (!Virt) return "";
+    return OE->getQualifier() ? "-static" : "-dynamic";
+  }
+  if (!isVirtual(D)) return "";
   if (const auto *ME = dyn_cast_or_null<MemberExpr>(E)) return ME->hasQualifier() ? "-static" : "-dynamic";
   if (const auto *DE = dyn_cast_or_null<CXXDependentScopeMemberExpr>(E)) return DE->getQualifier() ? "-static" : "-dynamic";
-  if (const auto *UE = dyn_cast_or_null<UnresolvedMemberExpr>(E)) return UE->getQualifier() ? "-static" : "-dynamic";
   return (R & (unsigned)SymbolRole::Dynamic) ? "-dynamic" : "";
 }
 
