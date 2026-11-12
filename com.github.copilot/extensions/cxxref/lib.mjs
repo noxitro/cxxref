@@ -1,6 +1,6 @@
 // /cxxref-index・/cxxref-enable の、Copilot の SDK に依らない部分(テストできるように分けた。test は mcp/test/test_plugin.py が node --test で流す)。
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 // プラグインのルート(plugin.json と scripts\index-project.ps1 のあるフォルダ)。start から親へさかのぼる
@@ -70,6 +70,79 @@ export function indexRoot(start) {
 // ふつうの(level の無い)session.log は Markdown として表示され、\ の後ろが記号だと \ が消える
 // (E:\src\Proj\.index が E:\src\Proj.index と出る)。その \ を二重にする。error の表示はそのまま出るので通さない
 export const escapeMarkdown = (s) => s.replace(/\\(?=[!-/:-@[-`{-~])/g, "\\\\");
+
+// パスを比べられる形にする(\\?\ を外す・/ を \ に・末尾の \ を外す・小文字に)。在る場所なら、ジャンクション・
+// シンボリック リンク・8.3 の短い名前・subst のドライブも実体に揃える(無い場所は文字のまま比べる)。空なら ""
+export function pathKey(p) {
+  const plain = (s) => s.replace(/^\\\\\?\\UNC\\/i, "\\\\").replace(/^\\\\\?\\/, "").replace(/\//g, "\\");
+  let s = plain(String(p ?? ""));
+  if (!s) return "";
+  try { s = plain(realpathSync.native(s)); } catch { /* 無い場所 */ }
+  return s.replace(/\\+$/, "").toLowerCase();
+}
+
+// CLI の配布物のフォルダか(npm で入れたもの・%LOCALAPPDATA%\copilot\pkg のもの、どちらにも npm-loader.js がある。
+// アプリのフォルダには無い)
+const looksLikeCliDist = (dir) => existsSync(join(dir, "npm-loader.js"));
+
+// 拡張を動かしているのが Copilot CLI(画面に session.log を出す)か、GitHub Copilot app(info と warning を出さず、
+// error だけを出す)か。どちらも COPILOT_CLI_PATH などを渡すので、それでは分からない。違うのは拡張に渡す SDK の場所
+// (COPILOT_SDK_PATH)で、CLI は自分の配布物の中のものを、アプリは自分で持っているものを渡す。
+// 配布物の場所は、実際に読み込んだ場所(COPILOT_CLI_RESOLVED_DIST_DIR)と、読めと指定された場所(COPILOT_CLI_DIST_DIR。
+// 読めなければ無視される)のどちらかの下にあれば CLI とし、どちらも無いか外れたら、SDK の親が CLI の配布物に見えるかで決める。
+// SDK の場所が分からなければアプリとみなす(アプリを CLI と取り違えると何も出ない。逆ならダイアログが余分に出るだけ)
+export function runsUnderCli(env, isCliDist = looksLikeCliDist) {
+  const sdk = pathKey(env.COPILOT_SDK_PATH);
+  if (!sdk) return false;
+  const dists = [env.COPILOT_CLI_RESOLVED_DIST_DIR, env.COPILOT_CLI_DIST_DIR].map(pathKey).filter(Boolean);
+  return dists.some((d) => sdk === d || sdk.startsWith(`${d}\\`)) || isCliDist(dirname(sdk));
+}
+
+// 結果をダイアログにも出すか。CXXREF_DISPLAY が timeline なら出さない、dialog なら出す、
+// それ以外(auto)はアプリで動いているときだけ出す
+export function wantDialog(env, app = !runsUnderCli(env)) {
+  const mode = env.CXXREF_DISPLAY;
+  if (mode === "timeline") return false;
+  if (mode === "dialog") return true;
+  return app;
+}
+
+// 利用者に見せる文の出し方。getSession は拡張のセッション(joinSession の戻り値)を返す関数、env は process.env。
+// { tell(文, level), say(文), settled() } を返す。
+// - タイムライン(session.log): level の無い文は Markdown として表示されるので escapeMarkdown を通す。error はそのまま出る
+// - ダイアログ: wantDialog のとき、tell の文のうち error でないものをダイアログにも出す(error はアプリでも表示される)。
+//   say(進み具合)はダイアログにしない。ダイアログは 1 つずつ出す(前のを閉じてから次を出す)。待たないので、コマンドは先へ進む。
+//   アプリのダイアログも Markdown として表示されるので escapeMarkdown を通す(CLI のダイアログでの表示は確かめていないので、そのまま)
+// - アプリでダイアログを出せない(ホストが対応していない・出すのに失敗した)ときは、アプリでも表示される error で出し直す
+// settled() は、出しかけのダイアログがすべて閉じたら解決する(別のダイアログを出す前に待つ)
+export function makeNotifier(getSession, env) {
+  const app = !runsUnderCli(env);
+  const useDialog = wantDialog(env, app);
+  let queue = Promise.resolve();
+  const log = (message, level) =>
+    getSession().log(level ? message : escapeMarkdown(message), { ephemeral: true, ...(level ? { level } : {}) });
+  const show = async (message) => {
+    const session = getSession();
+    let why = "このホストはダイアログを出せません";
+    if (session.capabilities?.ui?.elicitation) {
+      try {
+        await session.ui.elicitation({ message: app ? escapeMarkdown(message) : message, requestedSchema: { type: "object", properties: {} } });
+        return;
+      } catch (err) {
+        why = `ダイアログを出せませんでした: ${err?.message ?? err}`;
+      }
+    }
+    if (app) await log(`${message}\n(${why})`, "error");
+  };
+  return {
+    say: (message) => log(message),
+    tell: (message, level) => {
+      if (useDialog && level !== "error") queue = queue.then(() => show(message)).catch(() => { });
+      return log(message, level);
+    },
+    settled: () => queue,
+  };
+}
 
 // git のリポジトリのルート(start の上で)。git が無い・リポジトリでなければ ""
 export function gitTop(start) {

@@ -21,7 +21,7 @@ import { closeSync, existsSync, mkdirSync, openSync, readFileSync, statSync } fr
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { enableRoot, escapeMarkdown, findLtidx, lastCwd, parseEnableArgs, parseIndexArgs, parseProgress, pluginRoot, progressNote, projectChoices, savedProject, statusHint, targetRoot } from "./lib.mjs";
+import { enableRoot, findLtidx, lastCwd, makeNotifier, parseEnableArgs, parseIndexArgs, parseProgress, pluginRoot, progressNote, projectChoices, savedProject, statusHint, targetRoot } from "./lib.mjs";
 
 function run(script, args, log) {
   return new Promise((done) => {
@@ -57,8 +57,10 @@ const why = (r) => (r.error ? `pwsh を起動できません(PowerShell 7 が要
 
 let running = null; // 走っている索引づくり(同時に 1 つだけ)
 
-const tell = (message, level) =>
-  session.log(level ? message : escapeMarkdown(message), { ephemeral: true, ...(level ? { level } : {}) });
+// 利用者に見せる文は tell、進み具合は say で出す。GitHub Copilot app は session.log の info と warning を表示しない
+// (error だけ出る)ので、アプリで動いているときは tell の文をダイアログにも出す(lib.mjs の makeNotifier。
+// CXXREF_DISPLAY で切り替えられる)。session は下の joinSession で決まり、コマンドが呼ばれるのはその後
+const { tell, say, settled } = makeNotifier(() => session, process.env);
 
 // compile_commands.json の作り元(index-project.ps1 の -Project)。{ project }(""なら index-project に探させる)か、
 // やめるときは { stop: true }。候補が複数あれば、CLI のダイアログで選ばせる(モデルは呼ばない)。
@@ -78,6 +80,7 @@ async function chooseProject(plugin, root) {
       `ターミナルで -Project を付けて作ってください(次からは /cxxref-index がそれを使います)。例: ${cmd}`, "error");
     return { stop: true };
   }
+  await settled();  // 前のコマンドの結果のダイアログが開いていれば、閉じてから選ばせる(ダイアログを重ねない)
   const picked = await session.ui.select(`cxxref: 索引を作る元を選んでください(${root})`, labels);
   if (picked == null) {
     await tell("cxxref: 索引づくりをやめました");
@@ -102,7 +105,7 @@ function watchProgress(ltLog, t1) {
     const now = Date.now();
     const r = progressNote(state, snap, now, Math.round((now - t1) / 1000));
     state = r.state;
-    if (r.note) tell(r.note).catch(() => { });
+    if (r.note) say(r.note).catch(() => { });
   };
   const timer = setInterval(tick, 3000);
   return () => clearInterval(timer);
