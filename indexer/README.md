@@ -43,6 +43,7 @@ ltidx.exe -p <compile_commands.json のあるフォルダ> -root <索引に含�
 - 出力は 5 つです。書き終えてから 5 つまとめて差し替えるので、作っている途中の索引や新旧の混ざった索引を ltq が読むことはありません(ltq などが開いていれば 10 秒まで待ち、それでも開いていれば前の索引を残して終了コード 2 で終わります)。ファイルの更新日時は、解析を始めた時刻にします(解析の途中で変わったファイルも、次の `-update` と ltq が「索引の後に変わった」と扱います)
   - `<出力.tsv>` … `記号 <TAB> 役割 <TAB> 呼び出し元 <TAB> path:line:col <TAB> ソース行`
     - 役割は `def` `decl` `call` `write` `ref` `dep` `override` と、マクロの `macro` `expand` `ifdef` `undef` のどれかです。暗黙の参照は `-implicit` が付きます
+    - 仮想関数の呼び出しには、形が付きます(0.5.5 から)。`-dynamic` は限定名の無い呼び出し(`p->f()`・`r.f()`・クラスの中の `f()`。実行時に受け手の型の上書きが動く)、`-static` は限定名つき(`Base::f()`・`Super::f()`。その関数そのものを呼ぶ)です。呼び出しの式(`MemberExpr`、テンプレートの中の `CXXDependentScopeMemberExpr`・`UnresolvedMemberExpr`)の限定名の有無で決めます。clang の `Dynamic` の印は `MemberExpr` にしか付かず、テンプレートの中の `impl_->Advance()` のような呼び出しに付かないためです。式が分からない呼び出しは `Dynamic` の印だけを見ます
     - 呼び出し元は、その参照を含む関数です。関数の中の変数(`static constexpr` の定数など)の宣言の中の参照も、囲む関数にします
     - マクロの行の記号はマクロの名前です。`macro` は `#define`、`expand` は展開、`ifdef` は `#ifdef`・`#ifndef`・`defined()`、`undef` は `#undef` です
       - `expand` は、マクロの名前がファイルに書かれた位置だけに出します(マクロの引数に書かれたものを含む)。別のマクロの本体の中の展開は、使った行に名前が無いので出しません

@@ -4,6 +4,8 @@
 // 役割 dep は、テンプレート内で解決先が決まらない呼び出し・参照(記号は ?::名前)。
 // 役割の接尾辞 -using は、テンプレート内の using 宣言越しの参照を、実体化から引いた宣言の先で出したもの。
 // 役割 override は仮想関数の上書き。3 列目は呼び出し元ではなく、上書きされる基底のメソッド。
+// 役割の接尾辞 -dynamic は、限定名の無い仮想関数の呼び出し(実行時に受け手の型の上書きが動く)。-static は、それ以外の
+// 仮想関数の呼び出し(Base::f()・Super::f()。その関数そのものを呼ぶ)。
 // TU ごとの成否は別ファイル(<out>.tu.tsv)に、TU が読んだルート配下のファイルは <out>.deps.tsv に出す。
 // 役割 macro・expand・ifdef・undef は、マクロの #define・展開・#ifdef と defined()・#undef(記号はマクロの名前)。
 // コメントと無効な #if の範囲、展開で捨てられたマクロの引数の範囲(dropped)、関数の中の変数・引数とテンプレートの引数の
@@ -138,6 +140,35 @@ std::string roleOf(index::SymbolRoleSet R) {
                                                              : "ref";
   if (R & (unsigned)SymbolRole::Implicit) S += "-implicit";
   return S;
+}
+
+// 仮想関数の呼び出しの形(役割の接尾辞)。-dynamic は限定名の無い呼び出し(p->f()・r.f()・クラスの中の f()。実行時に、
+// 受け手の動的な型の上書きが動く)、-static は限定名つき(Base::f()・Super::f()。上書きを経ずに、その関数そのものを呼ぶ)。
+// 呼び出しの式で決める。clang の Dynamic の印は MemberExpr にしか付かず、テンプレートの中の依存した式
+// (impl_->Advance() など。CXXDependentScopeMemberExpr を推測で解決したもの、オーバーロードの組)には付かない
+// (コードベース A の gtest で 17 行)。
+// 式が分からない呼び出しは、Dynamic の印だけを見る(付いていなければ、接尾辞なし)
+std::string callForm(const Decl *D, index::SymbolRoleSet R, const Expr *E) {
+  using index::SymbolRole;
+  if (!(R & (unsigned)SymbolRole::Call)) return "";
+  auto isVirtual = [](const Decl *X) {
+    if (const auto *FT = dyn_cast_or_null<FunctionTemplateDecl>(X)) X = FT->getTemplatedDecl();
+    const auto *M = dyn_cast_or_null<CXXMethodDecl>(X);
+    return M && M->isVirtual();
+  };
+  // UnresolvedMemberExpr・UnresolvedLookupExpr(テンプレートの中のオーバーロードの組)。clang は組の候補ごとに行を出し、
+  // 修飾名は候補で同じなので、組に仮想関数があれば、どの候補の行にも同じ形を付ける(実体化した側は MemberExpr で
+  // -dynamic になる。揃えないと、同じ位置に call と call-dynamic が並ぶ。O3DE の IRttiHelper::IsTypeOf など 588 か所)
+  if (const auto *OE = dyn_cast_or_null<OverloadExpr>(E)) {
+    bool Virt = false;
+    for (const NamedDecl *N : OE->decls()) Virt = Virt || isVirtual(N->getUnderlyingDecl());
+    if (!Virt) return "";
+    return OE->getQualifier() ? "-static" : "-dynamic";
+  }
+  if (!isVirtual(D)) return "";
+  if (const auto *ME = dyn_cast_or_null<MemberExpr>(E)) return ME->hasQualifier() ? "-static" : "-dynamic";
+  if (const auto *DE = dyn_cast_or_null<CXXDependentScopeMemberExpr>(E)) return DE->getQualifier() ? "-static" : "-dynamic";
+  return (R & (unsigned)SymbolRole::Dynamic) ? "-dynamic" : "";
 }
 
 // テンプレート引数を含まない修飾名。実体化ごとに別名(Foo<int>::f, Foo<char>::f)にすると、
@@ -643,7 +674,7 @@ public:
 
   bool handleDeclOccurrence(const Decl *D, index::SymbolRoleSet Roles,
                             llvm::ArrayRef<index::SymbolRelation> Rels, SourceLocation Loc,
-                            ASTNodeInfo) override {
+                            ASTNodeInfo Info) override {
     if (isa<NamespaceDecl>(D) || isa<NamespaceAliasDecl>(D)) return true;  // 雑音なので出さない
     // 関数の中の変数・引数と、テンプレートの引数は行にせず、名前の位置だけを local の範囲にする。テキスト検索で同じ名前が
     // 当たったとき(ローカル変数 begin と std::vector::begin など)、ltq が「別の記号」と言えるように(コードベース A で、理由の付かない
@@ -661,7 +692,8 @@ public:
     if (Caller.empty())
       for (const auto &Rel : Rels)
         if (Rel.Roles & (unsigned)index::SymbolRole::RelationContainedBy) { Caller = callerName(Rel.RelatedSymbol); break; }
-    std::string Role = roleOf(Roles);
+    // 仮想関数の呼び出しには形を付ける。印の無い呼び出しの行は前の ltidx の行なので、ltq は行の文面で形を決める
+    std::string Role = roleOf(Roles) + callForm(D, Roles, Info.OrigE);
     W.add(Ctx->getSourceManager(), Loc, qname(D), Role, Caller);
     // 仮想関数の上書き。基底のポインタ越しの呼び出しは基底のメソッドに解決されるので、ltq が上書きの関係から辿る
     for (const auto &Rel : Rels)
