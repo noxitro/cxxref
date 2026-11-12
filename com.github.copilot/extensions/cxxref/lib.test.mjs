@@ -1,11 +1,11 @@
 // node --test com.github.copilot/extensions/cxxref/lib.test.mjs(mcp/test/test_plugin.py が流す)。/cxxref-index・/cxxref-enable の SDK に依らない部分
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { enableRoot, escapeMarkdown, findLtidx, gitTop, indexRoot, lastCwd, parseEnableArgs, parseIndexArgs, parseProgress, pluginRoot, progressNote, projectChoices, savedProject, runsUnderCli, statusHint, targetRoot, wantDialog } from "./lib.mjs";
+import { enableRoot, escapeMarkdown, findLtidx, gitTop, indexRoot, lastCwd, makeNotifier, parseEnableArgs, parseIndexArgs, parseProgress, pluginRoot, progressNote, projectChoices, savedProject, runsUnderCli, statusHint, targetRoot, wantDialog } from "./lib.mjs";
 
 test("projectChoices: フルパスの行を、ルートからの相対パスの選択肢にする", () => {
   const root = join(tmpdir(), "cxxref-lib-test");
@@ -180,17 +180,39 @@ test("progressNote: 段階が変わったとき・1 割ごと(10 秒あけて)�
 });
 
 test("runsUnderCli: 拡張に渡された SDK が CLI の配布物の中なら CLI、そうでなければアプリ", () => {
+  const no = () => false;  // SDK の親を見る判定は使わない
   const dist = String.raw`C:\tools\copilot\pkg\win32-x64\1.0.0`;
-  assert.equal(runsUnderCli({ COPILOT_SDK_PATH: String.raw`${dist}\copilot-sdk`, COPILOT_CLI_DIST_DIR: dist }), true);
+  assert.equal(runsUnderCli({ COPILOT_SDK_PATH: String.raw`${dist}\copilot-sdk`, COPILOT_CLI_DIST_DIR: dist }, no), true);
   // \\?\ 付き・/ 区切り・大文字小文字・末尾の \ の違いは同じ場所とみなす
   const slashed = dist.toUpperCase().replaceAll("\\", "/");
-  assert.equal(runsUnderCli({ COPILOT_SDK_PATH: "\\\\?\\" + slashed + "/copilot-sdk", COPILOT_CLI_RESOLVED_DIST_DIR: `${dist}\\` }), true);
-  assert.equal(runsUnderCli({ COPILOT_SDK_PATH: String.raw`C:\Program Files\GitHub Copilot\sdk`, COPILOT_CLI_RESOLVED_DIST_DIR: dist, COPILOT_CLI_PATH: "x" }), false);
+  assert.equal(runsUnderCli({ COPILOT_SDK_PATH: "\\\\?\\" + slashed + "/copilot-sdk", COPILOT_CLI_RESOLVED_DIST_DIR: `${dist}\\` }, no), true);
+  assert.equal(runsUnderCli({ COPILOT_SDK_PATH: String.raw`C:\Program Files\GitHub Copilot\sdk`, COPILOT_CLI_RESOLVED_DIST_DIR: dist, COPILOT_CLI_PATH: "x" }, no), false);
   // 名前の頭が同じだけの別のフォルダは中とみなさない
-  assert.equal(runsUnderCli({ COPILOT_SDK_PATH: String.raw`${dist}-other\sdk`, COPILOT_CLI_DIST_DIR: dist }), false);
-  // SDK の場所が分からなければ、CLI の印があるかで決める
-  assert.equal(runsUnderCli({ COPILOT_CLI_PATH: String.raw`C:\copilot.exe` }), true);
-  assert.equal(runsUnderCli({}), false);
+  assert.equal(runsUnderCli({ COPILOT_SDK_PATH: String.raw`${dist}-other\sdk`, COPILOT_CLI_DIST_DIR: dist }, no), false);
+  // 指定された場所(DIST_DIR)が読めずに別の場所を読み込んだ: 実際に読み込んだ場所(RESOLVED)の下なら CLI
+  assert.equal(runsUnderCli({ COPILOT_SDK_PATH: String.raw`${dist}\copilot-sdk`, COPILOT_CLI_DIST_DIR: String.raw`C:\broken`, COPILOT_CLI_RESOLVED_DIST_DIR: dist }, no), true);
+  // 配布物の場所が渡されなければ、SDK の親が CLI の配布物に見えるかで決める
+  assert.equal(runsUnderCli({ COPILOT_SDK_PATH: String.raw`${dist}\copilot-sdk` }, (d) => d === dist.toLowerCase()), true);
+  assert.equal(runsUnderCli({ COPILOT_SDK_PATH: String.raw`C:\app\copilot-sdk`, COPILOT_CLI_PATH: "x" }, no), false);
+  // SDK の場所が分からなければアプリとみなす(CLI の印があっても。アプリも渡す)
+  assert.equal(runsUnderCli({ COPILOT_CLI_PATH: String.raw`C:\copilot.exe` }, no), false);
+  assert.equal(runsUnderCli({}, no), false);
+});
+
+test("runsUnderCli: ジャンクション越しの配布物も実体で比べる。npm-loader.js のある親は CLI の配布物とみなす", () => {
+  const d = mkdtempSync(join(tmpdir(), "cri"));
+  try {
+    const real = join(d, "pkg", "1.0.0");
+    mkdirSync(join(real, "copilot-sdk"), { recursive: true });
+    const link = join(d, "current");
+    symlinkSync(real, link, "junction");
+    const no = () => false;
+    assert.equal(runsUnderCli({ COPILOT_SDK_PATH: join(real, "copilot-sdk"), COPILOT_CLI_DIST_DIR: link }, no), true);
+    assert.equal(runsUnderCli({ COPILOT_SDK_PATH: join(link, "copilot-sdk"), COPILOT_CLI_RESOLVED_DIST_DIR: real }, no), true);
+    assert.equal(runsUnderCli({ COPILOT_SDK_PATH: join(real, "copilot-sdk") }), false);
+    writeFileSync(join(real, "npm-loader.js"), "");
+    assert.equal(runsUnderCli({ COPILOT_SDK_PATH: join(link, "copilot-sdk") }), true);
+  } finally { rmSync(d, { recursive: true, force: true }); }
 });
 
 test("wantDialog: CXXREF_DISPLAY で決める。auto(既定)はアプリのときだけ", () => {
@@ -201,4 +223,76 @@ test("wantDialog: CXXREF_DISPLAY で決める。auto(既定)はアプリのと�
   assert.equal(wantDialog({ ...app, CXXREF_DISPLAY: "timeline" }), false);
   assert.equal(wantDialog({ ...cli, CXXREF_DISPLAY: "dialog" }), true);
   assert.equal(wantDialog({ ...cli, CXXREF_DISPLAY: "auto" }), false);
+  assert.equal(wantDialog({}, true), true);  // アプリかどうかを渡せば、それを使う
+});
+
+// makeNotifier に渡す偽のセッション。ダイアログは、テストが close() を呼ぶまで開いたまま
+function fakeSession({ elicitation = true, fail = "" } = {}) {
+  const s = { logs: [], dialogs: [], opens: [], capabilities: { ui: { elicitation } } };
+  s.log = async (message, options) => { s.logs.push({ message, ...options }); };
+  s.ui = {
+    elicitation: async (p) => {
+      s.dialogs.push(p.message);
+      if (fail) throw new Error(fail);
+      return new Promise((done) => s.opens.push(() => done({ action: "accept" })));
+    },
+  };
+  s.close = () => s.opens.shift()();
+  return s;
+}
+const tick = () => new Promise((r) => setImmediate(r));
+const appEnv = { COPILOT_SDK_PATH: String.raw`C:\no-such\app\sdk`, COPILOT_CLI_DIST_DIR: String.raw`C:\no-such\cli` };
+const cliEnv = { COPILOT_SDK_PATH: String.raw`C:\no-such\cli\copilot-sdk`, COPILOT_CLI_DIST_DIR: String.raw`C:\no-such\cli` };
+
+test("makeNotifier: アプリでは tell の文をダイアログにも出す(error と進み具合は出さない)。\\ は二重にする", async () => {
+  const s = fakeSession();
+  const n = makeNotifier(() => s, appEnv);
+  await n.tell("できました E:\\p\\.index");
+  await n.tell("取り直せません", "warning");
+  await n.tell("失敗", "error");
+  await n.say("10%");
+  await tick();
+  assert.deepEqual(s.dialogs, ["できました E:\\p\\\\.index"]);  // 前のを閉じるまで次は出さない
+  s.close(); await tick();
+  assert.deepEqual(s.dialogs, ["できました E:\\p\\\\.index", "取り直せません"]);
+  s.close(); await n.settled();
+  assert.equal(s.dialogs.length, 2);
+  assert.deepEqual(s.logs.map((l) => [l.message, l.level]), [
+    ["できました E:\\p\\\\.index", undefined], ["取り直せません", "warning"], ["失敗", "error"], ["10%", undefined]]);
+});
+
+test("makeNotifier: アプリでダイアログを出せなければ、error で出し直す。出せるようになったらダイアログに戻る", async () => {
+  const s = fakeSession({ elicitation: false });
+  const n = makeNotifier(() => s, appEnv);
+  await n.tell("状態 E:\\p\\.index");
+  await n.settled();
+  assert.deepEqual(s.dialogs, []);
+  assert.deepEqual(s.logs.at(-1), { message: "状態 E:\\p\\.index\n(このホストはダイアログを出せません)", ephemeral: true, level: "error" });
+  s.capabilities.ui.elicitation = true;
+  await n.tell("次");
+  await tick();
+  assert.deepEqual(s.dialogs, ["次"]);
+  s.close(); await n.settled();
+
+  const f = fakeSession({ fail: "timeout" });
+  const m = makeNotifier(() => f, appEnv);
+  await m.tell("できました");
+  await m.settled();
+  assert.equal(f.logs.at(-1).message, "できました\n(ダイアログを出せませんでした: timeout)");
+  assert.equal(f.logs.at(-1).level, "error");
+});
+
+test("makeNotifier: CLI ではダイアログを出さない。CXXREF_DISPLAY=dialog なら出す(\\ はそのまま、失敗しても出し直さない)", async () => {
+  const s = fakeSession();
+  const n = makeNotifier(() => s, cliEnv);
+  await n.tell("できました");
+  await n.settled();
+  assert.deepEqual(s.dialogs, []);
+
+  const f = fakeSession({ fail: "x" });
+  const m = makeNotifier(() => f, { ...cliEnv, CXXREF_DISPLAY: "dialog" });
+  await m.tell("E:\\p\\.index");
+  await m.settled();
+  assert.deepEqual(f.dialogs, ["E:\\p\\.index"]);
+  assert.deepEqual(f.logs.map((l) => l.level), [undefined]);  // タイムラインに出ているので、error で出し直さない
 });
