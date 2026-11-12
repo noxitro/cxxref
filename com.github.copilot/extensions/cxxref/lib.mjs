@@ -1,7 +1,7 @@
 // /cxxref-index・/cxxref-enable の、Copilot の SDK に依らない部分(テストできるように分けた。test は mcp/test/test_plugin.py が node --test で流す)。
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep, win32 } from "node:path";
 
 // プラグインのルート(plugin.json と scripts\index-project.ps1 のあるフォルダ)。start から親へさかのぼる
 export function pluginRoot(start) {
@@ -74,11 +74,15 @@ export const escapeMarkdown = (s) => s.replace(/\\(?=[!-/:-@[-`{-~])/g, "\\\\");
 // パスを比べられる形にする(\\?\ を外す・/ を \ に・末尾の \ を外す・小文字に)。在る場所なら、ジャンクション・
 // シンボリック リンク・8.3 の短い名前・subst のドライブも実体に揃える(無い場所は文字のまま比べる)。空なら ""
 export function pathKey(p) {
-  const plain = (s) => s.replace(/^\\\\\?\\UNC\\/i, "\\\\").replace(/^\\\\\?\\/, "").replace(/\//g, "\\");
-  let s = plain(String(p ?? ""));
+  return realOrSelf(p).replace(/\//g, "\\").replace(/\\+$/, "").toLowerCase();
+}
+
+// \\?\ を外して、在る場所なら実体のパス(区切りは OS のまま。Linux の CI でも realpath が効くように、区切りは替えない)
+function realOrSelf(p) {
+  const plain = (s) => s.replace(/^\\\\\?\\UNC\\/i, "\\\\").replace(/^\\\\\?\\/, "");
+  const s = plain(String(p ?? ""));
   if (!s) return "";
-  try { s = plain(realpathSync.native(s)); } catch { /* 無い場所 */ }
-  return s.replace(/\\+$/, "").toLowerCase();
+  try { return plain(realpathSync.native(s)); } catch { return s; }  // 無い場所は文字のまま
 }
 
 // CLI の配布物のフォルダか(npm で入れたもの・%LOCALAPPDATA%\copilot\pkg のもの、どちらにも npm-loader.js がある。
@@ -95,7 +99,8 @@ export function runsUnderCli(env, isCliDist = looksLikeCliDist) {
   const sdk = pathKey(env.COPILOT_SDK_PATH);
   if (!sdk) return false;
   const dists = [env.COPILOT_CLI_RESOLVED_DIST_DIR, env.COPILOT_CLI_DIST_DIR].map(pathKey).filter(Boolean);
-  return dists.some((d) => sdk === d || sdk.startsWith(`${d}\\`)) || isCliDist(dirname(sdk));
+  // 親は win32.dirname で取る(\ と / のどちらの区切りも分けられる。在る場所なら区切りは OS のまま残る)
+  return dists.some((d) => sdk === d || sdk.startsWith(`${d}\\`)) || isCliDist(win32.dirname(realOrSelf(env.COPILOT_SDK_PATH)));
 }
 
 // 結果をダイアログにも出すか。CXXREF_DISPLAY が timeline なら出さない、dialog なら出す、
