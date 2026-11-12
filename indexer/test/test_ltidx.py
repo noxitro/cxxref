@@ -191,7 +191,38 @@ class LtidxTest(unittest.TestCase):
         rc, err = self.run_ltidx()
         self.assertEqual(rc, 0, err)
         self.assertTrue(self.has('Derived::Draw', 'override', 'a.cpp:2:30', caller='Base::Draw'))
-        self.assertTrue(self.has('Base::Draw', 'call', 'a.cpp:5:6'))  # 基底のポインタ越しは基底のメソッドに解決される
+        # 基底のポインタ越しは基底のメソッドに解決される。限定名の無い仮想関数の呼び出しには -dynamic が付く
+        self.assertTrue(self.has('Base::Draw', 'call-dynamic', 'a.cpp:5:6'))
+        self.assertTrue(self.has('Derived::Draw', 'call-dynamic', 'a.cpp:6:6'))
+        self.assertTrue(self.has('Run', 'call', 'a.cpp:8:3'))  # 仮想でない関数には付かない
+
+    def test_qualified_virtual_call_is_not_dynamic(self):
+        # Base::f() は上書きを経ずにその関数を呼ぶ(上書きの中から基底の実装を呼ぶ形)。クラスの中の f() は this 越し
+        self.write('a.cpp', 'struct Base { virtual void Tick(int); };\n'
+                            'struct Mid : Base { void Tick(int n) override { Base::Tick(n); } };\n'
+                            'struct Leaf : Mid { using Super = Mid; void Tick(int n) override { Super::Tick(n); Tick(0); } };\n'
+                            'void Run(Base& b, Leaf l) { b.Tick(1); l.Tick(2); l.Base::Tick(3); }\n', [])
+        rc, err = self.run_ltidx()
+        self.assertEqual(rc, 0, err)
+        self.assertTrue(self.has('Base::Tick', 'call-static', 'a.cpp:2:55', caller='Mid::Tick'))
+        self.assertTrue(self.has('Mid::Tick', 'call-static', 'a.cpp:3:75', caller='Leaf::Tick'))
+        self.assertTrue(self.has('Leaf::Tick', 'call-dynamic', 'a.cpp:3:84', caller='Leaf::Tick'))
+        self.assertTrue(self.has('Base::Tick', 'call-dynamic', 'a.cpp:4:31'))
+        self.assertTrue(self.has('Leaf::Tick', 'call-dynamic', 'a.cpp:4:42'))  # 値でも、限定名が無ければ付く(clang の決まり)
+        self.assertTrue(self.has('Base::Tick', 'call-static', 'a.cpp:4:59'))
+
+    def test_virtual_call_in_a_template(self):
+        # テンプレートの中の依存した呼び出し(gtest の impl_->Advance() など)。clang は Dynamic の印を付けないが、限定名が
+        # 無ければ、実行時に受け手の型の上書きが動く。仮想でない関数の呼び出しには形を付けない
+        self.write('a.cpp', 'template <class T> struct Iface { virtual void Adv(); void Plain(); };\n'
+                            'template <class T> struct Holder { Iface<T>* impl_;\n'
+                            '  void Step() { impl_->Adv(); impl_->Iface<T>::Adv(); impl_->Plain(); } };\n', [])
+        rc, err = self.run_ltidx()
+        self.assertEqual(rc, 0, err)
+        rows = [r for r in self.rows() if r[3].startswith('a.cpp:3:')]
+        self.assertTrue(self.has('Iface::Adv', 'call-dynamic', 'a.cpp:3:24'), rows)
+        self.assertTrue(self.has('Iface::Adv', 'call-static', 'a.cpp:3:48'), rows)
+        self.assertTrue(self.has('Iface::Plain', 'call', 'a.cpp:3:62'), rows)
 
     def test_update(self):
         self.write('h.h', '#pragma once\nvoid Shared();\n')

@@ -28,6 +28,10 @@ DEFS = ('def', 'decl')
 # マクロそのものの行(ltidx の役割): #define・展開(名前がファイルに書かれた場所)・#ifdef と defined()・#undef
 MACRO_ROLES = ('macro', 'expand', 'ifdef', 'undef')
 OVERRIDE = 'override'  # 3 列目は呼び出し元ではなく、上書きされる基底のメソッド
+# 役割の接尾辞(ltidx 0.5.5 から)。-dynamic は限定名の無い仮想関数の呼び出しで、実行時に受け手の動的な型の上書きが動く。
+# -static はそれ以外の仮想関数の呼び出し(Base::f()・Super::f()。その関数そのもの)。どちらも無い行は前の ltidx の行
+DYNAMIC, STATIC = '-dynamic', '-static'
+SRC_MAX = 200  # ltidx が索引の行に残すソースの行の長さ(バイト。これ以上は切ってある)
 CP_CODECS = {65001: None, 51932: 'euc_jp', 20932: 'euc_jp', 28591: 'latin-1'}  # ほかは cp<番号>
 SKIP_SCAN_FILES = 64  # 範囲を引くファイルがこれより多ければ、.skip.tsv を 1 つずつ find せず、1 回通して読む
 ALT = '.alt.tsv'  # 無効な #if の中を仮に有効にして解析した行(scripts/altpass.py が書く。索引本体と同じ形)
@@ -1133,8 +1137,37 @@ def path_filter(prefixes, root=None):
     return lambda path: path.lower() in pre or path.lower().startswith(dirs)
 
 
-def fmt(r, show_sym, idx, ranges=None):
+def call_kind(r, line=None):
+    """仮想関数の呼び出しの行 r の形。'dynamic'(限定名が無い: p->f()・r.f()・クラスの中の f()。実行時に、受け手の動的な型の
+    上書きが動く)、'static'(Base::f()・Super::f()。上書きを経ずに、その関数そのものを呼ぶ)、''(決まらない)。
+    索引に印(-dynamic・-static)があればそれで決まる。印の無い行(前の ltidx の索引)は、名前の直前が `::` かを見る:
+    索引の行の文面(頭の空白を除き、200 バイトで切ってある)に名前が 1 回だけなら、それで決める。何度も出るか、文面が切れて
+    いるときは、line(パス, 行)(ソースの行のバイト列)の列の位置で決める。マクロの中で名前が行に無いときなどは決まらない"""
+    if DYNAMIC in r[1]:
+        return 'dynamic'
+    if STATIC in r[1]:
+        return 'static'
+    pat = re.compile(rb'(?<![\w$])' + re.escape(r[0].rsplit('::', 1)[-1].encode('utf-8'))
+                     + rb'(?![\w$])\s*(?:<[^;()]*>\s*)?\(')
+
+    def kind(text, p):
+        return 'static' if text[:p].rstrip().endswith(b'::') else 'dynamic'
+
+    src = r[6].encode('utf-8')
+    at = [m.start() for m in pat.finditer(src)]
+    if len(at) == 1 and len(src) < SRC_MAX:
+        return kind(src, at[0])
+    raw = line(r[3], r[4]) if line else None
+    p = int(r[5]) - 1
+    if raw is not None and pat.match(raw, p):
+        return kind(raw, p)
+    kinds = {kind(src, p) for p in at}
+    return kinds.pop() if len(kinds) == 1 and len(src) < SRC_MAX else ''
+
+
+def fmt(r, show_sym, idx, ranges=None, tag=''):
     sym, role, caller, path, line, col, src, note, _, alt = r
+    role = role.replace(DYNAMIC, '').replace(STATIC, '')  # 呼び出しの形は tag で言う(前の ltidx の索引の行と同じに見せる)
     s = f'{role:<6} {path}:{line}'
     if show_sym:
         s += f'  {sym}'
@@ -1142,6 +1175,8 @@ def fmt(r, show_sym, idx, ranges=None):
         s += f'  [-> {caller}]'  # 名前 1 つに置き換えるマクロの、置き換え後の名前
     elif caller:
         s += f'  [in {caller}]'
+    if tag:
+        s += f'  [{tag}]'
     if alt:  # その構成ではコンパイルされない #if の中。条件を仮に有効にして解析した行
         cond = idx.inactive_cond(path, line, (ranges or {}).get(path, ()))
         s += f'  [inactive: {cond}]' if cond else '  [inactive]'
@@ -1338,16 +1373,61 @@ def cmd_refs(a, idx):
     want = frozenset({h[0] for h in loose} | {r[3] for r in rows if r[9]})
     ranges = idx.cached(('skips', want), lambda: idx.skips(want))
 
+    # 仮想関数の呼び出しの形(call_kind)。限定名つきの呼び出しが、呼んだ関数の上書きの中にあれば、上書きから基底の実装を
+    # 呼ぶもの(Super::f()。UE5 の FAnimNode_Base::Update_AnyThread への呼び出し 13 のうち 9 がこれ)
+    below, lines = {}, {}
+
+    def line(path, ln):
+        """ソースの行(バイト列。読めなければ None)。前の ltidx の索引で、形が行の文面から決まらない呼び出しの行だけが使う。"""
+        if path not in lines:
+            try:
+                with open(os.path.join(idx.root, path), 'rb') as f:
+                    lines[path] = f.read().split(b'\n')
+            except OSError:
+                lines[path] = []
+        ls = lines[path]
+        return ls[ln - 1].rstrip(b'\r') if 0 < ln <= len(ls) else None
+
+    def vtag(r):
+        c = r[0]
+        if not (DYNAMIC in r[1] or c in up or c in down):  # 仮想関数と分かる記号だけ(上書きの関係か、索引の印がある)
+            return ''
+        k = call_kind(r, line)
+        if k == 'static':
+            if c not in below:
+                below[c] = closure([c], down)
+            if r[2] in below[c]:
+                return 'static, from an override'
+        return k
+
     def show(r, with_sym):
-        return fmt(r, with_sym, idx, ranges)
+        return fmt(r, with_sym, idx, ranges, vtag(r) if r[1].startswith('call') else '')
+
+    def kinds_of(rs):
+        """呼び出しの行の形ごとの数。(dynamic, static, そのうち上書きの中, 決まらない)。仮想関数でなければ None。"""
+        tags = [vtag(r) for r in rs]
+        if not any(tags):
+            return None
+        q = sum(t.startswith('static') for t in tags)
+        return (tags.count('dynamic'), q, tags.count('static, from an override'), len(tags) - q - tags.count('dynamic'))
 
     calls = [r for r in target if r[1].startswith('call')]
     expands = [r for r in target if r[1] == 'expand']
     defs = sorted((r for r in target if r[1].startswith(DEFS) or r[1] == 'macro'), key=key)
     uses = sorted((r for r in target if not r[1].startswith(('call',) + DEFS) and r[1] not in ('expand', 'macro')), key=key)
     section('calls (resolved by clang)', [show(r, show_sym) for r in calls], a.limit, [(r[3], r[4]) for r in calls], listed, skip)
+    ck = kinds_of(calls)
     if calls and not remain:
-        print('  (exact: clang resolved each call from the real type of its receiver, whatever the variable is named)')
+        print('  (exact: clang resolved each call from the declared type of its receiver, whatever the variable is named)')
+    if ck and not remain:
+        d, q, up_q, u = ck
+        n_ov = len(closure(syms, down))
+        said = ([f'{d} [dynamic]: no qualifier, so at runtime they run the override for the receiver\'s dynamic type'
+                 + (f' (the query or one of its {n_ov} overrides under "virtual dispatch")' if n_ov else '')] if d else []) \
+            + ([f'{q} [static] (Base::f(), Super::f()): they always run the query itself'
+                + (f', {up_q} of them from inside an override calling up to the query' if up_q else '')] if q else []) \
+            + ([f'{u} not told apart from the line text'] if u else [])
+        print('  (virtual calls: ' + '; '.join(said) + ')')
     if any(r[1].endswith('-using') for r in target) and not remain:
         print('  (call-using: a call through a using-declaration inside a template, resolved from its instantiations)')
     if expands:
@@ -1380,10 +1460,21 @@ def cmd_refs(a, idx):
             fam.append((d, ps))
     if (bases and not remain) or via or fam or fam_calls:
         print('\n== virtual dispatch')
+    def split(rs):
+        """呼び出しの行の形ごとの数の添え書き。"""
+        k = kinds_of(rs)
+        if not k:
+            return ''
+        d, q, up_q, u = k
+        said = ([f'{d} [dynamic]'] if d else []) \
+            + ([f'{q} [static]' + (f', {up_q} of them from inside an override calling up' if up_q else '')] if q else []) \
+            + ([f'{u} not told apart'] if u else [])
+        return ' (' + '; '.join(said) + ')'
+
     if bases and (via or not remain):
-        print(f'  the query overrides {", ".join(sorted(bases))}. Calls to those may run the query at runtime,'
-              ' depending on the dynamic type of the receiver; they are not counted above:'
-              f' {len(via)}')
+        print(f'  the query overrides {", ".join(sorted(bases))}. [dynamic] calls to those may run the query at runtime,'
+              ' depending on the dynamic type of the receiver; [static] ones (Base::f()) run that class\'s function,'
+              f' not the query; they are not counted above: {len(via)}' + split(via))
         for s in [show(r, True) for r in via][:a.limit]:
             print('    ' + s)
         listed.update((r[3], r[4]) for r in via[:a.limit])
@@ -1394,7 +1485,7 @@ def cmd_refs(a, idx):
     # 全文が上限を超えたら、まず族だけを 10 に絞った形を試す)。並べなかった分は、残りの一覧(--all)に出る
     cap = sys.maxsize if a.all else a.family if a.family is not None else a.limit if not a.compact else min(a.limit, 10)
     if fam:
-        print(f'  overridden by (calls through a pointer or reference to the query\'s class may run these instead; each line'
+        print(f'  overridden by ([dynamic] calls to the query may run these instead; each line'
               f' names an override and where it is declared and defined: change them with the query): {len(fam)}')
         for d, ps in fam[:cap]:
             print(f'    {d}  ' + '  '.join(f'{role} {p}:{ln}' for (p, ln), role in ps))
@@ -1405,7 +1496,7 @@ def cmd_refs(a, idx):
                   ' to them; asking refs about each override adds nothing)')
     if fam_calls:
         print(f'  calls resolved to the overrides (they call the override, not the query; a signature change reaches them'
-              f' too): {len(fam_calls)}')
+              f' too): {len(fam_calls)}' + split(fam_calls))
         for r in fam_calls[:cap]:
             print('    ' + show(r, True))
         listed.update((r[3], r[4]) for r in fam_calls[:cap])
