@@ -41,10 +41,28 @@ class SkillTest(unittest.TestCase):
         with open(os.path.join(ROOT, 'com.github.copilot', 'hooks', 'hooks.json'), encoding='utf-8') as f:
             h = json.load(f)
         self.assertEqual(h['version'], 1)
-        self.assertEqual(set(h['hooks']), {'preToolUse'})
-        cmd = h['hooks']['preToolUse'][0]['command']
-        script = re.search(r'\$\{PLUGIN_ROOT\}/([^"]+)', cmd).group(1)
-        self.assertTrue(os.path.exists(os.path.join(ROOT, script)))
+        self.assertEqual(set(h['hooks']), {'sessionStart', 'preToolUse'})
+        for event in h['hooks'].values():
+            script = re.search(r'\$\{PLUGIN_ROOT\}/([^"]+)', event[0]['command']).group(1)
+            self.assertTrue(os.path.exists(os.path.join(ROOT, script)))
+        self.assertTrue(h['hooks']['sessionStart'][0]['command'].endswith(' session'))
+
+    def test_session_note_only_with_index(self):
+        # 索引のあるリポジトリ(とその下のフォルダ)でだけ 1 文を足す。無いリポジトリでは何も足さない(上乗せ 0)
+        root = tempfile.mkdtemp()
+        try:
+            os.makedirs(os.path.join(root, 'src'))
+            run = lambda cwd: subprocess.run([sys.executable, '-I', HOOK, 'session'], capture_output=True, timeout=30,
+                                             input=json.dumps({'cwd': cwd, 'source': 'new'}).encode()).stdout.decode()
+            self.assertEqual(run(os.path.join(root, 'src')), '')
+            os.makedirs(os.path.join(root, '.index'))
+            with open(os.path.join(root, '.index', 'index.tsv'), 'w', encoding='utf-8') as f:
+                f.write('')
+            out = json.loads(run(os.path.join(root, 'src')))
+            self.assertIn('cxxref skill', out['additionalContext'])
+            self.assertLess(len(out['additionalContext']), 300)
+        finally:
+            shutil.rmtree(root)
 
     def hook(self, payload):
         data = payload if isinstance(payload, bytes) else json.dumps(payload).encode('utf-8')
