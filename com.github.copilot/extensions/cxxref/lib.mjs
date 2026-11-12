@@ -71,6 +71,26 @@ export function indexRoot(start) {
 // (E:\src\Proj\.index が E:\src\Proj.index と出る)。その \ を二重にする。error の表示はそのまま出るので通さない
 export const escapeMarkdown = (s) => s.replace(/\\(?=[!-/:-@[-`{-~])/g, "\\\\");
 
+// 拡張を動かしているのが Copilot CLI(画面に session.log を出す)か、GitHub Copilot app(info と warning を出さず、
+// error だけを出す)か。どちらも COPILOT_CLI_PATH などを渡すので、それでは分からない。違うのは拡張に渡す SDK の場所で、
+// CLI は自分の配布物の中(COPILOT_CLI_DIST_DIR の下)のものを、アプリは自分で持っているものを渡す
+export function runsUnderCli(env) {
+  const norm = (p) => String(p ?? "").replace(/^\\\\\?\\/, "").replace(/\//g, "\\").replace(/\\+$/, "").toLowerCase();
+  const sdk = norm(env.COPILOT_SDK_PATH);
+  const dist = norm(env.COPILOT_CLI_DIST_DIR || env.COPILOT_CLI_RESOLVED_DIST_DIR);
+  if (sdk && dist) return sdk === dist || sdk.startsWith(`${dist}\\`);
+  return Boolean(env.COPILOT_CLI_PATH || env.COPILOT_CLI_BINARY_VERSION);
+}
+
+// 結果をダイアログにも出すか。CXXREF_DISPLAY が timeline なら出さない、dialog なら出す、
+// それ以外(auto)はアプリで動いているときだけ出す
+export function wantDialog(env) {
+  const mode = env.CXXREF_DISPLAY;
+  if (mode === "timeline") return false;
+  if (mode === "dialog") return true;
+  return !runsUnderCli(env);
+}
+
 // git のリポジトリのルート(start の上で)。git が無い・リポジトリでなければ ""
 export function gitTop(start) {
   try {

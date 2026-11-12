@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { enableRoot, escapeMarkdown, findLtidx, gitTop, indexRoot, lastCwd, parseEnableArgs, parseIndexArgs, parseProgress, pluginRoot, progressNote, projectChoices, savedProject, statusHint, targetRoot } from "./lib.mjs";
+import { enableRoot, escapeMarkdown, findLtidx, gitTop, indexRoot, lastCwd, parseEnableArgs, parseIndexArgs, parseProgress, pluginRoot, progressNote, projectChoices, savedProject, runsUnderCli, statusHint, targetRoot, wantDialog } from "./lib.mjs";
 
 test("projectChoices: フルパスの行を、ルートからの相対パスの選択肢にする", () => {
   const root = join(tmpdir(), "cxxref-lib-test");
@@ -177,4 +177,28 @@ test("progressNote: 段階が変わったとき・1 割ごと(10 秒あけて)�
   assert.equal(step({ phase: "tu", done: 30, total: 100, ng: 2 }, 65000, 65), "");     // 10 秒たっていない
   assert.match(step({ phase: "tu", done: 30, total: 100, ng: 2 }, 73000, 73), /30\/100\(30%、解析エラー 2、73 秒\)/);
   assert.equal(step({ phase: "tu", done: 100, total: 100, ng: 2 }, 99000, 99), "");    // 終わりは別に出す
+});
+
+test("runsUnderCli: 拡張に渡された SDK が CLI の配布物の中なら CLI、そうでなければアプリ", () => {
+  const dist = String.raw`C:\tools\copilot\pkg\win32-x64\1.0.0`;
+  assert.equal(runsUnderCli({ COPILOT_SDK_PATH: String.raw`${dist}\copilot-sdk`, COPILOT_CLI_DIST_DIR: dist }), true);
+  // \\?\ 付き・/ 区切り・大文字小文字・末尾の \ の違いは同じ場所とみなす
+  const slashed = dist.toUpperCase().replaceAll("\\", "/");
+  assert.equal(runsUnderCli({ COPILOT_SDK_PATH: "\\\\?\\" + slashed + "/copilot-sdk", COPILOT_CLI_RESOLVED_DIST_DIR: `${dist}\\` }), true);
+  assert.equal(runsUnderCli({ COPILOT_SDK_PATH: String.raw`C:\Program Files\GitHub Copilot\sdk`, COPILOT_CLI_RESOLVED_DIST_DIR: dist, COPILOT_CLI_PATH: "x" }), false);
+  // 名前の頭が同じだけの別のフォルダは中とみなさない
+  assert.equal(runsUnderCli({ COPILOT_SDK_PATH: String.raw`${dist}-other\sdk`, COPILOT_CLI_DIST_DIR: dist }), false);
+  // SDK の場所が分からなければ、CLI の印があるかで決める
+  assert.equal(runsUnderCli({ COPILOT_CLI_PATH: String.raw`C:\copilot.exe` }), true);
+  assert.equal(runsUnderCli({}), false);
+});
+
+test("wantDialog: CXXREF_DISPLAY で決める。auto(既定)はアプリのときだけ", () => {
+  const cli = { COPILOT_SDK_PATH: String.raw`C:\d\sdk`, COPILOT_CLI_DIST_DIR: String.raw`C:\d` };
+  const app = { COPILOT_SDK_PATH: String.raw`C:\app\sdk`, COPILOT_CLI_DIST_DIR: String.raw`C:\d` };
+  assert.equal(wantDialog(cli), false);
+  assert.equal(wantDialog(app), true);
+  assert.equal(wantDialog({ ...app, CXXREF_DISPLAY: "timeline" }), false);
+  assert.equal(wantDialog({ ...cli, CXXREF_DISPLAY: "dialog" }), true);
+  assert.equal(wantDialog({ ...cli, CXXREF_DISPLAY: "auto" }), false);
 });
