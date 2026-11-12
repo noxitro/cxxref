@@ -14,11 +14,16 @@
 folded・area・hidden は、ltq がその行に付けた分類ごとにも数える(コードでありうる分類: index・inactive・dropped・macro・unparsed・
 other・nonsrc、コードではない分類: comment・local・string・directive)。
 
-出力の形は 6 つ: full(全文)、c1(--compact)、c2(--compact を 2 つ)は 1 節の行数の上限を外して測る(形そのものの違い)。
+出力の形は 7 つ: full(全文)、c1(--compact)、c2(--compact を 2 つ)は 1 節の行数の上限を外して測る(形そのものの違い)。
 mcp は、MCP サーバーが実際に返す文面(mcp/server.py の run_ltq。既定の上限 200 行のまま、結果が 18,000 バイトを超えると
-full → c1 → c2 → c2 で 1 節 60・25・10・5・2 行、と短くし、それでも超えると末尾を切る)。エージェントが受け取るのはこの形。
+full → 上書きの族を 10 行ずつ(virtual のとき)→ c1 → c2 → c2 で族を 5・2 行ずつ → c2 で 1 節 60・25・10・5・2 行、と短くし、
+それでも超えると末尾を切る)。エージェントが受け取るのはこの形。
 all は、漏れのない一覧(ltq refs --all。件数にまとめず、別の記号に解決された行も 1 行ずつ出す)。mcp+file は、MCP サーバーの
-文面と、その最後の行が指すファイル(サーバーが書いた all の一覧)を合わせたもの。この 2 つは、rg の行が全部 listed になるはず。
+文面と、その最後の行が指すファイルの全部(サーバーが書いた、結果に並べなかった行の一覧。大きいと数個に分かれる)を合わせたもの。
+この 2 つは、rg の行が全部 listed になるはず。mcp+read は、mcp+file から「大きすぎて丸ごとは読めない。grep で探す」と案内される
+ファイル(server.PART_BYTES を超えるもの)を除いたもの。エージェントが読むだけで手に入る行で、ここで listed でない行は、
+大きいファイルを検索するか path で出し直さないと見えない(コードでありうる分類の行が残っていないかを見る)。
+結果と一覧のファイルの両方に出ている行も数える(合わせて 1 回ずつのはずなので、0 でなければ直す)。
 
 --sample N は、差分の索引(<索引>.alt.tsv。無効な #if の中に出てくる名前)から N 個を、名前のハッシュの順で選ぶ
 (乱数を使わないので、同じ索引なら同じ名前になる)。--under を付けると、そのフォルダの行に出てくる名前だけ。
@@ -191,8 +196,8 @@ def main():
     cfg = server.Config(root, index, None)  # 自動更新なし。上限は既定(server.MAX_BYTES)
     idx = cfg.open_index([index], root)
     names = list(dict.fromkeys(a.names + sample(index, a.sample, a.under)))
-    forms = [m for m, _ in MODES] + ['mcp', 'all', 'mcp+file']
-    files, file_bytes = 0, []
+    forms = [m for m, _ in MODES] + ['mcp', 'all', 'mcp+file', 'mcp+read']
+    files, file_bytes, twice = 0, [], 0
     total = {m: dict.fromkeys(CATS, 0) for m in forms}
     by_group = {m: collections.Counter() for m in forms}  # (分け方, 分類) -> 行数
     shape = collections.Counter()
@@ -204,9 +209,10 @@ def main():
     last = []
     real_main = ltq.main
 
-    def spy(argv, idx=None):
-        last[:] = argv
-        return real_main(argv, idx=idx)
+    def spy(argv, idx=None, skip=None):
+        if skip is None:  # skip 付きは、結果に並べなかった行の一覧を作る呼び出し(結果の形ではない)
+            last[:] = argv
+        return real_main(argv, idx=idx, skip=skip)
 
     ltq.main = spy
     print('name\trg\t' + '\t'.join(f'{m}:listed' for m in forms) + '\tmcp:folded\tmcp:area\tmcp:hidden\tother\tmissing\tltq_only'
@@ -220,20 +226,28 @@ def main():
         _, text = server.run_ltq(cfg, ['refs', name])
         sec = time.time() - t0
         secs.append(sec)
-        form = ('full', 'c1', 'c2')[last.count('--compact')] + (f'+limit{last[last.index("--limit") + 1]}' if '--limit' in last else '')
+        form = ('full', 'c1', 'c2')[last.count('--compact')] + ''.join(
+            f'+{o}{last[last.index("--" + o) + 1]}' for o in ('family', 'limit') if '--' + o in last)
         if 'output cut at' in text:
             form += '+cut'
         shape[form] += 1
         shown = {m: ltq_shown(idx, root, index, name, extra + ['--limit', '1000000']) for m, extra in MODES}
         shown['mcp'] = Shown(text)
         shown['all'] = ltq_shown(idx, root, index, name, ['--all'])
-        listing = ''
-        if cfg.last_list:  # サーバーが書いた、漏れのない一覧
-            with open(cfg.last_list, encoding='utf-8') as f:
-                listing = f.read()
-            files += 1
-            file_bytes.append(len(listing.encode('utf-8')))
-        shown['mcp+file'] = Shown(text + '\n' + listing)
+        listing, readable = '', ''  # サーバーが書いた一覧のファイルの全部と、そのうち丸ごと読める大きさのもの
+        for p in cfg.last_lists:
+            with open(p, encoding='utf-8') as f:
+                part = f.read()
+            n = len(part.encode('utf-8'))
+            file_bytes.append(n)
+            listing += '\n' + part
+            if n <= cfg.part_bytes:
+                readable += '\n' + part
+        files += bool(cfg.last_lists)
+        shown['mcp+file'] = Shown(text + listing)
+        shown['mcp+read'] = Shown(text + readable)
+        if 'output cut at' not in text:  # 末尾を切ったときの一覧は全部の行(結果と重なる)
+            twice += len(set(shown['mcp'].locs) & set(Shown(listing).locs))
         full = shown['full']
         per = {m: dict.fromkeys(CATS, 0) for m in forms}
         for p, ln in sorted(want):
@@ -274,15 +288,18 @@ def main():
     for m in forms:
         t = total[m]
         label = {'mcp': 'mcp (what the MCP server returns)', 'all': 'all (refs --all)',
-                 'mcp+file': 'mcp+file (the MCP text and the complete list it points to)'}.get(m, f'{m} (no --limit)')
+                 'mcp+file': 'mcp+file (the MCP text and every list file it points to)',
+                 'mcp+read': 'mcp+read (the MCP text and the list files small enough to read whole)'}.get(m, f'{m} (no --limit)')
         print(f'  {label}: listed {t["listed"]}, folded {t["folded"]}{groups(m, "folded")}, '
               f'area {t["area"]}{groups(m, "area")}, hidden {t["hidden"]}{groups(m, "hidden")}, '
               f'other {t["other"]}, missing {t["missing"]}')
     print('  form returned by the MCP server: ' + ', '.join(f'{k} {v}' for k, v in sorted(shape.items())))
     if file_bytes:
         b = sorted(file_bytes)
-        print(f'  complete lists written by the MCP server: {files} of {len(names)} names; '
-              f'size median {b[len(b) // 2]} bytes, max {b[-1]} bytes')
+        big = sum(n > cfg.part_bytes for n in b)
+        print(f'  lists of the rest written by the MCP server: {files} of {len(names)} names, {len(b)} files '
+              f'({big} too large to read whole); size median {b[len(b) // 2]} bytes, max {b[-1]} bytes')
+        print(f'  lines both in the MCP text and in its list files (should be 0): {twice}')
     if secs:
         s = sorted(secs)
         print(f'  MCP refs time per name: median {s[len(s) // 2]:.1f} s, max {s[-1]:.1f} s')

@@ -128,6 +128,17 @@ class ServerTest(unittest.TestCase):
         with open(path, encoding='utf-8') as f:
             self.assertIn('== coverage: all 3 lines that contain the word "Run" are listed above', f.read())
 
+    def test_large_check_result_is_cut(self):
+        # refs 以外(短い形が無い)も、上限を超えたら末尾を切る(場所を多く渡した check)
+        self.restart(['--root', self.root, '--max-output-bytes', '400'])
+        locs = ['src/a.cpp:3', 'src/a.cpp:4'] * 20
+        text = self.send('tools/call', {'name': 'check', 'arguments': {'locations': locs}})['result']['content'][0]['text']
+        self.assertLessEqual(len(text.encode('utf-8')), 400)
+        self.assertIn('src/a.cpp:3', text)
+        self.assertTrue(text.endswith('... output cut at 400 bytes (the client limit). '
+                                      'Ask for a narrower name, or pass path / exclude / limit to see the rest.\n'))
+        self.assertEqual(os.listdir(os.path.join(self.root, '.index')).count('refs'), 0)  # 一覧のファイルは書かない
+
     def test_complete_list_is_written_when_lines_are_only_counted(self):
         # 結果に 1 行ずつ並べきれないとき(上限に収めるために件数にまとめたとき)は、並べなかった行の一覧を
         # 索引の隣に書き、結果の最後の行でその場所を知らせる(名前を変えるときに、直す先を漏らさない)。

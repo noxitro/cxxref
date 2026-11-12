@@ -502,10 +502,24 @@ def run_ltq(cfg, args, start=None):
             hint = f'; the rest are only counted (the list of the rest could not be written: {err}; pass path to list a folder)'
         return t[:-len(ltq.ALL_HINT) - 1] + hint + '\n'
 
+    def cut(t, files=()):
+        """t の末尾を上限で切り、切ったことを最後の行に書いたもの。files は、名前を含む行を全部並べた一覧のファイル
+        [(パス, バイト数, 1 回で読めるか)]。"""
+        small = [f'"{p}"' for p, _, ok in files if ok]
+        large = [f'"{p}" ({list_size(n)}: search it with grep)' for p, n, ok in files if not ok]
+        tail = (f'... output cut at {cfg.max_bytes} bytes (the client limit). '
+                + ('Every line, one per line: ' + ', '.join(small + large)
+                   + (' (read ' + ('it' if len(small) == 1 else 'each') + ' whole in one call)' if small and not large else '')
+                   + '. ' if files else '')
+                + 'Ask for a narrower name, or pass path / exclude / limit to see the rest.\n')
+        head = t.encode('utf-8')[:max(0, cfg.max_bytes - nbytes(tail))].decode('utf-8', 'ignore')
+        return head[:head.rfind('\n') + 1] + tail
+
     cfg.last_list, cfg.last_lists = None, []
     code, text = run([])
     if args[0] != 'refs' or code != 0 or idx is None:
-        return code, text
+        # 短い形があるのは refs だけ。ほかのコマンド(check に場所を数百渡したときなど)は、上限を超えたら末尾を切る
+        return code, cut(text) if over(text) else text
     # クライアントは大きな結果をモデルに渡さない(Copilot CLI は 20,480 バイトを超えるとファイルに退かせ、先頭だけを見せる)。
     # 超えたら、短い形で出し直す。順に:
     # - 上書きの族(上書きと、上書きへの呼び出し)だけを 10 行ずつに絞る(他の節は全文のまま。大きな階層の virtual で効く)
@@ -540,16 +554,7 @@ def run_ltq(cfg, args, start=None):
         cfg.last_list, cfg.last_lists = None, []
     # どの形でも上限を超える。末尾を切り、名前を含む行を全部並べた一覧(ltq refs --all)の場所を添える
     all_code, all_text = run(['--all'], noted=False)
-    files = write(all_text)[0] if all_code == 0 else []
-    small = [f'"{p}"' for p, _, ok in files if ok]
-    large = [f'"{p}" ({list_size(n)}: search it with grep)' for p, n, ok in files if not ok]
-    tail = (f'... output cut at {cfg.max_bytes} bytes (the client limit). '
-            + ('Every line, one per line: ' + ', '.join(small + large)
-               + (' (read ' + ('it' if len(small) == 1 else 'each') + ' whole in one call)' if small and not large else '')
-               + '. ' if files else '')
-            + 'Ask for a narrower name, or pass path / exclude / limit to see the rest.\n')
-    cut = text.encode('utf-8')[:max(0, cfg.max_bytes - nbytes(tail))].decode('utf-8', 'ignore')
-    return code, cut[:cut.rfind('\n') + 1] + tail
+    return code, cut(text, write(all_text)[0] if all_code == 0 else [])
 
 
 class UnknownTool(Exception):
