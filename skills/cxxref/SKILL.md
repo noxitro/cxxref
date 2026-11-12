@@ -1,6 +1,6 @@
 ---
 name: cxxref
-description: C++ repos with a .index folder only. Lists every place a C++ function, type, variable or macro is called or used, resolved by clang (not text). Use it for "where is X used / called", "what breaks if X changes", or finding all callers before changing a signature. Not for explaining code, adding logs or tests, or editing a spot you already know.
+description: Use before grep when you need where a C++ function, type, variable or macro is used or called - "where is X used", "what breaks if X changes", all callers before changing a signature. Resolved by clang over every translation unit, with the reason for each text match it leaves out. Needs a .index folder in the repository. Not for explaining code, adding logs or tests, or editing a spot you already know.
 ---
 
 # cxxref

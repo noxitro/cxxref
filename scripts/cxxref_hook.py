@@ -51,12 +51,48 @@ def allowed(command):
     return not any(w == '--root' or w.startswith('--root=') or w.startswith('//') for w in rest)
 
 
-def main():
+SESSION_NOTE = ('This repository has a cxxref index (.index, built by clang over every C++ translation unit). '
+                'When a task needs where a C++ symbol is used or called (impact of a change, all callers before '
+                'changing a signature), load the cxxref skill before grepping.')
+
+
+def has_index(cwd):
+    """cwd かその親に、索引(.index の中の .tsv)があるか(ltq.find_root と同じ探し方)。"""
+    d = os.path.abspath(cwd) if isinstance(cwd, str) and cwd else None
+    while d:
+        idx = os.path.join(d, '.index')
+        if os.path.isdir(idx):
+            try:
+                if any(f.endswith('.tsv') for f in os.listdir(idx)):
+                    return True
+            except OSError:
+                return False
+        parent = os.path.dirname(d)
+        if parent == d:
+            return False
+        d = parent
+    return False
+
+
+def session_start(data):
+    """sessionStart: 索引のあるリポジトリでだけ、skill を使う場面を 1 文で知らせる。索引が無ければ何も足さない
+    (skill の説明文だけでは、使わないモデルがいた【実測: Claude Haiku 5.5 は grep から始めた。gpt-6-luna は読んだ】)。"""
+    if has_index(data.get('cwd')):
+        sys.stdout.write(json.dumps({'additionalContext': SESSION_NOTE}))
+    return 0
+
+
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
     try:
         data = json.loads(sys.stdin.buffer.read().decode('utf-8', 'replace') or '{}')
     except ValueError:
         return 0
-    if not isinstance(data, dict) or str(data.get('toolName', '')).lower() not in SHELLS:
+    if not isinstance(data, dict):
+        return 0
+    if argv[:1] == ['session']:
+        return session_start(data)
+    if str(data.get('toolName', '')).lower() not in SHELLS:
         return 0
     args = data.get('toolArgs')
     if isinstance(args, str):
