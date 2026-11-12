@@ -275,8 +275,9 @@ class LtqTest(unittest.TestCase):
         self.assertIn('the query overrides Base::Draw, Derived::Draw.', out)
         self.assertIn(': 2 (2 [dynamic])\n    call   src/v.cpp:4  Base::Draw  [in Call]  [dynamic]', out)
         self.assertIn('[dynamic] calls to those may run the query at runtime', out)
-        self.assertIn('  (virtual calls: 1 [dynamic]: no qualifier, so at runtime they run the override for the receiver\'s'
-                      ' dynamic type)\n', out)
+        self.assertIn('  (virtual calls, resolved by clang: 1 [dynamic]: no qualifier; the override for the receiver\'s'
+                      ' runtime type runs)\n', out)
+        self.assertNotIn('(exact:', out)  # 仮想関数では、形ごとの数の行が代わり
         self.assertNotIn('overridden by', out)
         self.assertNotIn('other symbols named', out)  # 上書きの関係にある記号は virtual dispatch の節に出す
         out = self.ltq('refs', 'Base::Draw')
@@ -286,14 +287,14 @@ class LtqTest(unittest.TestCase):
         self.assertIn('change them with the query): 2\n    Derived::Draw  decl src/v.cpp:2\n    Leaf::Draw  decl src/v.cpp:3\n', out)
         self.assertIn('  calls resolved to the overrides (they call the override, not the query; a signature change reaches'
                       ' them too): 2 (2 [dynamic])\n    call   src/v.cpp:4  Derived::Draw  [in Call]  [dynamic]', out)
-        self.assertIn('(the query or one of its 2 overrides under "virtual dispatch")', out)
+        self.assertIn('(the query or one of its 2 overrides)', out)
         self.assertNotIn('\n  override ', out.split('== virtual dispatch')[0])  # override 行は他の節に混ぜない
         out = self.ltq('check', 'src/v.cpp:2')
         self.assertIn('indexed: override Derived::Draw at col 30  [overrides Base::Draw]', out)
 
     def test_virtual_call_kinds(self):
         # 仮想関数の呼び出しの形: 限定名が無ければ [dynamic](実行時に受け手の型の上書きが動く)、Base::f()・Super::f() は
-        # [static](その関数そのもの)。上書きの中からなら、上書きから基底の実装を呼ぶもの。索引の印(call-dynamic・
+        # [static](その関数そのもの)。上書きの中からなら [super](上書きから基底の実装を呼ぶもの)。索引の印(call-dynamic・
         # call-static)があればそれで、無ければ(前の ltidx の索引)行の文面で決める(1 行に名前が 2 つあればソースの行と列で)。
         # 仮想でない関数の呼び出しには付けない
         lines = ['struct Base { virtual void Tick(int); void Plain(); };',
@@ -322,18 +323,18 @@ class LtqTest(unittest.TestCase):
             ('Base::Tick', 'call', 'Macro', 'src/k.cpp:8:23', lines[7]),  # マクロの中。行に名前が無い
         ], [], tus=('src/k.cpp',))
         out = self.ltq('refs', 'Base::Tick')
-        self.assertIn('  call   src/k.cpp:2  [in Mid::Tick]  [static, from an override]  | struct Mid', out)
+        self.assertIn('  call   src/k.cpp:2  [in Mid::Tick]  [super]  | struct Mid', out)
         self.assertIn('  call   src/k.cpp:4  [in Run]  [dynamic]  | void Run', out)  # 役割の -dynamic は見せない
         self.assertIn('  call   src/k.cpp:5  [in Old]  [dynamic]  | void Old', out)
         self.assertIn('  call   src/k.cpp:6  [in Mixed]  [static]  | void Mixed', out)
         self.assertIn('  call   src/k.cpp:8  [in Macro]  | void Macro', out)
-        self.assertIn('  (virtual calls: 2 [dynamic]: no qualifier, so at runtime they run the override for the receiver\'s'
-                      ' dynamic type (the query or one of its 2 overrides under "virtual dispatch"); 2 [static]'
-                      ' (Base::f(), Super::f()): they always run the query itself, 1 of them from inside an override calling'
-                      ' up to the query; 1 not told apart from the line text)\n', out)
+        self.assertIn('  (virtual calls, resolved by clang: 2 [dynamic]: no qualifier; the override for the receiver\'s'
+                      ' runtime type runs (the query or one of its 2 overrides); 1 [static]: Base::f(), the query itself runs;'
+                      ' 1 [super]: Super::f() or Base::f() inside an override, calling up to the query; 1 not told apart)\n',
+                      out)
         # 上書きへの呼び出し: Super::Tick は Leaf::Tick(Mid::Tick の上書き)の中から。クラスの中の Tick(0) は this 越し
-        self.assertIn('too): 2 (1 [dynamic]; 1 [static], 1 of them from inside an override calling up)\n', out)
-        self.assertIn('    call   src/k.cpp:3  Mid::Tick  [in Leaf::Tick]  [static, from an override]', out)
+        self.assertIn('too): 2 (1 [dynamic]; 1 [super])\n', out)
+        self.assertIn('    call   src/k.cpp:3  Mid::Tick  [in Leaf::Tick]  [super]', out)
         self.assertIn('    call   src/k.cpp:3  Leaf::Tick  [in Leaf::Tick]  [dynamic]', out)
         # 仮想でない関数
         out = self.ltq('refs', 'Base::Plain')
@@ -341,8 +342,7 @@ class LtqTest(unittest.TestCase):
         self.assertNotIn('virtual calls', out)
         # 上書きの側から問うと、基底への呼び出しも形で分ける(Base::Tick(n) は問い合わせを呼ばない)
         out = self.ltq('refs', 'Mid::Tick')
-        self.assertIn('they are not counted above: 5 (2 [dynamic]; 2 [static], 1 of them from inside an override calling'
-                      ' up; 1 not told apart)\n', out)
+        self.assertIn('they are not counted above: 5 (2 [dynamic]; 1 [static]; 1 [super]; 1 not told apart)\n', out)
 
     def family(self, n=12, far=0):
         """Base::Tick と、それを上書きする D00..::Tick(宣言は src/d.h、定義と Base::Tick の呼び出しは src/d.cpp)。
@@ -375,9 +375,9 @@ class LtqTest(unittest.TestCase):
         self.assertIn('reaches them too): 1 (1 [dynamic])\n    call   src/d.cpp:13  D00::Tick  [in All]  [dynamic]'
                       '  | void All(D00* d) { d->Tick(1); }\n', out)
         # 上書きの中の Base::Tick(v) は、上書きから基底の実装を呼ぶもの(実行時の型に関係なく、問い合わせそのものが動く)
-        self.assertIn('  call   src/d.cpp:1  [in D00::Tick]  [static, from an override]  | void D00::Tick(int v)', out)
-        self.assertIn('  (virtual calls: 12 [static] (Base::f(), Super::f()): they always run the query itself, 12 of them'
-                      ' from inside an override calling up to the query)\n', out)
+        self.assertIn('  call   src/d.cpp:1  [in D00::Tick]  [super]  | void D00::Tick(int v)', out)
+        self.assertIn('  (virtual calls, resolved by clang: 12 [super]: Super::f() or Base::f() inside an override, calling'
+                      ' up to the query)\n', out)
         self.assertNotIn('more overrides', out)
         # 上書きの宣言と定義の行は、1 行ずつ並べた行に数える(名前を含む行は 1 + 12 + 12 + 1 で、全部)
         self.assertTrue(out.endswith('\n== coverage: all 26 lines that contain the word "Tick" are listed above, one per line'

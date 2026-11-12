@@ -1397,19 +1397,19 @@ def cmd_refs(a, idx):
             if c not in below:
                 below[c] = closure([c], down)
             if r[2] in below[c]:
-                return 'static, from an override'
+                return 'super'
         return k
 
     def show(r, with_sym):
         return fmt(r, with_sym, idx, ranges, vtag(r) if r[1].startswith('call') else '')
 
     def kinds_of(rs):
-        """呼び出しの行の形ごとの数。(dynamic, static, そのうち上書きの中, 決まらない)。仮想関数でなければ None。"""
+        """呼び出しの行の形ごとの数。(dynamic, static, super, 決まらない)。仮想関数でなければ None。"""
         tags = [vtag(r) for r in rs]
         if not any(tags):
             return None
-        q = sum(t.startswith('static') for t in tags)
-        return (tags.count('dynamic'), q, tags.count('static, from an override'), len(tags) - q - tags.count('dynamic'))
+        n = [tags.count(k) for k in ('dynamic', 'static', 'super')]
+        return (*n, len(tags) - sum(n))
 
     calls = [r for r in target if r[1].startswith('call')]
     expands = [r for r in target if r[1] == 'expand']
@@ -1417,17 +1417,17 @@ def cmd_refs(a, idx):
     uses = sorted((r for r in target if not r[1].startswith(('call',) + DEFS) and r[1] not in ('expand', 'macro')), key=key)
     section('calls (resolved by clang)', [show(r, show_sym) for r in calls], a.limit, [(r[3], r[4]) for r in calls], listed, skip)
     ck = kinds_of(calls)
-    if calls and not remain:
+    if calls and not remain and not ck:
         print('  (exact: clang resolved each call from the declared type of its receiver, whatever the variable is named)')
-    if ck and not remain:
+    if ck and not remain:  # 仮想関数では、上の注記の代わりに形ごとの数(短い形で上限に収まるよう、1 行に)
         d, q, up_q, u = ck
         n_ov = len(closure(syms, down))
-        said = ([f'{d} [dynamic]: no qualifier, so at runtime they run the override for the receiver\'s dynamic type'
-                 + (f' (the query or one of its {n_ov} overrides under "virtual dispatch")' if n_ov else '')] if d else []) \
-            + ([f'{q} [static] (Base::f(), Super::f()): they always run the query itself'
-                + (f', {up_q} of them from inside an override calling up to the query' if up_q else '')] if q else []) \
-            + ([f'{u} not told apart from the line text'] if u else [])
-        print('  (virtual calls: ' + '; '.join(said) + ')')
+        said = ([f'{d} [dynamic]: no qualifier; the override for the receiver\'s runtime type runs'
+                 + (f' (the query or one of its {n_ov} overrides)' if n_ov else '')] if d else []) \
+            + ([f'{q} [static]: Base::f(), the query itself runs'] if q else []) \
+            + ([f'{up_q} [super]: Super::f() or Base::f() inside an override, calling up to the query'] if up_q else []) \
+            + ([f'{u} not told apart'] if u else [])
+        print('  (virtual calls, resolved by clang: ' + '; '.join(said) + ')')
     if any(r[1].endswith('-using') for r in target) and not remain:
         print('  (call-using: a call through a using-declaration inside a template, resolved from its instantiations)')
     if expands:
@@ -1465,15 +1465,13 @@ def cmd_refs(a, idx):
         k = kinds_of(rs)
         if not k:
             return ''
-        d, q, up_q, u = k
-        said = ([f'{d} [dynamic]'] if d else []) \
-            + ([f'{q} [static]' + (f', {up_q} of them from inside an override calling up' if up_q else '')] if q else []) \
-            + ([f'{u} not told apart'] if u else [])
+        said = [f'{n} [{t}]' for n, t in zip(k, ('dynamic', 'static', 'super')) if n] \
+            + ([f'{k[3]} not told apart'] if k[3] else [])
         return ' (' + '; '.join(said) + ')'
 
     if bases and (via or not remain):
         print(f'  the query overrides {", ".join(sorted(bases))}. [dynamic] calls to those may run the query at runtime,'
-              ' depending on the dynamic type of the receiver; [static] ones (Base::f()) run that class\'s function,'
+              ' depending on the dynamic type of the receiver; [static] and [super] ones (Base::f()) run that class\'s function,'
               f' not the query; they are not counted above: {len(via)}' + split(via))
         for s in [show(r, True) for r in via][:a.limit]:
             print('    ' + s)

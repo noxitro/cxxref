@@ -728,7 +728,7 @@ class ListFilesTest(unittest.TestCase):
         # 大きな階層の virtual: 結果には直接の呼び出しを全部と上書きを 10 個、残りの上書きは 1 回で読める大きさのファイルに。
         # 名前を含むだけの行(コメント、別の記号に解決された行)は、直す先の一覧に混ぜず、別のファイルに
         self.family()
-        text = self.refs(7000, 1500)
+        text = self.refs(6000, 1500)
         # 上書きの族を絞る形を、節ごとの行数を減らす形より先に試す(直接の呼び出しを削らない)
         self.assertIn('== calls (resolved by clang): 30\n', text)
         for i in range(30):
@@ -765,7 +765,7 @@ class ListFilesTest(unittest.TestCase):
 
         # 結果の形が違えば(並べた行が違えば)、同じ名前でも別のファイル。先に知らせた一覧は書き換えない
         # (同じサーバーを使う別のエージェントが読んでいる途中でも、結果と一覧が食い違わない)
-        self.refs(5500, 1500)
+        self.refs(4500, 1500)
         files2 = self.cfg.last_lists
         self.assertTrue(files2)
         self.assertFalse(set(files) & set(files2))
@@ -775,7 +775,7 @@ class ListFilesTest(unittest.TestCase):
         with open(stale, 'w') as f:
             f.write('x')
         ino = [os.stat(p).st_ino for p in files]
-        self.assertEqual(self.refs(7000, 1500), text)
+        self.assertEqual(self.refs(6000, 1500), text)
         self.assertEqual(self.cfg.last_lists, files)
         self.assertEqual([os.stat(p).st_ino for p in files], ino)
         self.assertFalse(os.path.exists(stale))
@@ -785,7 +785,7 @@ class ListFilesTest(unittest.TestCase):
     def test_rest_that_fits_is_one_file(self):
         # 残りが 1 回で読める大きさなら、1 つのファイル(名前を含むだけの行も一緒)
         self.family(n=12, far=3)
-        text = self.refs(3700, 18000)
+        text = self.refs(3300, 18000)
         files = self.cfg.last_lists
         self.assertEqual(len(files), 1)
         self.assertRegex(os.path.basename(files[0]), r'^Base_Tick-[0-9a-f]{8}[.]txt$')
@@ -803,7 +803,7 @@ class ListFilesTest(unittest.TestCase):
         files = self.cfg.last_lists
         self.assertEqual([os.path.basename(p).split('.', 1)[1] for p in files], ['1.txt', '2.txt', '3.txt', 'more.txt'])
         self.assertTrue(text.endswith('... output cut at 1500 bytes (the client limit). Every line, one per line: '
-                                      + ', '.join(f'"{p}"' for p in files) + ' (4 KB: search it with grep). Ask for a narrower'
+                                      + ', '.join(f'"{p}"' for p in files) + ' (3 KB: search it with grep). Ask for a narrower'
                                       ' name, or pass path / exclude / limit to see the rest.\n'), text[-700:])
         self.assertEqual(len(self.positions(''.join(self.read(p) for p in files))), 86)
 
