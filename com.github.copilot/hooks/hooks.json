@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "hooks": {
+    "preToolUse": [
+      {
+        "type": "command",
+        "command": "python -I \"${PLUGIN_ROOT}/scripts/cxxref_hook.py\"",
+        "timeoutSec": 10
+      }
+    ]
+  }
+}
