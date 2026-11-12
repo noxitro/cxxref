@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { enableRoot, escapeMarkdown, findLtidx, gitTop, indexRoot, lastCwd, makeNotifier, parseEnableArgs, parseIndexArgs, parseProgress, pluginRoot, progressNote, projectChoices, savedProject, runsUnderCli, statusHint, targetRoot, wantDialog } from "./lib.mjs";
+import { enableRoot, escapeMarkdown, findLtidx, gitTop, indexRoot, lastCwd, makeNotifier, parseEnableArgs, parseIndexArgs, parseProgress, pathKey, pluginRoot, progressNote, projectChoices, savedProject, runsUnderCli, statusHint, targetRoot, wantDialog } from "./lib.mjs";
 
 test("projectChoices: フルパスの行を、ルートからの相対パスの選択肢にする", () => {
   const root = join(tmpdir(), "cxxref-lib-test");
@@ -192,7 +192,7 @@ test("runsUnderCli: 拡張に渡された SDK が CLI の配布物の中なら C
   // 指定された場所(DIST_DIR)が読めずに別の場所を読み込んだ: 実際に読み込んだ場所(RESOLVED)の下なら CLI
   assert.equal(runsUnderCli({ COPILOT_SDK_PATH: String.raw`${dist}\copilot-sdk`, COPILOT_CLI_DIST_DIR: String.raw`C:\broken`, COPILOT_CLI_RESOLVED_DIST_DIR: dist }, no), true);
   // 配布物の場所が渡されなければ、SDK の親が CLI の配布物に見えるかで決める
-  assert.equal(runsUnderCli({ COPILOT_SDK_PATH: String.raw`${dist}\copilot-sdk` }, (d) => d === dist.toLowerCase()), true);
+  assert.equal(runsUnderCli({ COPILOT_SDK_PATH: String.raw`${dist}\copilot-sdk` }, (d) => pathKey(d) === pathKey(dist)), true);
   assert.equal(runsUnderCli({ COPILOT_SDK_PATH: String.raw`C:\app\copilot-sdk`, COPILOT_CLI_PATH: "x" }, no), false);
   // SDK の場所が分からなければアプリとみなす(CLI の印があっても。アプリも渡す)
   assert.equal(runsUnderCli({ COPILOT_CLI_PATH: String.raw`C:\copilot.exe` }, no), false);
