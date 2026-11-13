@@ -12,6 +12,19 @@ rep 0(試し)と、exit が 0 でない回は除く。記録は runs13/index.jso
 import argparse, collections, json, math, os, random, statistics as st, sys
 
 BENCH = os.path.dirname(os.path.abspath(__file__))
+# Claude Haiku 5.5 の単価(1 回のプロンプトが 10 万トークン以下のとき。100 万トークンあたりのドル)。入力 $0.10・出力 $0.50、
+# キャッシュ読みは入力の 0.1 倍、5 分のキャッシュ書きは 1.25 倍【公式: claude-api skill の移行ガイド、2026-11-03 の写し】。
+# 比は gpt-6-luna の AI credits の当てはめ(キャッシュ読み 1 : 書き 12.5 : 出力 50)と同じ
+HAIKU_USD = {'uncached': 0.10, 'cache_write': 0.125, 'cache_read': 0.01, 'output': 0.50}
+
+
+def haiku_usd(r):
+    """1 回の費用(ドル)を、記録のトークンの内訳に Haiku 5.5 の単価を掛けて出す(BYOK の回は AI credits が 0 なので)。"""
+    if r.get('input') is None:
+        return None
+    uncached = r['input'] - r.get('cache_read', 0) - r.get('cache_write', 0)
+    return (uncached * HAIKU_USD['uncached'] + r.get('cache_write', 0) * HAIKU_USD['cache_write']
+            + r.get('cache_read', 0) * HAIKU_USD['cache_read'] + r.get('output', 0) * HAIKU_USD['output']) / 1e6
 
 
 def main():
@@ -21,12 +34,14 @@ def main():
     ap.add_argument('--base', default='A')
     ap.add_argument('--tasks', help='この問題のファイル(local/v13-tasks-stage2-a.json など)の問題だけに絞る')
     ap.add_argument('--only', help='問題の id をこの文字で始まるものに絞る(例: S1-requests,S1-newtonsoft,S1-zod)')
-    ap.add_argument('--metric', default='input', help='比べる値: input(入力トークン。既定)・ai_credits(Copilot の AI credits)・sec など')
+    ap.add_argument('--metric', default='input', help='比べる値: input(入力トークン。既定)・ai_credits(Copilot の AI credits)・haiku_usd(トークンの内訳に Haiku 5.5 の単価を掛けたドル)・sec など')
     a = ap.parse_args()
     conds = a.conds.split(',')
     only = {t['id'] for t in json.load(open(os.path.join(BENCH, a.tasks), encoding='utf-8'))} if a.tasks else None
     prefixes = tuple(a.only.split(',')) if a.only else None
     rs = [json.loads(l) for l in open(os.path.join(BENCH, 'runs13', 'index.jsonl'), encoding='utf-8-sig')]
+    for r in rs:
+        r['haiku_usd'] = haiku_usd(r)
     rs = [r for r in rs if r['round'] == a.round and r['rep'] > 0 and r.get('exit') == 0 and r['cond'] in conds
           and r.get(a.metric) is not None
           and (only is None or r['task'] in only) and (prefixes is None or r['task'].startswith(prefixes))]

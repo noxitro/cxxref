@@ -1,6 +1,6 @@
 ---
 name: cxxref
-description: Use before grep when you need where a C++ function, type, variable or macro is used or called - "where is X used", "what breaks if X changes", all callers before changing a signature. Resolved by clang over every translation unit, with the reason for each text match it leaves out. Needs a .index folder in the repository. Not for explaining code, adding logs or tests, or editing a spot you already know.
+description: Use before grep when the question is where a C++ function, type, variable or macro is used or called, or what a change to it would affect ("where is X used", "what breaks if X changes", list the callers). Resolved by clang over every translation unit, with the reason for each text match it leaves out. Needs a .index folder in the repository. Not when you are asked to make the change yourself (editing callers), explain code, or add logs or tests - use grep and view as usual.
 ---
 
 # cxxref
@@ -23,4 +23,4 @@ Reading the result
 - If the last line names list files, read those files (each fits in one read) instead of grepping
 - "No cxxref index": search with rg as usual. Building one takes minutes; ask the user first
 
-When fixing callers: open only around the `calls` lines. After editing, do not run `refs` again to verify (the index is being rebuilt); rg is enough.
+If the task turns into editing: open only around the `calls` lines. After editing, do not run `refs` again to verify (the index is being rebuilt); rg is enough.
