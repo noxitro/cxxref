@@ -86,10 +86,11 @@ if (-not (Get-Command copilot -ErrorAction SilentlyContinue)) {
     return
 }
 # copilot は copilot.ps1 / copilot.cmd。pwsh から .ps1 を呼ぶと -- が消えるので、cmd から呼ぶ
-# cxxref プラグイン(チームのマーケットプレイスなどから入れたもの)が MCP サーバーを持っているので、入っていれば登録しない
+# cxxref プラグイン(チームのマーケットプレイスなどから入れたもの)は、skill で同じ索引を引く。MCP サーバーも足すと、
+# ツールの定義(毎回約 600 トークン)を二重に送るだけなので、入っていれば登録しない
 $plugins = try { @(& cmd /c 'copilot plugin list --json 2>nul' | Out-String | ConvertFrom-Json) } catch { @() }
 if ($plugins | Where-Object { $_.name -eq 'cxxref' -and $_.enabled -ne $false }) {
-    'Copilot CLI には cxxref プラグインが入っているので、MCP サーバーの登録は要りません(プラグインのものが使われます)'
+    'Copilot CLI には cxxref プラグインが入っているので、MCP サーバーの登録は要りません(プラグインの skill が同じ索引を引きます)'
     return
 }
 $info = & cmd /c 'copilot mcp get code-ref-index 2>&1' | Out-String
