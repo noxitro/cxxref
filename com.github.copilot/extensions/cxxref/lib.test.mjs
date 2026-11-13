@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { test } from "node:test";
 import { enableRoot, escapeMarkdown, findLtidx, gitTop, indexRoot, lastCwd, makeNotifier, parseEnableArgs, parseIndexArgs, parseProgress, pathKey, pluginRoot, progressNote, projectChoices, savedProject, runsUnderCli, statusHint, targetRoot, wantDialog } from "./lib.mjs";
 
@@ -118,6 +118,8 @@ test("targetRoot: 引数(引用符・相対)か、親へさかのぼって .inde
     assert.equal(targetRoot("", join(repo, "src", "sub")).root, repo);
     assert.equal(targetRoot(`"${join(repo, "src")}"`, d).root, join(repo, "src"));
     assert.equal(targetRoot("src", repo).root, join(repo, "src"));
+    // 区切りが重なった絶対パス(アプリが \ を二重にして渡したとき)も、ふつうの形に揃える
+    assert.equal(targetRoot(join(repo, "src").replaceAll(sep, sep + sep), d).root, join(repo, "src"));
     assert.match(targetRoot("none", repo).error, /フォルダがありません/);
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
