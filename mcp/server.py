@@ -545,8 +545,11 @@ def run_ltq(cfg, args, start=None):
     # UE5 の FAnimInstanceProxy::Initialize は、差分パスを掛けた索引で無効な #if とマクロの引数の行が増え、節ごとの行数を
     # 2 まで下げて、16 ある直接の呼び出しを 2 つしか並べなかった
     forms += [short + low + ['--other-limit', str(n)] for n in FIT_LIMITS if n < asked]
+    # 節ごとの行数を下げるときは、各行数で、まずどの節も同じ行数にした形を試し(並ぶ行がいちばん多い)、超えたら
+    # 解決しなかった行の節だけを最小にした形を試す(呼び出しを同じ行数に保ったまま縮む)
     least = ['--other-limit', str(min(FIT_LIMITS[-1], asked))]
-    forms += [short + low + least + ['--limit', str(n)] for n in FIT_LIMITS if n < asked]
+    forms += [short + low + more + ['--limit', str(n)] for n in FIT_LIMITS if n < asked
+              for more in ([], least) if not more or n > FIT_LIMITS[-1]]
     for form in [None] + forms:
         if form is not None:
             code, text = run(form)
