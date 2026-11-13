@@ -381,8 +381,8 @@ def write_lists(paths, root, args, texts, shown=None):
     中身が前と同じなら書き直さない(更新日時だけ新しくする。読んでいる相手のファイルを差し替えない)。"""
     key = [os.path.normcase(os.path.abspath(root))] + [os.path.normcase(os.path.abspath(p)) for p in paths]
     skip = False
-    for x in args[1:]:  # --limit は一覧に効かない(同じ一覧になる)ので、鍵に入れない
-        if skip or x == '--limit':
+    for x in args[1:]:  # --limit・--other-limit は一覧に効かない(同じ一覧になる)ので、鍵に入れない
+        if skip or x in ('--limit', '--other-limit'):
             skip = not skip
             continue
         key.append(x)
@@ -528,6 +528,8 @@ def run_ltq(cfg, args, start=None):
     # - 報告しない節(コメント・文字列など)を件数にまとめる(--compact)
     # - 無効な #if の中やマクロの定義の中の一致もフォルダごとの件数にする(どのフォルダに何件あるかは残り、path で出し直せる)
     # - 上書きの族をさらに絞る(5、2。直接の呼び出しを減らす前に)
+    # - 索引が問い合わせに解決しなかった行(解決先の決まらないテンプレートの呼び出し、索引に無い一致など)の節の行数を減らす
+    #   (--other-limit。解決済みの呼び出しは答えそのものなので、先に減らさない)
     # - 節ごとの行数を減らす(解決済みの行だけで数百行ある名前。呼び出し側が渡した limit より小さい値だけを試す。後ろに足した
     #   --limit が勝つ)
     # どの形でも、1 行ずつ並べなかった行は、残りの一覧としてファイルに書き、最後の行(coverage)の案内をその場所に置き換える
@@ -540,7 +542,11 @@ def run_ltq(cfg, args, start=None):
     # 少し超え、節ごとの行数を 5 まで下げて、16 ある直接の呼び出しを 5 つしか並べなかった)。絞った分は残りの一覧に出る
     forms += [short + ['--family', str(n)] for n in FIT_FAMILY if n < asked] if virt else []
     low = ['--family', str(min(FIT_FAMILY[-1], asked))] if virt else []
-    forms += [short + low + ['--limit', str(n)] for n in FIT_LIMITS if n < asked]
+    # UE5 の FAnimInstanceProxy::Initialize は、差分パスを掛けた索引で無効な #if とマクロの引数の行が増え、節ごとの行数を
+    # 2 まで下げて、16 ある直接の呼び出しを 2 つしか並べなかった
+    forms += [short + low + ['--other-limit', str(n)] for n in FIT_LIMITS if n < asked]
+    least = ['--other-limit', str(min(FIT_LIMITS[-1], asked))]
+    forms += [short + low + least + ['--limit', str(n)] for n in FIT_LIMITS if n < asked]
     for form in [None] + forms:
         if form is not None:
             code, text = run(form)
