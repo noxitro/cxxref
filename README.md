@@ -85,18 +85,23 @@ Copilot で C++ の呼び出し箇所を探すと、LSP(clangd)を渡しても�
 
 ## チームで使う(Copilot CLI のプラグイン)
 
-このリポジトリは、そのまま Copilot CLI のプラグイン `cxxref` として入れられます。中身は MCP サーバー(`mcp.json`)と、スラッシュコマンド `/cxxref-index`・`/cxxref-enable` を足す拡張(`com.github.copilot\extensions\cxxref`)です。使い方の指示は持ちません。指示は、索引を使うリポジトリだけで `/cxxref-enable on` で入れます(以前の版は rule として持っていて、プラグインが有効なリポジトリのすべてで毎回読まれていました)。LLVM の用意と ltidx のビルドは要りません(ltidx はリリースの配布物を使います)。Python 3.10 以降・pwsh・Visual Studio(`compile_commands.json` を作るのに使います)は要ります。
+このリポジトリは、そのまま Copilot CLI のプラグイン `cxxref` として入れられます。中身は次の 3 つです(詳しくは下の「skill と hooks」)。
+
+- skill `cxxref`(`skills\cxxref`): 「この関数はどこで使われているか」「変えると何に影響するか」の問いのときだけ、モデルが読んで索引を引きます。ふだんモデルに送るのは説明文だけです
+- hooks(`com.github.copilot\hooks`): 索引のあるリポジトリでだけ、セッションの始めに skill の使いどころを 1 文で知らせます。skill が索引を引くコマンドを、確認なしで通します
+- 拡張(`com.github.copilot\extensions\cxxref`): 索引を作るスラッシュコマンド `/cxxref-index`
+
+MCP サーバーは、プラグインには入れていません。ツールの定義は、使わない回でもモデルを呼ぶたびに送られるためです(0.5.6 までは入っていました)。VS Code など skill の無いクライアントで使うときは、手で登録します([mcp/README.md](mcp/README.md))。LLVM の用意と ltidx のビルドは要りません(ltidx はリリースの配布物を使います)。Python 3.10 以降・pwsh・Visual Studio(`compile_commands.json` を作るのに使います)は要ります。
 
 マーケットプレイスに載せるだけでは使えません。全体の流れは次のとおりです(詳しくは下の各節)。
 
 | 誰が | いつ | すること |
 |---|---|---|
 | チームのマーケットプレイスの管理者 | 1 回(版を上げるときも) | マーケットプレイスに cxxref を載せる |
-| 各メンバー | PC で 1 回 | プラグインを入れる(手で入れるか、リポジトリの設定で自動で入れる)。`/cxxref-index`・`/cxxref-enable` を使うなら、機能フラグ `EXTENSIONS` を有効にする |
+| 各メンバー | PC で 1 回 | プラグインを入れる(手で入れるか、リポジトリの設定で自動で入れる)。`/cxxref-index` を使うなら、機能フラグ `EXTENSIONS` を有効にする |
 | 各メンバー | リポジトリ(手元の作業フォルダ)ごとに 1 回 | セッションで `/cxxref-index` を実行して索引を作る(ltidx が無ければ先に取ってくる。モデルは呼ばない)。拡張を使わないなら `get-ltidx.bat` と `index-project.bat`。索引は git に入れないので各自が作る。規模によって数分 |
-| 各メンバー(または代表が 1 回) | リポジトリごとに 1 回 | `/cxxref-enable on` で使い方の指示を入れる(自分だけ)。チームで揃えるなら、代表が `/cxxref-enable on project` で入れてコミットする |
 
-その後は、コードを変えても MCP サーバーが変わった TU だけを作り直すので、手で作り直す必要はありません。
+使い方の指示を入れる手順はありません。索引ができていれば、次のセッションから hook が skill の使いどころを知らせます。コードを変えても、skill が索引を引くときに変わった TU だけを作り直すので、手で作り直す必要はありません。
 
 ### チームのマーケットプレイスに載せる
 
@@ -106,7 +111,7 @@ Copilot で C++ の呼び出し箇所を探すと、LSP(clangd)を渡しても�
 {
   "name": "cxxref",
   "source": { "source": "github", "repo": "noxitro/cxxref", "ref": "v0.5.7" },
-  "description": "C++ reference index (clang libtooling) as MCP tools",
+  "description": "C++ reference index (clang libtooling) as a Copilot skill",
   "version": "0.5.7"
 }
 ```
@@ -130,10 +135,24 @@ Copilot で C++ の呼び出し箇所を探すと、LSP(clangd)を渡しても�
 2. **索引を作る(リポジトリごと)。セッションの中で `/cxxref-index` を実行するのがいちばん簡単です**(下の「`/cxxref-index`」)。ltidx が無ければ先に取ってきて、作業中のリポジトリの索引を裏で作ります。モデルは呼ばないので、トークンを使いません。拡張を使わない(使えない)ときは、次の 2 つを手で行います
    - 手で行うときの ltidx の取得(PC で 1 回。プラグインを更新したらもう一度): プラグインのフォルダ(`%USERPROFILE%\.copilot\installed-plugins\<マーケットプレイス名>\cxxref`)の `scripts\get-ltidx.bat` をダブルクリックします。リリースから plugin.json の版の配布物を取ってきて、sha256 を確かめてから `%LOCALAPPDATA%\cxxref\ltidx` に置きます
    - 手で行うときの索引づくり(リポジトリごと): 同じフォルダの `scripts\index-project.bat` をダブルクリックし、ソースのルートを入れます(上の「使い始める」の手順 3 と同じです)。セッションの中なら、`!` を付けるとモデルを通さずに動きます: `!"%USERPROFILE%\.copilot\installed-plugins\<マーケットプレイス名>\cxxref\scripts\index-project.bat" -Root .`
-   - 以後はコードを変えても、MCP サーバーが変わった TU だけを作り直します
-   - 索引の無いリポジトリで `refs` が呼ばれると、MCP サーバーは「索引が無い」と答え、作り方のコマンドを絶対パスで添えます。使い方の指示は、作る前にユーザーに確かめるようモデルに指示しています
-3. **使い方の指示を入れる(リポジトリごと)**: セッションの中で `/cxxref-enable on` を実行します(下の「`/cxxref-enable`」)。自分の手元だけに入り、git には出ません。チームで揃えるなら `/cxxref-enable on project` で入れてコミットします
-   - 入れないと、モデルはツールの説明だけを頼りに `refs` を使うかどうかを決めます。計測(v13、指示なしの条件 M)では、`refs` を呼んだのは 40 回中 24 回でした
+   - 以後はコードを変えても、skill が索引を引くときに変わった TU だけを作り直します
+   - 索引の無いリポジトリで skill が使われると、「索引が無い」と答え、作り方のコマンドを絶対パスで添えます。作る前にユーザーに確かめるよう、skill に書いています
+3. **新しいセッションを始める**: 索引のあるリポジトリでは、hook がセッションの始めに skill の使いどころを知らせます。使い方の指示を入れる手順(以前の `/cxxref-enable on`)は要りません
+
+### skill と hooks
+
+使う場面だけで索引を引き、それ以外では従来どおり rg と view で進むように分けています(どの場面で効くかの計測は [docs/benchmarks.md](docs/benchmarks.md))。
+
+| 場面 | 何が起きるか |
+|---|---|
+| C++ の記号が「どこで使われているか」「変えると何に影響するか」を聞く | モデルが skill `cxxref` を読み、`mcp\cxxref_cli.py refs <名前>` を 1 回実行する。clang が解決した呼び出しと、索引に入らない一致の理由が返る |
+| 呼び出し側を直す・説明する・ログやテストを足す | skill は読まれない(説明文で外している)。従来どおり rg と view で進む |
+| 索引の無いリポジトリ(C++ でないリポジトリを含む) | hook は何も足さない。常に送られるのは skill の説明文(約 100 トークン)だけ |
+
+- sessionStart の hook: 作業フォルダかその親に `.index` があるときだけ、skill の使いどころを 1 文(約 60 トークン)で足します。説明文だけでは、Claude Haiku 5.5 は skill を読まずに grep から始めました(gpt-6-luna は読みました)
+- preToolUse の hook: プラグインは作業フォルダの外にあるので、skill の実行するコマンドは毎回確認が要り、確認できない場面(`copilot -p`)では断られます。そこで、このプラグインの `cxxref_cli.py` を `refs` か `check` で呼ぶだけの PowerShell の 1 行に限って、確認を通します。ASCII 以外の文字・shell の記号(`; | & $` など)・フォルダ付きの `python`・`-I` の無いもの・`--root`・UNC のパスを含むものは通しません(ふだんの確認になります)
+- 自動で作り直すのは、この PC で `index-project`(`/cxxref-index` も同じ)が作った索引だけです。作り直しの記録(`.index\*.recipe.json`)の指紋を `%LOCALAPPDATA%\cxxref\trusted-recipes.json` に登録しておき、一致したときだけ作り直します。リポジトリに置かれた記録をそのまま信じると、細工したリポジトリを開いただけで、clang の引数を通じて任意の DLL を読ませられるためです。登録の無い索引は、行を付け直した結果で答え、作り直し方を添えます
+- skill からの実行は、呼ぶたびに索引を開き直します(MCP サーバーのように開いたまま保たない)。古い索引は作り直しを最大 120 秒待ってから答えます。時間より、モデルに送る量を減らすことを優先しています
 
 ### `/cxxref-index`(索引を作るスラッシュコマンド)
 
@@ -159,6 +178,8 @@ Copilot で C++ の呼び出し箇所を探すと、LSP(clangd)を渡しても�
 
 ### `/cxxref-enable`(使い方の指示を足す・消すスラッシュコマンド)
 
+**プラグインの利用者には要りません**(skill と hooks が代わりをします)。入れる指示は MCP サーバーの `refs` / `check` を前提にしているので、MCP サーバーを手で登録して使う人向けです。
+
 同じ拡張が足すコマンドです。`scripts\setup-instructions.ps1` を動かすだけで、モデルは呼びません。足す先を、ローカル(自分だけ)かプロジェクト(コミットすればチーム全員)から選べます。
 
 | 打つもの | すること |
@@ -175,9 +196,7 @@ Copilot で C++ の呼び出し箇所を探すと、LSP(clangd)を渡しても�
 - 指示はセッションの始めに読まれるので、新しいセッションから効きます。今のセッションの途中から効くかは確かめていません
 - 入れる中身は [scripts/cxxref-instructions.md](scripts/cxxref-instructions.md) です(以前のプラグインの rule と同じもの)。プラグインを使わず MCP サーバーだけを登録しているリポジトリでは、`setup-instructions.bat` で同じことができます
 
-`setup.bat` の Copilot CLI への登録との関係: cxxref プラグインが入っていれば、`setup.bat` は MCP サーバーを登録しません。手で登録した `code-ref-index` が残っていても、同じ名前のプラグインのものが使われます(公式の優先順位)。要らなければ `copilot mcp remove code-ref-index` で消せます。
-
-プラグインとして入れると、MCP サーバーの作業フォルダはプラグインの場所になります(Copilot CLI 1.0.105 で確かめました)。そのため、サーバーは作業中のフォルダを、ツールの引数 `root`(使い方の指示がモデルに渡させます)か、渡されなければ Copilot CLI のセッションの記録から決めます([mcp/README.md](mcp/README.md))。
+`setup.bat` の Copilot CLI への登録との関係: cxxref プラグインが入っていれば、`setup.bat` は MCP サーバーを登録しません(skill が同じ索引を引くので、ツールの定義を足しても送る量が増えるだけです)。0.5.6 までのプラグインや手で登録した `code-ref-index` が残っていれば、`copilot mcp remove code-ref-index` で消せます。
 
 ### 版を出す(このリポジトリの保守)
 

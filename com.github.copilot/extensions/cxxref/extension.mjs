@@ -170,7 +170,7 @@ async function indexCommand(ctx) {
     const r = await run(join(plugin, "scripts", "index-project.ps1"), args, log).finally(stop);
     const sec = Math.round((Date.now() - t0) / 1000);
     if (r.code === 0) {
-      await tell(`cxxref: 索引ができました(${sec} 秒、${dir})。以後は MCP サーバーの refs / check がこの索引を使い、コードを変えても自動で作り直します`);
+      await tell(`cxxref: 索引ができました(${sec} 秒、${dir})。以後は skill の cxxref(「どこで使われているか」の問い)がこの索引を使い、コードを変えても自動で作り直します`);
     } else {
       await tell(`cxxref: 索引づくりに失敗しました(${why(r)}、${sec} 秒)。ログ: ${log}`, "error");
     }
