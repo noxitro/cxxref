@@ -892,11 +892,19 @@ DEFINE = re.compile(rb'[ \t]*#[ \t]*define\b')
 DIRECTIVE = re.compile(rb'[ \t]*#[ \t]*(?:pragma|include|include_next|import|error|warning|line|region|endregion)\b')
 
 
+LINE_COMMENT = re.compile(rb'//|/\*(?!.*\*/)')
+STRING_LIT = re.compile(rb'"(?:\\.|[^"\\\n])*"')
+BLOCK_COMMENT_LINE = re.compile(rb'[ \t]*\*+(?:[ \t]|$)')  # ` * Initialize the ...`(ブロックコメントの続きの行)
+
+
 def lexical_hint(data, b, col):
-    """索引に無い一致の見当: 文字列リテラルの中か、マクロ定義の中か。b は一致した行の先頭の位置。"""
+    """索引に無い一致の見当: 文字列リテラルの中か、コメントの中か、マクロ定義の中か。b は一致した行の先頭の位置。
+    コメントの見当は、索引にコメントの範囲が無い行(無効な #if の中。clang は字句を読まない)のためのもの"""
     before = data[b:b + col - 1]
     if len(re.findall(rb'(?<!\\)"', before)) % 2 == 1:
         return 'string'
+    if LINE_COMMENT.search(STRING_LIT.sub(b'""', before)) or BLOCK_COMMENT_LINE.fullmatch(before):
+        return 'comment'
     while b > 0:  # 前の行が `\` で終わっていれば、続きの行なので遡る
         p = data.rfind(b'\n', 0, b - 1) + 1
         if not data[p:b].rstrip(b'\r\n').endswith(b'\\'):
@@ -1373,8 +1381,9 @@ def cmd_refs(a, idx):
     target = uniq
     n_alt = sum(1 for r in target + deps if r[9])
     if n_alt and not remain:
-        print(f'  {n_alt} lines below are marked [inactive: #if ...]: code the indexed configuration does not compile, parsed'
-              ' with that condition forced on (best effort). Still code: include them when renaming or changing a signature')
+        # 行の数は書かない(UE5 で「1 lines below」とあると、モデルがその 1 行を一覧の検索で探しにいった)
+        print('  (a line tagged [inactive: #if ...] is code the indexed configuration does not compile, parsed with that'
+              ' condition forced on (best effort). Still code: include it when renaming or changing a signature)')
     # 行ごとの索引の行(at)。テキストの一致のうち索引に行の無いもの(loose)のファイルと、無効な #if の中として解析した行の
     # ファイルについて、コメント・無効な #if の範囲を引く(下の「索引に無い一致」の分類と、無効な行に添える条件に使う)
     at = {}
@@ -1600,6 +1609,23 @@ def cmd_refs(a, idx):
             return f'  (`{k}` elsewhere resolves to {s} -> probably not the query; check the receiver type)', 'not'
         return '', ''
 
+    # 別のクラスの修飾名: 修飾名で問われたとき、名前の前の修飾が、問い合わせのクラスでも上書きの族のクラスでもない行
+    # (無効な #if の中の `void FOther::Initialize(` など。UE5 の FAnimInstanceProxy::Initialize では、差分パスの後も
+    # 件数で残る無効な #if の行の 3 割がこれだった)。Super:: などの基底を指す別名は族として扱う
+    own = ({parts[-2]} if len(parts) > 1 else set()) | {s.split('::')[-2] for s in set(syms) | bases | derived if '::' in s}
+    own |= {'Super', 'ThisClass', 'Base', 'BaseClass', 'Parent', 'ParentClass', 'Inherited', 'BaseType', 'base_type'}
+    scoped = re.compile(r'(?<![\w:])(?:\w+\s*::\s*)*([A-Za-z_]\w*)\s*(?:<[^<>;]*>)?\s*::\s*' + re.escape(short) + r'(?!\w)')
+    word = re.compile(r'(?<!\w)' + re.escape(short) + r'(?!\w)')
+
+    def other_scope(src):
+        """名前がどれも、族でないクラスの修飾付きで書かれていれば、その修飾(1 つ目)。そうでなければ ''"""
+        if not tail or named(src):
+            return ''
+        qs = [m.group(1) for m in scoped.finditer(src)]
+        if not qs or len(qs) != len(word.findall(src)) or any(q in own for q in qs):
+            return ''
+        return qs[0]
+
     def classify():
         cats = {k: [] for k in ('comment', 'inactive', 'dropped', 'local', 'unparsed', 'string', 'macro', 'directive', 'other')}
         for path, line, col, src, stale, hint in loose:
@@ -1609,7 +1635,15 @@ def cmd_refs(a, idx):
                 k = (hint or 'other') if path in parsed else 'unparsed'
             elif k not in cats:  # この ltq が知らない種類(新しい ltidx が書いた範囲)。落とさずに「その他」で並べる
                 k, span = 'other', ''
+            elif k == 'inactive' and hint in ('comment', 'string', 'directive'):
+                # 無効な #if の中は clang が字句を読まないので、索引にコメントや文字列の範囲が無い。文面の見当で分ける
+                # (UE5 の Initialize では、差分パスの後も件数で残る無効な #if の行の半分近くがコメントだった)
+                k, span = hint, ''
             like, verdict = resolved_like(src) if k in ('unparsed', 'other') else ('', '')
+            if not verdict and k in ('inactive', 'unparsed', 'other'):
+                q = other_scope(src)
+                if q:
+                    like, verdict = f'  (written as {q}::{short}, a class outside the overrides -> probably not the query)', 'not'
             if k in ('inactive', 'dropped') and named(src):
                 # 短い形でも並べる(修飾名がそのまま書かれている)。読まれていないファイルの呼び出しには上の手がかりが付くので、
                 # 手がかりの無い無効な #if だけにする(生成物の u8"Scope::Name" のような文字列の行まで並べない)
@@ -1670,7 +1704,9 @@ def cmd_refs(a, idx):
             nots = sum(1 for _, _, v, _ in items if v == 'not')
             one = [(p, s, ln) for p, s, v, ln in items if v in ('call', 'named')]
             if nots:
-                notes.append(f'{nots} look like calls to other symbols (the same line or receiver resolves elsewhere)')
+                # 理由(同じ文面・同じ受け手の解決先、別のクラスの修飾名)は 1 行ずつの形で各行に付く。短い形は上限に近いので
+                # ここでは書かない(UE5 の FAnimInstanceProxy::Initialize で、長い注記のせいで上書きの族が 1 段短くなった)
+                notes.append(f'{nots} look like other symbols')
             plain = [(p, s, ln) for p, s, v, ln in items if not v]
             keep = 0 if low else COMPACT_LIST if a.compact == 1 else len(plain) if len(items) <= 10 else 0
             one += plain[:keep]
