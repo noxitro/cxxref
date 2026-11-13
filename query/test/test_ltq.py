@@ -990,7 +990,8 @@ class LtqTest(unittest.TestCase):
         # 差分パスが無効な #if の中を解析した行(.alt.tsv)は、解決済みの行として並べ、その条件を付ける
         self.index('index', self.COMMON, [self.COMMENT, self.INACTIVE], alt=[self.ALT_ROW])
         out = self.ltq('refs', 'Run')
-        self.assertIn('1 lines below are marked [inactive: #if ...]', out)
+        self.assertIn('(a line tagged [inactive: #if ...] is code the indexed configuration does not compile', out)
+        self.assertNotIn('lines below', out)  # 数を書くと、モデルがその行を探しにいく
         self.assertIn('== calls (resolved by clang): 2', out)
         self.assertIn('  call   src/a.cpp:5  [in Main]  [inactive: #if defined(DEBUG_ONLY)]  | Run();', out)
         self.assertNotIn('inside inactive #if', out)  # 索引の行になったので、テキストの一致には残らない
@@ -1022,6 +1023,55 @@ class LtqTest(unittest.TestCase):
         self.assertIn('(index.tsv.alt.tsv is missing or older than the index', out)
         self.assertIn('    src/a.cpp:5  [#if defined(DEBUG_ONLY)]  | Run();', out)
 
+    B_CPP = ('struct Base { virtual void Run(); };\n'      # 1
+             'struct Mine : Base { void Run() override; };\n'  # 2
+             '#if PLATFORM_X\n'                            # 3
+             '  // Run the thing\n'                        # 4 コメント
+             '  /* Run */\n'                               # 5 コメント
+             '   * Run more\n'                             # 6 ブロックコメントの続きの行
+             '  LOG("Run");\n'                             # 7 文字列
+             'void Other::Run() {}\n'                      # 8 別のクラスの修飾名
+             '  ns::Other::Run();\n'                       # 9 名前空間付きでも、名前の直前のクラスで見る
+             '  Super::Run();\n'                           # 10 基底を指す別名 -> 族
+             '  Base::Run();\n'                            # 11 族のクラス
+             '  x->Run();\n'                               # 12 手がかり無し
+             '  Other::Run(); Run();\n'                    # 13 修飾の無い名前もある -> 決めない
+             '  *p = Run();\n'                             # 14 `*` で始まってもコード
+             '#endif\n')                                   # 15
+
+    def inactive_b(self, alt):
+        self.write('src/b.cpp', self.B_CPP, self.t0 - 10)
+        self.index('index', [('Base::Run', 'decl', '', 'src/b.cpp:1:28', 'struct Base { virtual void Run(); };'),
+                             ('Mine::Run', 'decl', '', 'src/b.cpp:2:27', 'struct Mine : Base { void Run() override; };'),
+                             ('Mine::Run', 'override', 'Base::Run', 'src/b.cpp:2:27',
+                              'struct Mine : Base { void Run() override; };')],
+                   [('src/b.cpp', 'inactive', '3:1', '15:7')], tus=('src/b.cpp',), alt=alt)
+
+    def test_inactive_lines_in_comments_strings_or_other_classes(self):
+        # 無効な #if の中は clang が字句を読まないので、索引にコメントや文字列の範囲が無い。文面の見当で分けて、
+        # 「直す先かもしれない無効な行」の件数を、本当に確かめが要る行だけにする(UE5 の Initialize で 186 行のうち
+        # 半分近くがコメント、3 割が別のクラスの修飾名だった)
+        for alt in (None, []):  # 差分の無い索引でも、差分パスが解析できなかった行でも同じ
+            self.inactive_b(alt)
+            out = self.ltq('refs', 'Mine::Run', '--all')
+            comment = out.split('inside comments')[1].split('\n  inside')[0]
+            for ln in (4, 5, 6):
+                self.assertIn(f'src/b.cpp:{ln}', comment)
+            self.assertIn('src/b.cpp:7', out.split('inside string literals')[1])
+            inactive = out.split('inside inactive #if')[1].split('\n  inside')[0]
+            for ln in (4, 5, 6, 7):
+                self.assertNotIn(f'src/b.cpp:{ln} ', inactive)
+            self.assertIn('src/b.cpp:8  [#if PLATFORM_X]  (written as Other::Run, a class outside the overrides'
+                          ' -> probably not the query)  | void Other::Run() {}', inactive)
+            self.assertIn('src/b.cpp:9  [#if PLATFORM_X]  (written as Other::Run', inactive)
+            for ln in (10, 11, 12, 13, 14):
+                self.assertIn(f'src/b.cpp:{ln}  [#if PLATFORM_X]  | ', inactive)
+            # 短い形では、別のクラスの行は「別の記号らしい」の件数に入り、残りだけが確かめの要る行になる
+            out = self.ltq('refs', 'Mine::Run', '--compact', '--compact')
+            self.assertIn('    2 look like other symbols\n', out)
+            self.assertIn('inside inactive #if/#ifdef branches -> not compiled in the indexed configuration, not resolved;'
+                          ' still code to update when renaming or changing a signature: 8', out)
+
     def test_utf16_sources_are_searched(self):
         # UTF-16(BOM 付き)のソースも、UTF-8 に直してから名前を探す(rg は BOM 付き UTF-16 を直して探す)
         self.index('index', self.COMMON, [self.COMMENT])
@@ -1050,7 +1100,7 @@ class LtqTest(unittest.TestCase):
         self.index('index', [('Mine::Run', 'decl', '', 'src/a.cpp:1:6', 'void Run();'),
                              ('Other::Run', 'call', 'H', 'src/a.cpp:9:6', 'g->Run();')], [self.COMMENT])
         out = self.ltq('refs', 'Mine::Run', '--compact', '--compact')
-        self.assertIn('look like calls to other symbols', out)
+        self.assertIn('look like other symbols', out)
         self.assertIn('other/  12 matches in 1 files', out)
 
     def test_alt_row_does_not_duplicate_an_indexed_row(self):
