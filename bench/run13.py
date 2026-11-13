@@ -251,6 +251,13 @@ def main():
         sys.path.insert(0, os.path.join(REPO, 'mcp'))
         import autoupdate
         autoupdate.trust_recipe(os.path.join(ws, '.index', 'index.tsv'))
+        # 索引は HEAD の写しから作った(中身は同じ)が、前の回の後始末(git checkout)でソースの更新日時が索引より新しくなり、
+        # 毎回「古い」と見なされて作り直しを待っていた(v14h の R の 87 回中 86 回)。索引の更新日時を今にして、
+        # 編集の前は新しい索引、という実際の使い方に揃える
+        now = time.time()
+        for f in os.listdir(os.path.join(ws, '.index')):
+            if f.startswith('index.tsv'):
+                os.utime(os.path.join(ws, '.index', f), (now, now))
     if a.cond == 'X':
         gh = os.path.join(ws, '.github')
         os.makedirs(gh, exist_ok=True)
