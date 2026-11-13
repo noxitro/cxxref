@@ -1,7 +1,7 @@
 // /cxxref-index・/cxxref-enable の、Copilot の SDK に依らない部分(テストできるように分けた。test は mcp/test/test_plugin.py が node --test で流す)。
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve, sep, win32 } from "node:path";
+import { dirname, join, relative, resolve, sep, win32 } from "node:path";
 
 // プラグインのルート(plugin.json と scripts\index-project.ps1 のあるフォルダ)。start から親へさかのぼる
 export function pluginRoot(start) {
@@ -214,7 +214,9 @@ export function projectChoices(root, out) {
 // 索引を作るルート。引数(引用符は外す。相対なら作業フォルダから)、無ければ indexRoot(cwd)。{ root } か { error }
 export function targetRoot(arg, cwd) {
   const a = (arg ?? "").trim().replace(/^"(.*)"$/, "$1");
-  const root = a ? (isAbsolute(a) ? a : resolve(cwd, a)) : indexRoot(cwd);
+  // 絶対パスも resolve に通して揃える(GitHub Copilot app は引数の \ を二重にして渡すことがあり、
+  // そのままだと知らせに \ が 2 つずつ並んで表示される。区切りが重なっても resolve は 1 つにする)
+  const root = a ? resolve(cwd, a) : indexRoot(cwd);
   if (!existsSync(root) || !statSync(root).isDirectory()) return { error: `フォルダがありません: ${root}` };
   return { root };
 }
