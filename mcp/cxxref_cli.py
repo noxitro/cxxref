@@ -34,6 +34,7 @@ def main(argv=None):
     r.add_argument('--path', action='append', default=[], help='list only lines under this root-relative folder or file')
     r.add_argument('--exclude', action='append', default=[], help='folder or root-relative prefix to skip in the text search')
     r.add_argument('--limit', type=int, help='max lines per section (default 200)')
+    r.add_argument('--context', type=int, help='also print N source lines around each line found (for editing callers)')
     c = sub.add_parser('check', allow_abbrev=False, help='what the index has on each path:line[:col]')
     c.add_argument('locations', nargs='+')
     for p in (r, c):
@@ -51,6 +52,8 @@ def main(argv=None):
         args = {'name': a.name, 'path': a.path, 'exclude': a.exclude}
         if a.limit:
             args['limit'] = a.limit
+        if a.context:
+            args['context'] = a.context
     else:
         args = {'locations': a.locations}
     if a.root:

@@ -251,6 +251,19 @@ class CliTest(unittest.TestCase):
         self.assertIn('src/a.cpp:3', text)
         self.assertIn('comment', text)
 
+    def test_context_for_editing(self):
+        # --context: 呼び出しと宣言の前後のソースを、ファイルごとに重なりをまとめて出す(印 > がその行)
+        code, text = self.run_cli('refs', 'Run', '--context', '1')
+        self.assertEqual(code, 0, text)
+        part = text[text.index('== source around each line above'):]
+        self.assertIn('--- src/a.cpp', part)
+        self.assertIn('>    1| void Run();', part)  # 宣言(1 行目)と呼び出し(3 行目)の窓は重なるので 1 つにまとまる
+        self.assertIn('     2| void Main() {', part)
+        self.assertIn('>    3|   Run();', part)
+        self.assertNotIn('  ...', part)
+        code, plain = self.run_cli('refs', 'Run')
+        self.assertNotIn('== source around', plain)  # 既定では出さない
+
     def test_check(self):
         code, text = self.run_cli('check', 'src/a.cpp:4')
         self.assertEqual(code, 0, text)

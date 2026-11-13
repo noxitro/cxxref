@@ -1,6 +1,6 @@
 ---
 name: cxxref
-description: Use before grep when the question is where a C++ function, type, variable or macro is used or called, or what a change to it would affect ("where is X used", "what breaks if X changes", list the callers). Resolved by clang over every translation unit, with the reason for each text match it leaves out. Needs a .index folder in the repository. Not when you are asked to make the change yourself (editing callers), explain code, or add logs or tests - use grep and view as usual.
+description: Use before grep when the question is where a C++ function, type, variable or macro is used or called, or what a change to it would affect ("where is X used", "what breaks if X changes", list the callers), and before changing a signature and fixing every caller. Resolved by clang over every translation unit, with the reason for each text match it leaves out. Needs a .index folder in the repository. Not for explaining code or adding logs or tests - use grep and view as usual.
 ---
 
 # cxxref
@@ -12,7 +12,7 @@ python -I "<absolute folder of this SKILL.md>\..\..\mcp\cxxref_cli.py" refs <nam
 ```
 
 - `<name>`: qualified name or its suffix (`ns::File::Read`, `File::Read`, `Read`)
-- Options: `--path <folder>` (list only under it, repeatable), `--exclude <folder>`, `--limit <n>`
+- Options: `--path <folder>` (list only under it, repeatable), `--exclude <folder>`, `--limit <n>`, `--context <n>` (source lines around each line found; see below)
 - `check <path:line> ...` instead of `refs`: what the index has on lines found by grep (comment, inactive `#if`)
 - It may take a while (it rebuilds a stale index first). Run it once and wait; do not run grep for the same name meanwhile
 
@@ -23,4 +23,7 @@ Reading the result
 - If the last line names list files, read those files (each fits in one read) instead of grepping
 - "No cxxref index": search with rg as usual. Building one takes minutes; ask the user first
 
-If the task turns into editing: open only around the `calls` lines. After editing, do not run `refs` again to verify (the index is being rebuilt); rg is enough.
+Changing a signature and fixing every caller
+- Run `refs <name> --context 3` once. Its last section shows the file text around every call, reference, declaration and definition (`>` marks the line; the text after `| ` is the exact file text)
+- Write each edit from those lines as the old text. Do not open the whole files; if an edit does not apply or you need more of a file (an include at the top, say), view only a line range
+- After editing, do not run `refs` again to verify (the index is being rebuilt); one grep for the name is enough

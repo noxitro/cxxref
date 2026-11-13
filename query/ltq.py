@@ -1283,6 +1283,51 @@ def section(title, items, limit, pos, listed, skip=None):
         more_by_folder([p for p, _ in pos[limit:]], '  ')
 
 
+CONTEXT_BYTES = 9000  # --context の節の上限(結果全体はクライアントの上限 18,000 バイトに収める。残りは場所だけ言う)
+
+
+def print_context(idx, rs, n):
+    """rs(索引の行)の前後 n 行のソースを、ファイルごとに重なりをまとめて出す(refs --context)。呼び出し側を直すときに、
+    ファイルを開かずに、この行を元の文面として編集を書けるようにする【推測: 開くファイルが減れば、文脈に積もる量が減る。
+    v14h では、直す作業で refs の後に直すファイルを丸ごと開いていた】。印 > がその行。"""
+    want = {}
+    for r in rs:
+        want.setdefault(r[3], set()).add(r[4])
+    print(f'\n== source around each line above (+-{n} lines; > marks the line). To edit a caller, use these lines as the '
+          'old text instead of opening the file')
+    used, left = 0, []
+    for path in sorted(want):
+        try:
+            with open(os.path.join(idx.root, path), 'rb') as f:
+                text = to_utf8(f.read(), idx.codec()).decode('utf-8', 'replace')
+        except OSError:
+            left.append(f'{path} (not readable)')
+            continue
+        ls = text.split('\n')
+        spans = []
+        for ln in sorted(want[path]):
+            lo, hi = max(1, ln - n), min(len(ls), ln + n)
+            if spans and lo <= spans[-1][1] + 1:
+                spans[-1][1] = max(spans[-1][1], hi)
+            else:
+                spans.append([lo, hi])
+        block = [f'--- {path}']
+        for i, (lo, hi) in enumerate(spans):
+            if i:
+                block.append('  ...')
+            for k in range(lo, hi + 1):
+                block.append(f'{">" if k in want[path] else " "}{k:5}| {ls[k - 1].rstrip(chr(13))}')
+        out = '\n'.join(block)
+        size = len(out.encode('utf-8')) + 1
+        if used + size > CONTEXT_BYTES:
+            left.append(f'{path}:' + ','.join(map(str, sorted(want[path]))))
+            continue
+        used += size
+        print(out)
+    if left:
+        print(f'  (not shown, to stay under the size limit; view these with a line range: {"; ".join(left)})')
+
+
 def cmd_refs(a, idx):
     name = a.name.lstrip(':')
     short = re.split(r'::', name)[-1]
@@ -1500,6 +1545,8 @@ def cmd_refs(a, idx):
     section('other references (address taken, template arguments, writes, #ifdef, ...)',
             [show(r, show_sym) for r in uses], a.limit, [(r[3], r[4]) for r in uses], listed, skip)
     section('definitions and declarations', [show(r, show_sym) for r in defs], a.limit, [(r[3], r[4]) for r in defs], listed, skip)
+    if getattr(a, 'context', 0) and not remain:
+        print_context(idx, calls + uses + defs, a.context)
 
     # 基底のポインタや参照越しの呼び出しは、clang が基底のメソッドに解決する。実行時に上書きへ届くかは型次第
     bases, derived = closure(syms, up), closure(syms, down)
@@ -1951,6 +1998,9 @@ def main(argv=None, idx=None, skip=None):
     r.add_argument('--family', type=nonneg, default=None,
                    help='max overrides, and max calls resolved to the overrides, listed under "virtual dispatch" '
                         '(default: --limit, or 10 with --compact)')
+    r.add_argument('--context', type=int, default=0,
+                   help='also print N source lines around each call, reference, declaration and definition, grouped '
+                        'by file (for editing the callers without opening the files)')
     r.add_argument('--compact', action='count', default=0,
                    help='summarize low-value sections (comments, strings, local names, template calls resolved to '
                         'other symbols, matches resolved elsewhere) into counts per folder. Give it twice to also '

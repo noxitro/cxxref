@@ -630,6 +630,8 @@ def call_tool(cfg, name, a):
             if int(a['limit']) < 0:
                 return 2, '"limit" must be 0 or more'
             args += ['--limit', str(int(a['limit']))]
+        if a.get('context'):  # cxxref_cli.py だけが渡す(ツールの定義には載せない。定義は毎回モデルに送られるため)
+            args += ['--context', str(max(0, min(10, int(a['context']))))]
         for x in a.get('exclude') or []:
             args += ['--exclude', str(x)]
         paths = a.get('path') or []
