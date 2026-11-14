@@ -1,0 +1,18 @@
+# Dependabot の更新対象。公開リポジトリなら無料で使える。
+
+version: 2
+updates:
+  # GitHub Actions 自体の更新 (actions/checkout@v4 のような参照が古くなるのを拾う)。
+  # directory: / だけだと .github/workflows/ しか見ない。composite action
+  # (.github/actions/*/action.yml) があれば directories に足さないと取り残される。
+  - package-ecosystem: github-actions
+    directories:
+      - /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "ci"
+    # 同じ action の更新を、ディレクトリをまたいで 1 本の PR にする (片方だけマージされて版がずれないように)
+    groups:
+      actions:
+        group-by: dependency-name
