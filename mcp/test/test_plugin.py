@@ -1,5 +1,5 @@
 """このリポジトリを Copilot CLI のプラグインとして入れるための定義の検査(Copilot は要らない)。
-plugin.json・mcp.json(Agent Plugins 1.0)、com.github.copilot/extensions の拡張、.github/plugin/marketplace.json。
+plugin.json(Agent Plugins 1.0)、skills・com.github.copilot の拡張と hooks、.github/plugin/marketplace.json。
 
 usage: python -I -m unittest discover -s mcp/test   (リポジトリのルートで)
 """
@@ -39,14 +39,13 @@ class PluginTest(unittest.TestCase):
         with open(os.path.join(ROOT, 'mcp', 'server.py'), encoding='utf-8') as f:
             self.assertIn(f"VERSION = '{v}'", f.read())
 
-    def test_mcp_server(self):
-        m = load('mcp.json')
-        self.assertEqual(m['$schema'], SCHEMA + 'mcp.schema.json')
-        s = m['mcpServers']['code-ref-index']  # ツールの名前(code-ref-index-refs など)はこの名前から付く
-        self.assertEqual(s['type'], 'stdio')
-        script = [a for a in s['args'] if a.startswith('${PLUGIN_ROOT}/')]
-        self.assertEqual(len(script), 1)
-        self.assertTrue(os.path.exists(os.path.join(ROOT, script[0][len('${PLUGIN_ROOT}/'):])))
+    def test_no_mcp_server_in_plugin(self):
+        # プラグインは MCP サーバーを持たない。ツールの定義は、使わない回でもモデルを呼ぶたびに送られるため、
+        # 索引は skill(skills/cxxref。使う問いでだけ本文が読まれる)から引く【実測: v14h。docs/benchmarks.md】。
+        # MCP サーバーは、VS Code など skill の無いクライアントのために残す(手で登録する。mcp/README.md)
+        self.assertFalse(os.path.exists(os.path.join(ROOT, 'mcp.json')))
+        self.assertTrue(os.path.exists(os.path.join(ROOT, 'mcp', 'server.py')))
+        self.assertTrue(os.path.exists(os.path.join(ROOT, 'skills', 'cxxref', 'SKILL.md')))
 
     def test_no_rule(self):
         # プラグインは指示(rule)を持たない。rule は有効なリポジトリのすべてで毎回読まれるため、使うリポジトリだけで

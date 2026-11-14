@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "type": "command",
+        "command": "python -I \"${PLUGIN_ROOT}/scripts/cxxref_hook.py\" session",
+        "timeoutSec": 10
+      }
+    ],
+    "preToolUse": [
+      {
+        "type": "command",
+        "command": "python -I \"${PLUGIN_ROOT}/scripts/cxxref_hook.py\"",
+        "timeoutSec": 10
+      }
+    ]
+  }
+}
