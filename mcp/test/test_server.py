@@ -352,6 +352,33 @@ class ServerTest(unittest.TestCase):
         self.assertIn('inside comments -> not code; do not report these: 40', text)
         self.assertNotIn('output cut', text)
 
+    def test_unresolved_lines_are_cut_before_resolved_calls(self):
+        # 短い形でも上限を超えるときは、索引が問い合わせに解決しなかった行(ここではマクロの引数の 40 行)の節を先に減らし、
+        # 解決済みの呼び出し(12 行)は全部並べる(UE5 の FAnimInstanceProxy::Initialize で、16 ある呼び出しが 2 行になった)
+        pad = 'x' * 80
+        with open(os.path.join(self.root, 'src', 'a.cpp'), 'w', encoding='utf-8', newline='\n') as f:
+            f.write('void Run();\nvoid Main() {\n' + ''.join(f'  Run();  // {pad} {i}\n' for i in range(12))
+                    + ''.join(f'  CHECK(Run());  // {pad} {i}\n' for i in range(40)) + '}\n')
+        base = os.path.join(self.root, '.index', 'index.tsv')
+        with open(base, 'w', encoding='utf-8', newline='\n') as f:
+            f.write('Run\tdecl\t\tsrc/a.cpp:1:6\tvoid Run();\n'
+                    + ''.join(f'Run\tcall\tMain\tsrc/a.cpp:{3 + i}:3\tRun();  // {pad} {i}\n' for i in range(12)))
+        with open(base + '.skip.tsv', 'w', encoding='utf-8', newline='\n') as f:
+            f.write('path\tkind\tbegin\tend\n' + ''.join(f'src/a.cpp\tdropped\t{15 + i}:9\t{15 + i}:12\n' for i in range(40)))
+        for p in ('index.tsv', 'index.tsv.skip.tsv', 'index.tsv.tu.tsv'):
+            os.utime(os.path.join(self.root, '.index', p))
+        self.restart(['--root', self.root, '--max-output-bytes', '3600'])
+        text = self.refs_text()
+        self.assertLessEqual(len(text.encode('utf-8')), 3600)
+        for i in range(12):
+            self.assertIn(f'  call   src/a.cpp:{3 + i}  [in Main]  | Run();  // {pad} {i}\n', text)
+        self.assertNotIn('more (raise --limit', text.split('\n== definitions', 1)[0])
+        self.assertIn('    src/a.cpp:15  | CHECK(Run());', text)
+        self.assertNotIn('    src/a.cpp:54  | CHECK(Run());', text)  # 並べなかった行は残りの一覧に
+        path = re.search(r'the other \d+ lines are listed, one per line, in "([^"]+)"', text).group(1)
+        with open(path, encoding='utf-8') as f:
+            self.assertIn('src/a.cpp:54  | CHECK(Run());', f.read())
+
     def many_inactive(self):
         """無効な #if の中の一致が 25 行ある索引にする(1 行 100 バイトほど)。src/a.cpp の 4〜30 行目が無効。"""
         with open(os.path.join(self.root, 'src', 'a.cpp'), 'w', encoding='utf-8', newline='\n') as f:

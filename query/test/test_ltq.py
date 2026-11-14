@@ -967,6 +967,31 @@ class LtqTest(unittest.TestCase):
         self.assertIn('read them if they matter: 6\n    other/x.cpp:2  | x.Run();\n    other/  5 matches in 1 files\n', out)
         self.assertNotIn('more (raise --limit)\n', out)
 
+    def test_other_limit_keeps_resolved_calls(self):
+        # --other-limit は、索引が問い合わせに解決しなかった行の節だけを減らす(解決済みの呼び出しは --limit のまま)。
+        # MCP サーバーは、呼び出しを減らす前にこちらを減らす。一覧(--all)では効かない
+        os.makedirs(os.path.join(self.root, 'lib'))
+        self.write('lib/b.cpp', 'void Use() {\n' + '  Run();\n' * 5 + '}\n', self.t0 - 10)
+        os.makedirs(os.path.join(self.root, 'other'))
+        self.write('other/x.cpp', 'void G() {\n' + '  x.Run();\n' * 6 + '}\n', self.t0 - 10)
+        self.write('other/notes.md', 'Run\n' * 4, self.t0 - 10)
+        self.index('index', self.COMMON + [('Run', 'call', 'Use', f'lib/b.cpp:{n}:3', 'Run();') for n in range(2, 7)],
+                   [self.COMMENT], tus=('src/a.cpp', 'lib/b.cpp'))
+        out = self.ltq('refs', 'Run', '--other-limit', '2')
+        calls = out.split('== calls (resolved by clang): 6\n', 1)[1].split('\n== ', 1)[0]
+        self.assertEqual(len(re.findall(r'^  call   ', calls, re.M)), 6)
+        self.assertNotIn('more (raise --limit', calls)
+        self.assertIn('read them if they matter: 6\n    other/x.cpp:2  | x.Run();\n    other/x.cpp:3  | x.Run();\n'
+                      '    other/  4 matches in 1 files\n', out)
+        self.assertIn('  other/notes.md:2  | Run\n  other/  2 matches in 1 files\n', out)
+        # --limit の方が小さければ、そちらが効く
+        out = self.ltq('refs', 'Run', '--other-limit', '4', '--limit', '1')
+        self.assertIn('read them if they matter: 6\n    other/x.cpp:2  | x.Run();\n    other/  5 matches in 1 files\n', out)
+        # 一覧では効かない
+        out = self.ltq('refs', 'Run', '--all', '--other-limit', '1')
+        for n in range(2, 8):
+            self.assertIn(f'other/x.cpp:{n}  | x.Run();', out)
+
     def test_path_limits_the_lines_but_not_the_symbol(self):
         # --path は並べる行だけを絞る。記号は索引の全体から決める(絞った先に宣言が無くても、同じ記号として引く)
         os.makedirs(os.path.join(self.root, 'lib'))

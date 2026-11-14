@@ -1252,6 +1252,9 @@ def cmd_refs(a, idx):
     remain = skip is not None
     if a.all or remain:  # 1 行も件数にまとめない(名前やシグネチャを変えるときに、直す先を漏らさないための一覧)
         a.all, a.limit, a.compact = True, sys.maxsize, 0
+    # 索引が問い合わせに解決しなかった行(解決先の決まらないテンプレートの呼び出し、索引に無い一致、C/C++ でないファイル)の
+    # 節ごとの行数。既定は --limit。MCP サーバーは、解決済みの呼び出しを減らす前にこちらを減らす(一覧では効かせない)
+    olimit = a.limit if a.all or getattr(a, 'other_limit', None) is None else min(a.limit, a.other_limit)
     listed = set()  # 1 行ずつ出した行の位置 (パス, 行)。最後に、名前を含む行のうち何行を並べたかを出す
 
     def fresh(p, ln):
@@ -1566,11 +1569,11 @@ def cmd_refs(a, idx):
                  if a.all else ''))
         for s in [] if a.all else top_dirs(other_paths, 5):  # rg なら出る行。どこにあるかは残す(--path で 1 行ずつ出る)
             print('    ' + s)
-    for s in dep_lines[:a.limit]:
+    for s in dep_lines[:olimit]:
         print('  ' + s)
-    listed.update(dep_paths[:a.limit])
-    if len(dep_lines) > a.limit:
-        more_by_folder([p for p, _ in dep_paths[a.limit:]], '  ')
+    listed.update(dep_paths[:olimit])
+    if len(dep_lines) > olimit:
+        more_by_folder([p for p, _ in dep_paths[olimit:]], '  ')
 
     # テキスト一致のうち、索引に同名の行が無いものの理由
     known = {r[3] for r in rows}
@@ -1718,8 +1721,10 @@ def cmd_refs(a, idx):
             one = [(p, s, ln) for p, s, v, ln in items if v]
             rest = [p for p, _, v, _ in items if not v]
             ndirs = len(rest)
-        rest = [p for p, _, _ in one[a.limit:]] + rest
-        for p, s, ln in one[:a.limit]:
+        if olimit < a.limit:  # 解決しなかった行を絞る形(MCP サーバーの短い形)。フォルダごとの件数も 5 つまでにする
+            ndirs = min(ndirs, 5)
+        rest = [p for p, _, _ in one[olimit:]] + rest
+        for p, s, ln in one[:olimit]:
             print('    ' + s)
             listed.add((p, ln))
         for s in notes + (top_dirs(rest, ndirs) if rest else []):
@@ -1737,7 +1742,7 @@ def cmd_refs(a, idx):
     if extra:
         print(f'\n== matches of "{short}" in files that are not C/C++ sources (scripts, build files, docs, other languages'
               f' -> not analyzed; update them too when renaming): {len(extra)}')
-        keep = min(a.limit, len(extra) if not a.compact else OTHER_LIST if a.compact == 1 else 0)
+        keep = min(olimit, len(extra) if not a.compact else OTHER_LIST if a.compact == 1 else 0)
         for p, ln, src in extra[:keep]:
             print(f'  {p}:{ln}  | {src}')
             listed.add((p, ln))
@@ -1884,6 +1889,9 @@ def main(argv=None, idx=None, skip=None):
     r = sub.add_parser('refs', help='references, definitions, unresolved template calls, and why text matches are missing')
     r.add_argument('name', help='qualified name or its suffix, e.g. a::io::File::Read or File::Read')
     r.add_argument('--limit', type=int, default=200, help='max lines per section (default 200)')
+    r.add_argument('--other-limit', type=int, default=None,
+                   help='max lines per section for lines the index does not resolve to the query (unresolved template '
+                        'calls, text matches not in the index, files that are not C/C++ sources). Default: --limit')
     r.add_argument('--exclude', action='append', default=[], help='directory name to skip in the text search')
     r.add_argument('--path', action='append', default=[],
                    help='list only lines in this folder or file (relative to the root; repeatable). The symbol is still '
