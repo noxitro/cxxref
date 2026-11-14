@@ -1567,7 +1567,7 @@ def cmd_refs(a, idx):
               + ', '.join(f'{s} ({n})' for s, n in top[:8]) + (f', ... {len(top) - 8} more symbols' if len(top) > 8 else '')
               + (' (listed one per line under "lines the index resolves to other symbols")'
                  if a.all else ''))
-        for s in [] if a.all else top_dirs(other_paths, 5):  # rg なら出る行。どこにあるかは残す(--path で 1 行ずつ出る)
+        for s in [] if a.all else top_dirs(other_paths, min(5, olimit)):  # rg なら出る行。どこにあるかは残す(--path で 1 行ずつ出る)
             print('    ' + s)
     for s in dep_lines[:olimit]:
         print('  ' + s)
@@ -1721,8 +1721,8 @@ def cmd_refs(a, idx):
             one = [(p, s, ln) for p, s, v, ln in items if v]
             rest = [p for p, _, v, _ in items if not v]
             ndirs = len(rest)
-        if olimit < a.limit:  # 解決しなかった行を絞る形(MCP サーバーの短い形)。フォルダごとの件数も 5 つまでにする
-            ndirs = min(ndirs, 5)
+        if olimit < a.limit:  # 解決しなかった行を絞る形(MCP サーバーの短い形)。フォルダごとの件数も 5 つ(行数がそれより
+            ndirs = min(ndirs, 5, olimit)  # 少なければその数)までにする
         rest = [p for p, _, _ in one[olimit:]] + rest
         for p, s, ln in one[:olimit]:
             print('    ' + s)
@@ -1747,7 +1747,7 @@ def cmd_refs(a, idx):
             print(f'  {p}:{ln}  | {src}')
             listed.add((p, ln))
         if extra[keep:]:
-            for s in top_dirs([p for p, _, _ in extra[keep:]], 10 if not a.compact else 5):
+            for s in top_dirs([p for p, _, _ in extra[keep:]], 10 if not a.compact else min(5, olimit)):
                 print('  ' + s)
             folded = True
     if folded:

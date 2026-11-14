@@ -823,6 +823,28 @@ class ListFilesTest(unittest.TestCase):
         self.assertEqual(len(self.positions(text + listing)), 1 + 12 + 13 + 3 + 4)
         self.assertFalse(self.positions(text) & {f'src/t.h:{k}' for k in range(2, 5)})
 
+    def test_overrides_are_kept_before_unresolved_lines(self):
+        # 短い形でも上限を超えるときは、索引が問い合わせに解決しなかった行(ここではテンプレートの中の決まらない 40 行)を先に
+        # 減らし、上書き(14)は短い形の既定(10)で切らずに全部並べる(UE5 の FAnimInstanceProxy::Initialize で、14 ある上書きが
+        # 2 つになり、モデルが残りの一覧を読みに行った)
+        self.family(n=14, far=0, comments=0)
+        pad = 'y' * 70
+        path = os.path.join(self.root, 'src', 'u.h')
+        with open(path, 'w', encoding='utf-8', newline='\n') as f:
+            f.write('template <class T> void Each(T& t) {\n' + ''.join(f'  t.Tick({k});  // {pad}\n' for k in range(40)) + '}\n')
+        os.utime(path, (1000, 1000))
+        base = os.path.join(self.root, '.index', 'index.tsv')
+        with open(base, 'a', encoding='utf-8', newline='\n') as f:
+            f.write(''.join(f'?::Tick\tcall-dep\tEach\tsrc/u.h:{k + 2}:5\tt.Tick({k});  // {pad}\n' for k in range(40)))
+        os.utime(base, (2000, 2000))
+        text = self.refs(5000, 18000)
+        for i in range(14):
+            self.assertIn(f'    D{i:02}::Tick  decl src/d.h:{i + 2}  def src/d.cpp:{i + 1}\n', text)
+        self.assertNotIn('more overrides', text)
+        self.assertIn('src/u.h:6  [in Each]', text)
+        self.assertNotIn('src/u.h:7  [in Each]', text)  # 解決しなかった行は 5 行まで。残りは一覧に
+        self.assertIn('src/u.h:41  [in Each]', ''.join(self.read(p) for p in self.cfg.last_lists))
+
     def test_result_cut_names_the_complete_list(self):
         # どの形でも上限を超えるときは末尾を切り、名前を含む行を全部並べた一覧(同じ分け方)の場所を添える
         self.family()

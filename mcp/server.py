@@ -35,7 +35,7 @@ PROTOCOL = '2025-06-18'
 # 計測で 21.2 KB 以上が退かされ、18,000 バイト以下は退かされなかった】。少し下回らせる
 MAX_BYTES = 18000
 FIT_LIMITS = (60, 25, 10, 5, 2)  # 短い形でも上限を超えるときに、順に試す --limit(1 節に並べる行数)
-FIT_FAMILY = (5, 2)  # 短い形でも上限を超えるときに、--limit の前に試す --family(並べる上書きの数、上書きへの呼び出しの数)
+FIT_FAMILY = (10, 5, 2)  # 短い形でも上限を超えるときに、--limit の前に試す --family(並べる上書きの数、上書きへの呼び出しの数)
 # 結果に 1 行ずつ並べきれなかったとき(上限に収めるために件数にまとめた行があるとき)は、結果に並べなかった行を 1 行ずつ並べた
 # 一覧(残りの一覧。結果と合わせると、名前を含む行がどれも 1 回ずつ出る)をファイルに書き、結果の最後の行でその場所を知らせる。
 # 名前やシグネチャを変えるときに、直す先を漏らさず、ソースを検索し直させないため
@@ -527,9 +527,9 @@ def run_ltq(cfg, args, start=None):
     # - 上書きの族(上書きと、上書きへの呼び出し)だけを 10 行ずつに絞る(他の節は全文のまま。大きな階層の virtual で効く)
     # - 報告しない節(コメント・文字列など)を件数にまとめる(--compact)
     # - 無効な #if の中やマクロの定義の中の一致もフォルダごとの件数にする(どのフォルダに何件あるかは残り、path で出し直せる)
-    # - 上書きの族をさらに絞る(5、2。直接の呼び出しを減らす前に)
-    # - 索引が問い合わせに解決しなかった行(解決先の決まらないテンプレートの呼び出し、索引に無い一致など)の節の行数を減らす
-    #   (--other-limit。解決済みの呼び出しは答えそのものなので、先に減らさない)
+    # - 上書きの族を全部並べたまま、索引が問い合わせに解決しなかった行(解決先の決まらないテンプレートの呼び出し、索引に無い
+    #   一致など)の節の行数とフォルダの数を減らす(--other-limit。解決済みの呼び出しと上書きは答えそのものなので、先に減らさない)
+    # - 上書きの族を絞る(10、5、2。直接の呼び出しを減らす前に)
     # - 節ごとの行数を減らす(解決済みの行だけで数百行ある名前。呼び出し側が渡した limit より小さい値だけを試す。後ろに足した
     #   --limit が勝つ)
     # どの形でも、1 行ずつ並べなかった行は、残りの一覧としてファイルに書き、最後の行(coverage)の案内をその場所に置き換える
@@ -538,16 +538,18 @@ def run_ltq(cfg, args, start=None):
     virt = '\n== virtual dispatch\n' in text
     short = ['--compact'] * 2
     forms = ([['--family', str(min(10, asked))]] if virt else []) + [['--compact'], short]
-    # 族をさらに絞る(直接の呼び出しを減らす前に。UE5 の FAnimInstanceProxy::Initialize は、族を 10 にした短い形が上限を
-    # 少し超え、節ごとの行数を 5 まで下げて、16 ある直接の呼び出しを 5 つしか並べなかった)。絞った分は残りの一覧に出る
-    forms += [short + ['--family', str(n)] for n in FIT_FAMILY if n < asked] if virt else []
+    # 短い形の族は既定で 10 行ずつ。解決しなかった行を減らす間は、族を全部並べる(UE5 の FAnimInstanceProxy::Initialize は、
+    # 差分パスを掛けた索引で無効な #if とマクロの引数の行が増え、族を 2 まで絞ってから解決しなかった行を減らしていたので、
+    # 14 ある上書きを 2 つしか並べず、モデルが残りの一覧を読みに行った)
+    every = ['--family', str(asked)] if virt else []
+    forms += [short + every + ['--other-limit', str(n)] for n in FIT_LIMITS if n < asked]
+    # 族を絞る(直接の呼び出しを減らす前に。同じ名前は、族を 10 にした短い形が上限を少し超え、節ごとの行数を 5 まで下げて、
+    # 16 ある直接の呼び出しを 5 つしか並べなかった)。絞った分は残りの一覧に出る
+    least = ['--other-limit', str(min(FIT_LIMITS[-1], asked))]
+    forms += [short + least + ['--family', str(n)] for n in FIT_FAMILY if n < asked] if virt else []
     low = ['--family', str(min(FIT_FAMILY[-1], asked))] if virt else []
-    # UE5 の FAnimInstanceProxy::Initialize は、差分パスを掛けた索引で無効な #if とマクロの引数の行が増え、節ごとの行数を
-    # 2 まで下げて、16 ある直接の呼び出しを 2 つしか並べなかった
-    forms += [short + low + ['--other-limit', str(n)] for n in FIT_LIMITS if n < asked]
     # 節ごとの行数を下げるときは、各行数で、まずどの節も同じ行数にした形を試し(並ぶ行がいちばん多い)、超えたら
     # 解決しなかった行の節だけを最小にした形を試す(呼び出しを同じ行数に保ったまま縮む)
-    least = ['--other-limit', str(min(FIT_LIMITS[-1], asked))]
     forms += [short + low + more + ['--limit', str(n)] for n in FIT_LIMITS if n < asked
               for more in ([], least) if not more or n > FIT_LIMITS[-1]]
     for form in [None] + forms:
