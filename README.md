@@ -8,7 +8,7 @@ Copilot で C++ の呼び出し箇所を探すと、LSP(clangd)を渡しても�
 
 ### rg だけで使っている人へ: 何が減るか
 
-プラグイン(0.5.7 から skill と hooks の形)を入れると、「どこで使われているか・変えると何に影響するか」の問いのときだけモデルが索引を引き、それ以外は rg だけのときと同じに進みます。rg だけと交互に流した計測(Copilot CLI 1.0.109、Claude Haiku 5.5、コードベース A、各 5 回。2026-11-13)の結果です。詳しくは [docs/benchmarks.md](docs/benchmarks.md) の「5. skill 版」。
+プラグイン(0.5.8 から skill と hooks の形)を入れると、「どこで使われているか・変えると何に影響するか」の問いのときだけモデルが索引を引き、それ以外は rg だけのときと同じに進みます。rg だけと交互に流した計測(Copilot CLI 1.0.109、Claude Haiku 5.5、コードベース A、各 5 回。2026-11-13)の結果です。詳しくは [docs/benchmarks.md](docs/benchmarks.md) の「5. skill 版」。
 
 | 場面 | 費用(rg だけとの比、95% 区間) | 正しさ |
 |---|---|---|
@@ -23,7 +23,7 @@ Copilot で C++ の呼び出し箇所を探すと、LSP(clangd)を渡しても�
 - 呼び出し側を直す作業は、索引を引かせると 1.06〜1.31 倍に増えたので、索引を使わない側に回しています(呼び出し箇所が分かっても、直すにはそのファイルを開くため)。呼び出しの前後の行も返す試作(`refs --context`)では、呼び出しが 16 ある問題で 0.81 倍、2〜3 の問題で 1.06・1.27 倍でした。この場面の改良は続けています
 - 測ったのは 1 つの C++ のコードベースと 1 つのモデルだけです。索引を作る手間(コードベース A の 367 TU で 70 秒、5,876 TU で 22 分)は別にかかります
 
-### 0.5.6 までの形(MCP サーバー)での計測
+### 0.5.7 までの形(MCP サーバー)での計測
 
 計測(Copilot CLI 1.0.105、gpt-6-luna、各問 5 回(O3DE は 3 回)。C++ の記号の呼び出し箇所を探す問題)の結果:
 
@@ -110,7 +110,7 @@ Copilot で C++ の呼び出し箇所を探すと、LSP(clangd)を渡しても�
 - hooks(`com.github.copilot\hooks`): 索引のあるリポジトリでだけ、セッションの始めに skill の使いどころを 1 文で知らせます。skill が索引を引くコマンドを、確認なしで通します
 - 拡張(`com.github.copilot\extensions\cxxref`): 索引を作るスラッシュコマンド `/cxxref-index`
 
-MCP サーバーは、プラグインには入れていません。ツールの定義は、使わない回でもモデルを呼ぶたびに送られるためです(0.5.6 までは入っていました)。VS Code など skill の無いクライアントで使うときは、手で登録します([mcp/README.md](mcp/README.md))。LLVM の用意と ltidx のビルドは要りません(ltidx はリリースの配布物を使います)。Python 3.10 以降・pwsh・Visual Studio(`compile_commands.json` を作るのに使います)は要ります。
+MCP サーバーは、プラグインには入れていません。ツールの定義は、使わない回でもモデルを呼ぶたびに送られるためです(0.5.7 までは入っていました)。VS Code など skill の無いクライアントで使うときは、手で登録します([mcp/README.md](mcp/README.md))。LLVM の用意と ltidx のビルドは要りません(ltidx はリリースの配布物を使います)。Python 3.10 以降・pwsh・Visual Studio(`compile_commands.json` を作るのに使います)は要ります。
 
 マーケットプレイスに載せるだけでは使えません。全体の流れは次のとおりです(詳しくは下の各節)。
 
@@ -215,7 +215,7 @@ MCP サーバーは、プラグインには入れていません。ツールの�
 - 指示はセッションの始めに読まれるので、新しいセッションから効きます。今のセッションの途中から効くかは確かめていません
 - 入れる中身は [scripts/cxxref-instructions.md](scripts/cxxref-instructions.md) です(以前のプラグインの rule と同じもの)。プラグインを使わず MCP サーバーだけを登録しているリポジトリでは、`setup-instructions.bat` で同じことができます
 
-`setup.bat` の Copilot CLI への登録との関係: cxxref プラグインが入っていれば、`setup.bat` は MCP サーバーを登録しません(skill が同じ索引を引くので、ツールの定義を足しても送る量が増えるだけです)。0.5.6 までのプラグインや手で登録した `code-ref-index` が残っていれば、`copilot mcp remove code-ref-index` で消せます。
+`setup.bat` の Copilot CLI への登録との関係: cxxref プラグインが入っていれば、`setup.bat` は MCP サーバーを登録しません(skill が同じ索引を引くので、ツールの定義を足しても送る量が増えるだけです)。0.5.7 までのプラグインや手で登録した `code-ref-index` が残っていれば、`copilot mcp remove code-ref-index` で消せます。
 
 ### 版を出す(このリポジトリの保守)
 
