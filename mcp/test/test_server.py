@@ -528,7 +528,10 @@ class ReuseTest(unittest.TestCase):
         os.utime(self.base + '.skip.tsv', (2000, 2000))
         self.cfg.close()
         self.cfg = self.server.Config(self.root, None, None, max_bytes=1600)
-        with mock.patch.object(self.server.autoupdate, 'stale_ltidx', return_value=('0.5.1', '0.6.0')):
+        # 注記に入る get-ltidx のコマンドは、プラグインの場所の長さで変わる。長いと 1 回目だけ短い形になり、並べる行が
+        # 変わって別の一覧になる(それは正しい)。ここで確かめたいのは注記を一覧に入れないことなので、長さを決めておく
+        with mock.patch.object(self.server.autoupdate, 'stale_ltidx', return_value=('0.5.1', '0.6.0')), \
+                mock.patch.object(self.server.autoupdate, 'script_command', return_value='get-ltidx'):
             first = self.refs()
             path = self.cfg.last_list
             ino = os.stat(path).st_ino

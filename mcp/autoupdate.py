@@ -340,6 +340,10 @@ def _expand(args, cwd, memo, depth=0):
             out.append(t)
             continue
         name = t[1:]
+        # UNC は開くだけで資格情報を送りうる(\\?\ で始まるパスも、ここで止める)。\ をパスの区切りにしない OS でも、
+        # ltidx(Windows)が読む形として見る
+        if name.replace('\\', '/').startswith('//'):
+            raise _Refuse(f'{t} (network path)')
         if not os.path.isabs(name) and not cwd:
             raise _Refuse(f'{t} (relative to a "directory" that is not absolute)')
         full = os.path.normpath(os.path.join(cwd or '', name))

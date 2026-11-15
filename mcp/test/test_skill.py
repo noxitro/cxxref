@@ -377,7 +377,8 @@ class TrustTest(unittest.TestCase):
             dict(raw='[{"directory": "{d}", "file": "a.cpp", "command": "clang++ -fplugin=p.dll a.cpp", "command": "clang++ a.cpp"}]'),
             dict(raw=b'[{"directory": "{d}", "file": "a.cpp", "command": "clang++ \xff a.cpp"}]'),  # UTF-8 でない
             # コンパイラの隣の設定ファイル(引数に無くても読まれる)。ccache などの後ろのコンパイラも
-            dict(entries=[{'command': 'tools\\clang++.exe a.cpp'}], files={'tools/clang++.cfg': '-fplugin=p.dll'}),
+            # (/ で区切る: ltidx は / も区切りとして読み、テストは \ を区切りにしない OS でも流れる)
+            dict(entries=[{'command': 'tools/clang++.exe a.cpp'}], files={'tools/clang++.cfg': '-fplugin=p.dll'}),
             dict(entries=[{'arguments': ['ccache', 'tools/g++', 'a.cpp']}], files={'tools/x86_64-pc-windows-msvc.cfg': '-DA'}),
             dict(entries=[{'directory': 'rel', 'command': 'clang++ @inc.rsp a.cpp'}]),  # どこから探すか決まらない
         ]
