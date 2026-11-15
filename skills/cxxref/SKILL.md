@@ -11,7 +11,7 @@ Run it in PowerShell from the repository, as a command of its own (nothing chain
 python -I "<absolute folder of this SKILL.md>\..\..\mcp\cxxref_cli.py" refs <name>
 ```
 
-- `<name>`: qualified name or its suffix (`ns::File::Read`, `File::Read`, `Read`)
+- `<name>`: qualified name or its suffix (`ns::File::Read`, `File::Read`, `Read`). A template goes without its arguments (`Vec::push`, not `Vec<int>::push`). Put a name with spaces or `( ) [ ]` in double quotes (`"Foo::operator()"`, `"operator bool"`). A name with `< > & | ^ %` (`"operator<"`, `"operator->"`) asks the user first
 - Options: `--path <folder>` (list only under it, repeatable), `--exclude <folder>`, `--limit <n>`
 - `check <path:line> ...` instead of `refs`: what the index has on lines found by grep (comment, inactive `#if`)
 - It may take a while (it rebuilds a stale index first). Run it once and wait; do not run grep for the same name meanwhile
