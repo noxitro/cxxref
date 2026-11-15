@@ -28,7 +28,7 @@ import namedir  # noqa: E402
 import srctree  # noqa: E402
 import wordfilter  # noqa: E402
 
-VERSION = '0.5.9'
+VERSION = '0.5.10'
 PROTOCOL = '2025-06-18'
 # 結果の大きさの上限の既定。Copilot CLI は 20,480 バイト(COPILOT_LARGE_OUTPUT_THRESHOLD_BYTES)を超える
 # ツールの結果をモデルに渡さず、ファイルに退かせて先頭だけを見せる【実測: 1.0.18 の app.js。1.0.105 は native に移り、
@@ -154,6 +154,7 @@ class Config:
         self.fixed = os.path.abspath(root) if root else None  # None なら、呼ばれるたびに索引のあるフォルダを探す
         self.index = os.path.abspath(index) if index else None
         self.wait = wait  # 自動更新で待つ秒数。None なら自動更新しない
+        self.trusted_only = False  # True なら、この PC で作った記録の索引だけを自動で作り直す(cxxref_cli.py)
         self.max_bytes = max_bytes  # 結果の大きさの上限(0 なら切らない)
         self.opened = None  # (鍵, 索引のファイルの状態, ltq.Index)。最後に引いた索引を 1 つだけ保つ
         self.told_ltidx = False  # 取ってきた ltidx が古いことを、もう知らせたか(1 回だけ)
@@ -440,7 +441,7 @@ def run_ltq(cfg, args, start=None):
     if paths and all(os.path.exists(p) for p in paths):
         idx = cfg.open_index(paths, root)
         if cfg.wait is not None:
-            new, up = autoupdate.refresh(idx, paths, root, cfg.wait)
+            new, up = autoupdate.refresh(idx, paths, root, cfg.wait, cfg.trusted_only)
             if new is not idx:
                 cfg.keep(paths, root, new)
             idx = new

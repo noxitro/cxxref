@@ -10,6 +10,9 @@ usage: python -I run13.py --tasks v13/tasks-stage1.json --task S1-req-usage --co
   X: P に、cxxref と食い違うユーザーの指示(v13/adverse-instructions.md)を作業フォルダの .github/copilot-instructions.md に足す
   Q: P の rule を、このリポジトリの今の rule(使う場面と使わない場面を分けたもの)に差し替え、ltidx をソースをマップせずに
      読む版(ltidx-next)にしたもの。MCP サーバーなど、ほかは P と同じ v0.5.1(homes/tmpl-Q。段階 2 の測り直し)
+  R: skill 版。A の空の COPILOT_HOME に、このリポジトリの今のプラグインから MCP の定義(mcp.json)と拡張を除いた写し
+     (v13/plugin-R。skill の cxxref と、それが呼ぶ mcp/cxxref_cli.py)を --plugin-dir で足す。常にモデルに送るのは
+     skill の説明文だけ。索引は今の ltidx で作ったもの(codebase-a.json の index_r)、自動更新もその ltidx
 
 作業フォルダは git で管理した写し。実行の前と後に、追跡しているファイルを戻し、増えたファイルを消す(git checkout と git clean)。
 回答の後の差分は runs13/<名前>.diff に残す。採点は score13.py。
@@ -40,11 +43,39 @@ WORKSPACES = {
 _A = local_codebase()
 if _A:
     # .github などは前の計測が置いた設定(元のコードには無い)
-    WORKSPACES['a'] = {'path': _A['path'], 'index': _A['index'], 'cdb': _A.get('cdb', '.cdb'),
+    WORKSPACES['a'] = {'path': _A['path'], 'index': _A['index'], 'index_r': _A.get('index_r'), 'cdb': _A.get('cdb', '.cdb'),
                        'clean': ['.github', '.mcp.json', '.serena']}
     WORKSPACES['a-noindex'] = {'path': _A['path'], 'clean': ['.github', '.mcp.json', '.serena']}
 LTIDX = os.path.join(V13, 'ltidx-0.5.1', 'ltidx.exe')
 LTIDX_NEXT = os.path.join(V13, 'ltidx-next', 'ltidx.exe')
+LTIDX_R = os.path.join(V13, 'ltidx-r', 'ltidx.exe')  # 条件 R の索引(index_r)を作った ltidx の写し(自動更新も同じものを使う)
+PLUGIN_R = os.path.join(V13, 'plugin-R')
+# 条件 R のプラグインの写しに入れるもの(mcp.json と拡張 com.github.copilot/extensions は入れない。hooks は入れる)
+PLUGIN_R_PARTS = ['plugin.json', 'com.github.copilot/hooks', 'skills', 'mcp', 'query', 'scripts', 'LICENSE']
+
+
+def install_plugin_r(home):
+    """COPILOT_HOME に、条件 R の写しをインストール済みのプラグインとして登録する。--plugin-dir で足したプラグインは
+    hooks(hooks.json)が読まれない【実測: 1.0.109。hook のイベントが出なかった】ので、インストール済みの形にする。"""
+    entry = {'name': 'cxxref', 'marketplace': 'cxxref-bench', 'version': json.load(open(os.path.join(PLUGIN_R, 'plugin.json'), encoding='utf-8'))['version'],
+             'installed_at': datetime.now(timezone.utc).isoformat(), 'cache_path': PLUGIN_R,
+             'installed_source': {'source': 'local', 'path': PLUGIN_R}, 'enabled': True}
+    with open(os.path.join(home, 'config.json'), 'w', encoding='utf-8') as f:
+        json.dump({'installedPlugins': [entry]}, f, ensure_ascii=False, indent=2)
+
+
+def make_plugin_r():
+    """このリポジトリの今のファイルから、条件 R のプラグインの写しを作り直す(テストと __pycache__ は除く)。"""
+    if os.path.exists(PLUGIN_R):
+        shutil.rmtree(PLUGIN_R)
+    os.makedirs(PLUGIN_R)
+    skip = shutil.ignore_patterns('__pycache__', 'test', '*.pyc')
+    for part in PLUGIN_R_PARTS:
+        src = os.path.join(REPO, part)
+        if os.path.isdir(src):
+            shutil.copytree(src, os.path.join(PLUGIN_R, part), ignore=skip)
+        else:
+            shutil.copy2(src, os.path.join(PLUGIN_R, part))
 # copilot は .exe を直接起動する(npm の copilot.CMD を経ると、cmd が問題文の記号を解釈しうる)
 COPILOT = os.environ.get('CRI_COPILOT') or shutil.which('copilot.exe') or os.path.join(
     os.environ.get('LOCALAPPDATA', ''), r'Microsoft\WinGet\Packages\GitHub.Copilot_Microsoft.Winget.Source_8wekyb3d8bbwe\copilot.exe')
@@ -78,9 +109,9 @@ def index_sig(base):
     return '|'.join(f'{s}={os.path.getsize(base + s)}:{os.stat(base + s).st_mtime_ns}' for s in parts), parts
 
 
-def place_index(w):
+def place_index(w, src=None):
     """索引を作業フォルダの .index に置く。前の回の .index-keep が元と同じなら使い回す(写す時間を省く)"""
-    ws, src = w['path'], w['index']
+    ws, src = w['path'], src or w['index']
     sig, parts = index_sig(src)
     keep, dst = os.path.join(ws, '.index-keep'), os.path.join(ws, '.index')
     if os.path.exists(dst):
@@ -109,9 +140,10 @@ def place_index(w):
         json.dump(recipe, f, ensure_ascii=False, indent=1)
 
 
-def stash_index(w):
+def stash_index(w, src=None):
     """回の後、索引が変わっていなければ .index-keep に退避する。自動更新で作り直されていたら捨てる"""
     ws = w['path']
+    w = dict(w, index=src or w['index'])
     dst, keep = os.path.join(ws, '.index'), os.path.join(ws, '.index-keep')
     lock = os.path.join(dst, 'update.lock')
     deadline = time.time() + 600
@@ -149,13 +181,16 @@ def collect(home, usage_file):
     rec['session'] = sess[0] if len(sess) == 1 else ' '.join(sess)
     tools, results, refs_calls = {}, {}, 0
     if len(sess) == 1:
-        names = {}
+        names, cli = {}, 0
         for line in open(os.path.join(sd, sess[0], 'events.jsonl'), encoding='utf-8'):
             e = json.loads(line)
             if e['type'] == 'tool.execution_start':
                 t = e['data']['toolName']
                 names[e['data'].get('toolCallId')] = t
                 tools[t] = tools.get(t, 0) + 1
+                cmd = str((e['data'].get('arguments') or {}).get('command', '')) if isinstance(e['data'].get('arguments'), dict) else ''
+                if 'cxxref_cli.py' in cmd:  # 条件 R: skill が shell で呼ぶ CLI
+                    cli += 1
             elif e['type'] == 'tool.execution_complete':
                 t = names.get(e['data'].get('toolCallId'), '?')
                 r = e['data'].get('result')
@@ -164,7 +199,7 @@ def collect(home, usage_file):
                 rec['answer'] = e['data'].get('content', '')
     rec['tools'] = tools
     rec['tool_result_chars'] = results
-    rec['refs_calls'] = sum(n for t, n in tools.items() if t.startswith('code-ref-index'))
+    rec['refs_calls'] = sum(n for t, n in tools.items() if t.startswith('code-ref-index')) + (cli if len(sess) == 1 else 0)
     db = os.path.join(home, 'session-store.db')
     if os.path.exists(db) and len(sess) == 1:
         c = sqlite3.connect('file:' + db + '?mode=ro', uri=True)
@@ -190,7 +225,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--tasks', required=True)
     ap.add_argument('--task', required=True)
-    ap.add_argument('--cond', required=True, choices=['A', 'P', 'M', 'X', 'Q'])
+    ap.add_argument('--cond', required=True, choices=['A', 'P', 'M', 'X', 'Q', 'R'])
     ap.add_argument('--rep', type=int, default=1)
     ap.add_argument('--round', default='v13')
     ap.add_argument('--model', default='gpt-6-luna')
@@ -207,8 +242,22 @@ def main():
     os.makedirs(RUNS, exist_ok=True)
 
     reset_ws(w)
-    if a.cond in ('P', 'M', 'X', 'Q') and w.get('index'):
-        place_index(w)
+    src = w.get('index_r') if a.cond == 'R' else None
+    if a.cond == 'R' and w.get('index') and not src:
+        raise SystemExit('condition R needs index_r in bench/local/codebase-a.json (an index built with the current ltidx)')
+    if a.cond in ('P', 'M', 'X', 'Q', 'R') and w.get('index'):
+        place_index(w, src)
+    if a.cond == 'R' and w.get('index'):  # 利用者が index-project で作ったのと同じく、作り直しの記録を登録する
+        sys.path.insert(0, os.path.join(REPO, 'mcp'))
+        import autoupdate
+        autoupdate.trust_recipe(os.path.join(ws, '.index', 'index.tsv'))
+        # 索引は HEAD の写しから作った(中身は同じ)が、前の回の後始末(git checkout)でソースの更新日時が索引より新しくなり、
+        # 毎回「古い」と見なされて作り直しを待っていた(v14h の R の 87 回中 86 回)。索引の更新日時を今にして、
+        # 編集の前は新しい索引、という実際の使い方に揃える
+        now = time.time()
+        for f in os.listdir(os.path.join(ws, '.index')):
+            if f.startswith('index.tsv'):
+                os.utime(os.path.join(ws, '.index', f), (now, now))
     if a.cond == 'X':
         gh = os.path.join(ws, '.github')
         os.makedirs(gh, exist_ok=True)
@@ -232,7 +281,10 @@ def main():
         mcp = {'mcpServers': {'code-ref-index': {'type': 'local', 'command': 'python',
                                                   'args': ['-I', os.path.join(REPO, 'mcp', 'server.py')], 'tools': ['*']}}}
         cmd += ['--additional-mcp-config', json.dumps(mcp)]
-    env = dict(os.environ, COPILOT_HOME=home, LTIDX=LTIDX_NEXT if a.cond == 'Q' else LTIDX)
+    if a.cond == 'R':
+        make_plugin_r()
+        install_plugin_r(home)
+    env = dict(os.environ, COPILOT_HOME=home, LTIDX={'Q': LTIDX_NEXT, 'R': LTIDX_R}.get(a.cond, LTIDX))
     for v in ('COPILOT_PROVIDER_TYPE', 'COPILOT_PROVIDER_BASE_URL', 'COPILOT_PROVIDER_API_KEY', 'COPILOT_PROVIDER_API_KEY_COMMAND',
               'COPILOT_MODEL', 'COPILOT_PROVIDER_MODEL_ID', 'COPILOT_PROVIDER_WIRE_MODEL'):
         env.pop(v, None)
@@ -261,7 +313,7 @@ def main():
     with open(os.path.join(RUNS, name + '.diff'), 'w', encoding='utf-8', newline='\n') as f:
         f.write(d)
     if w.get('index'):
-        stash_index(w)
+        stash_index(w, src)
     reset_ws(w)
     rec = {'name': name, 'round': a.round, 'task': a.task, 'cond': a.cond, 'rep': a.rep, 'model': a.model, 'provider': a.provider,
            'exit': code, 'sec': sec, 'at': start, 'diff_lines': d.count('\n')}

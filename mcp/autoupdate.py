@@ -8,6 +8,7 @@
 消せないので、消せたら持ち主はもういない)。結果は update.json、ログは update.log に書く。
 """
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -79,6 +80,63 @@ def recipe_of(index):
         return None
 
 
+# この PC で index-project(/cxxref-index も同じもの)が書いた作り直しの記録の指紋。リポジトリの外に置く。
+# skill から自動で許可された CLI の呼び出しは、ここに載った記録の索引だけを作り直す。リポジトリに置かれた記録
+# (compile_commands.json の場所と make-cdb の引数)を信じると、細工したリポジトリを開いただけで、clang の -fplugin などで
+# 任意の DLL を読ませられるため
+TRUST_FILE = 'trusted-recipes.json'
+
+
+def _trust_path():
+    base = os.environ.get('LOCALAPPDATA')
+    return os.path.join(base, 'cxxref', TRUST_FILE) if base else None
+
+
+def _recipe_key(index):
+    return os.path.normcase(os.path.realpath(index + RECIPE))
+
+
+def _recipe_digest(index):
+    try:
+        with open(index + RECIPE, 'rb') as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except OSError:
+        return None
+
+
+def _read_trust():
+    p = _trust_path()
+    if not p:
+        return {}
+    try:
+        with open(p, encoding='utf-8') as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def trust_recipe(index):
+    """index の作り直しの記録を、この PC で作ったものとして登録する(index-project.ps1 が記録を書いた直後に呼ぶ)。"""
+    p, digest = _trust_path(), _recipe_digest(index)
+    if not p or not digest:
+        return False
+    d = _read_trust()
+    d[_recipe_key(index)] = digest
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    tmp = f'{p}.{os.getpid()}.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(d, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, p)
+    return True
+
+
+def trusted_recipe(index):
+    """index の作り直しの記録が、登録したときから変わっていなければ True。"""
+    digest = _recipe_digest(index)
+    return bool(digest) and _read_trust().get(_recipe_key(index)) == digest
+
+
 def _path(d, name):
     return os.path.join(d, name)
 
@@ -105,12 +163,13 @@ def read_state(d):
         return None
 
 
-def start(d, full):
+def start(d, full, trusted_only=False):
     """作り直しを別プロセスで始める。標準出力はプロトコル専用なので、子には渡さない。"""
     flags = 0
     if os.name == 'nt':  # 最低優先度は ltidx・make-cdb にも引き継がれる
         flags = subprocess.IDLE_PRIORITY_CLASS | subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
-    subprocess.Popen([sys.executable, '-I', os.path.abspath(__file__), '--dir', d] + (['--full'] if full else []),
+    subprocess.Popen([sys.executable, '-I', os.path.abspath(__file__), '--dir', d] + (['--full'] if full else [])
+                     + (['--trusted-only'] if trusted_only else []),
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                      creationflags=flags, close_fds=True)
 
@@ -127,9 +186,10 @@ def wait_done(d, since, timeout):
         time.sleep(0.1)
 
 
-def refresh(idx, paths, root, wait):
+def refresh(idx, paths, root, wait, trusted_only=False):
     """(引く索引, 出力の先頭に足す注記)。索引が古ければ作り直しを始め、wait 秒まで待つ。
-    idx は ltq.Index。終わったら作り直した索引を開き直して返す。"""
+    idx は ltq.Index。終わったら作り直した索引を開き直して返す。
+    trusted_only なら、この PC で作った記録(trusted_recipe)の索引だけを作り直す(skill から自動で許可された呼び出し)。"""
     import ltq  # server.py が query を sys.path に足してから呼ぶ
     changed, new, missing = idx.freshness()
     if not (changed or new or missing):
@@ -137,6 +197,10 @@ def refresh(idx, paths, root, wait):
     if any(recipe_of(p) is None for p in paths):
         return idx, ('auto-update: off for this index (no .recipe.json). Rebuild it once with '
                      f'{os.path.join(SCRIPTS, "index-project.bat")} to turn it on.\n')
+    if trusted_only and not all(trusted_recipe(p) for p in paths):
+        return idx, ('auto-update: off for this index (it was not built on this PC with index-project.bat or '
+                     '/cxxref-index). Results use the current index (lines re-located). To turn it on, ask the user to '
+                     f'rebuild it once: "{os.path.join(SCRIPTS, "index-project.bat")}" -Root "{root}"\n')
     d = os.path.dirname(os.path.abspath(paths[0]))
     n = len(changed) + len(new) + len(missing)
     asked = time.time()
@@ -148,7 +212,7 @@ def refresh(idx, paths, root, wait):
             # 前回失敗してから何も変わっていない。同じ失敗を毎回繰り返さない
             return idx, (f'auto-update: the last rebuild failed ({st.get("message")}); see {_path(d, "update.log")}. '
                          'Results use the current index. It is retried after the next source change.\n')
-        start(d, full=bool(new or missing))
+        start(d, full=bool(new or missing), trusted_only=trusted_only)
     st = wait_done(d, asked, wait)
     if st is None:
         return idx, (f'auto-update: rebuilding the index in the background for {n} changed files. This result uses '
@@ -197,7 +261,7 @@ def run_recipe(rec, full, log):
     return None
 
 
-def work(d, full):
+def work(d, full, trusted_only=False):
     lock = _path(d, 'update.lock')
     try:
         f = open(lock, 'x')
@@ -219,6 +283,9 @@ def work(d, full):
                 rec = recipe_of(index)
                 if rec is None:
                     errors.append(f'{os.path.basename(index)}: unreadable recipe')
+                    continue
+                if trusted_only and not trusted_recipe(index):
+                    errors.append(f'{os.path.basename(index)}: recipe not built on this PC (skipped)')
                     continue
                 log.write(f'== {index}{" (full)" if full else ""}\n')
                 log.flush()
@@ -242,10 +309,16 @@ def work(d, full):
 
 def main():
     ap = argparse.ArgumentParser(prog='autoupdate')
-    ap.add_argument('--dir', required=True, help='the .index folder')
+    ap.add_argument('--dir', help='the .index folder')
     ap.add_argument('--full', action='store_true', help='also regenerate compile_commands.json')
+    ap.add_argument('--trusted-only', action='store_true', help='rebuild only indexes whose recipe was built on this PC')
+    ap.add_argument('--trust', metavar='INDEX', help='record INDEX.recipe.json as built on this PC, and exit')
     a = ap.parse_args()
-    return work(os.path.abspath(a.dir), a.full)
+    if a.trust:
+        return 0 if trust_recipe(os.path.abspath(a.trust)) else 1
+    if not a.dir:
+        ap.error('--dir is required')
+    return work(os.path.abspath(a.dir), a.full, a.trusted_only)
 
 
 if __name__ == '__main__':

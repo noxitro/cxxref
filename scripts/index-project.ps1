@@ -60,6 +60,10 @@ $out = "$Root\.index\$Name.tsv"
 # makeCdb は compile_commands.json を作ったときの make-cdb.ps1 の引数。手元のものを使ったときは null(作り直さない)
 $recipe = [ordered]@{ version = 1; root = $Root; cdb = $Cdb; out = $out; jobs = $Jobs; makeCdb = $mk; alt = -not $NoAlt }
 $recipe | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath "$out.recipe.json" -Encoding utf8NoBOM
+# この PC で作った記録として、指紋をリポジトリの外(%LOCALAPPDATA%\cxxref)に登録する。skill から呼ぶ CLI は、登録した記録の
+# 索引だけを自動で作り直す(リポジトリに置かれた記録で ltidx や make-cdb を動かさない)。Python が無ければ登録しない
+$pyTrust = @('python', 'py') | Where-Object { Get-Command $_ -ErrorAction SilentlyContinue } | Select-Object -First 1
+if ($pyTrust) { & $pyTrust -I (Join-Path $PSScriptRoot '..\mcp\autoupdate.py') --trust $out | Out-Null }
 $t0 = Get-Date
 $ltidxArgs = @('-p', "`"$Cdb`"", '-root', "`"$Root`"", '-o', "`"$out`"", '-j', $Jobs)
 if ($Update) {
