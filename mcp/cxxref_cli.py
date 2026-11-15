@@ -10,7 +10,7 @@
 MCP サーバーとの違い
 - 呼ぶたびに索引を開き直す(呼び出しをまたいで保たない)。大きな索引では 1 回が遅くなる
 - 自動で作り直すのは、この PC で index-project(/cxxref-index)が作った索引だけ(作り直しの記録の指紋を
-  %LOCALAPPDATA%\\cxxref\\trusted-recipes.json に登録したもの)。skill からの呼び出しは hook が許可を自動で出すため
+  %LOCALAPPDATA%\\cxxref\\trusted に登録したもの)。skill からの呼び出しは hook が許可を自動で出すため
 - 作り直しを長く待つ。古い索引で答えると、その注記を見たモデルが確かめ直しの検索を足すことがあるため。時間より、
   モデルに送る量を減らすことを優先する
 """
@@ -25,14 +25,16 @@ WAIT = 120.0
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(prog='cxxref')
+    # 省略形(--roo など)を受けない。hook が許可するかを決める形と、ここで受ける形を揃える(scripts/cxxref_hook.py)
+    ap = argparse.ArgumentParser(prog='cxxref', allow_abbrev=False)
     sub = ap.add_subparsers(dest='cmd', required=True)
-    r = sub.add_parser('refs', help='calls, references, definitions and the text matches left out, for a C++ symbol')
+    r = sub.add_parser('refs', allow_abbrev=False,
+                       help='calls, references, definitions and the text matches left out, for a C++ symbol')
     r.add_argument('name', help='qualified name or its suffix, e.g. ns::File::Read or File::Read')
     r.add_argument('--path', action='append', default=[], help='list only lines under this root-relative folder or file')
     r.add_argument('--exclude', action='append', default=[], help='folder or root-relative prefix to skip in the text search')
     r.add_argument('--limit', type=int, help='max lines per section (default 200)')
-    c = sub.add_parser('check', help='what the index has on each path:line[:col]')
+    c = sub.add_parser('check', allow_abbrev=False, help='what the index has on each path:line[:col]')
     c.add_argument('locations', nargs='+')
     for p in (r, c):
         p.add_argument('--root', help='working folder (default: the current folder)')
@@ -53,7 +55,10 @@ def main(argv=None):
         args = {'locations': a.locations}
     if a.root:
         args['root'] = a.root
-    code, text = server.call_tool(cfg, a.cmd, args)
+    try:
+        code, text = server.call_tool(cfg, a.cmd, args)
+    except Exception as e:  # 索引の読み込みの失敗など。MCP サーバー(server.handle)と同じく 1 行の誤りにする
+        code, text = 1, f'{type(e).__name__}: {e}\nSearch with rg as usual.\n'
     out = io_utf8()
     out.write(text)
     out.flush()

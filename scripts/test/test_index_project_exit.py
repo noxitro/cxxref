@@ -35,17 +35,29 @@ class IndexProjectExitTest(unittest.TestCase):
             f.write(f'@exit /b {code}\n')
         return self.index(fake)
 
-    def index(self, ltidx):
-        env = dict(os.environ, LTIDX=ltidx)
+    def index(self, ltidx, local=None):
+        # 自動更新の登録(%LOCALAPPDATA%\cxxref\trusted)は、利用者のものではなく一時フォルダに書かせる
+        env = dict(os.environ, LTIDX=ltidx, LOCALAPPDATA=os.path.join(self.tmp, 'local') if local is None else local)
         return subprocess.run([PWSH, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', SCRIPT,
-                               '-Root', self.tmp, '-Cdb', self.cdb], capture_output=True, text=True, errors='replace',
-                              env=env, stdin=subprocess.DEVNULL)
+                               '-Root', self.tmp, '-Cdb', self.cdb], capture_output=True, text=True, encoding='utf-8',
+                              errors='replace', env=env, stdin=subprocess.DEVNULL)  # 出力をパイプにすると UTF-8 で書く
 
     def test_index_built(self):
         for code in (0, 1):
             with self.subTest(code=code):
                 r = self.run_with(code)
                 self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        # 作り直しの記録を、この PC で作ったものとして登録した(skill からの呼び出しで自動更新される)
+        self.assertEqual(len(os.listdir(os.path.join(self.tmp, 'local', 'cxxref', 'trusted'))), 1)
+        self.assertNotIn('登録できませんでした', r.stdout)
+
+    def test_tells_when_the_index_cannot_be_registered(self):
+        fake = os.path.join(self.tmp, 'ltidx.cmd')
+        with open(fake, 'w', newline='\r\n') as f:
+            f.write('@exit /b 0\n')
+        r = self.index(fake, local='')  # LOCALAPPDATA が無い: 登録を置く場所が無い
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('自動更新の対象に登録できませんでした', r.stdout)
 
     def test_index_not_built(self):
         for code in (2, -1073741571):  # -1073741571 = 0xC00000FD(STATUS_STACK_OVERFLOW)
@@ -83,7 +95,8 @@ class IndexProjectAltTest(unittest.TestCase):
         return subprocess.run([PWSH, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', SCRIPT,
                                '-Root', self.tmp, '-Cdb', self.tmp, '-Jobs', '1', *more],
                               capture_output=True, text=True, errors='replace',
-                              env=dict(os.environ, LTIDX=os.path.abspath(LTIDX)), stdin=subprocess.DEVNULL)
+                              env=dict(os.environ, LTIDX=os.path.abspath(LTIDX), LOCALAPPDATA=os.path.join(self.tmp, 'local')),
+                              stdin=subprocess.DEVNULL)
 
     def test_alt_pass_runs_after_indexing(self):
         r = self.index()

@@ -140,8 +140,10 @@ def place_index(w, src=None):
         json.dump(recipe, f, ensure_ascii=False, indent=1)
 
 
-def stash_index(w, src=None):
-    """回の後、索引が変わっていなければ .index-keep に退避する。自動更新で作り直されていたら捨てる"""
+def stash_index(w, src=None, touched=None):
+    """回の後、索引が変わっていなければ .index-keep に退避する。自動更新で作り直されていたら捨てる。
+    touched(条件 R)は、回の前に更新日時を今にしたファイルの {名前: その更新日時(ns)}。それと同じなら変わっていないとみなし、
+    退避する前に元の更新日時に戻す(次の回の place_index が使い回せるように)"""
     ws = w['path']
     w = dict(w, index=src or w['index'])
     dst, keep = os.path.join(ws, '.index'), os.path.join(ws, '.index-keep')
@@ -154,10 +156,14 @@ def stash_index(w, src=None):
             time.sleep(0.5)
     if not os.path.isdir(dst):
         return
-    sig, _ = index_sig(w['index'])
     _, parts = index_sig(w['index'])
+    want = {s: (touched or {}).get('index.tsv' + s, os.stat(w['index'] + s).st_mtime_ns) for s in parts}
     ok = all(os.path.exists(os.path.join(dst, 'index.tsv' + s)) and
-             os.stat(os.path.join(dst, 'index.tsv' + s)).st_mtime_ns == os.stat(w['index'] + s).st_mtime_ns for s in parts)
+             os.stat(os.path.join(dst, 'index.tsv' + s)).st_mtime_ns == want[s] for s in parts)
+    if ok and touched:
+        for s in parts:
+            st = os.stat(w['index'] + s)
+            os.utime(os.path.join(dst, 'index.tsv' + s), ns=(st.st_atime_ns, st.st_mtime_ns))
     if ok:
         if os.path.exists(keep):
             shutil.rmtree(keep)
@@ -243,6 +249,7 @@ def main():
 
     reset_ws(w)
     src = w.get('index_r') if a.cond == 'R' else None
+    touched = {}  # 条件 R で更新日時を今にした索引のファイル(stash_index が元に戻す)
     if a.cond == 'R' and w.get('index') and not src:
         raise SystemExit('condition R needs index_r in bench/local/codebase-a.json (an index built with the current ltidx)')
     if a.cond in ('P', 'M', 'X', 'Q', 'R') and w.get('index'):
@@ -258,6 +265,7 @@ def main():
         for f in os.listdir(os.path.join(ws, '.index')):
             if f.startswith('index.tsv'):
                 os.utime(os.path.join(ws, '.index', f), (now, now))
+                touched[f] = os.stat(os.path.join(ws, '.index', f)).st_mtime_ns
     if a.cond == 'X':
         gh = os.path.join(ws, '.github')
         os.makedirs(gh, exist_ok=True)
@@ -313,7 +321,7 @@ def main():
     with open(os.path.join(RUNS, name + '.diff'), 'w', encoding='utf-8', newline='\n') as f:
         f.write(d)
     if w.get('index'):
-        stash_index(w, src)
+        stash_index(w, src, touched)
     reset_ws(w)
     rec = {'name': name, 'round': a.round, 'task': a.task, 'cond': a.cond, 'rep': a.rep, 'model': a.model, 'provider': a.provider,
            'exit': code, 'sec': sec, 'at': start, 'diff_lines': d.count('\n')}

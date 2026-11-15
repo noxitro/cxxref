@@ -95,7 +95,7 @@ setup-instructions.bat -Root D:\src\game -Action Remove
 setup-instructions.bat -Root D:\src\game -Action Status
 ```
 
-Copilot CLI のプラグインの拡張を使うなら、セッションの中で `/cxxref-enable on`(ローカル)・`/cxxref-enable on project`・`/cxxref-enable off` でも同じことができます(../README.md の「`/cxxref-enable`」)。
+Copilot CLI のプラグイン(0.5.10 から)を使うなら、指示は要りません(skill が代わりをします。指示が呼ばせる MCP サーバーはプラグインにありません)。0.5.9 までに足した指示は、セッションの中で `/cxxref-enable off` で消せます(../README.md の「`/cxxref-enable`」)。
 
 ## 仕組みと制約
 

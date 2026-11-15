@@ -9,10 +9,11 @@
 //                         ルートを省くと、作業フォルダから親へさかのぼって .index のあるフォルダ、無ければ作業フォルダ。
 //                         compile_commands.json の作り元(.slnx など)の候補が複数あれば、ダイアログで選ばせる。
 //                         選んだものは作り方の記録に残り、次からは聞かない。
-// /cxxref-enable on|off|status [local|project] [ルート]
-//                         使い方の指示を足す・消す(scripts\setup-instructions.ps1)。on は省くとローカル(自分だけ。git から外す)、
-//                         project は .github\copilot-instructions.md(コミットすればチーム全員)。off は省くと両方から消す。
+// /cxxref-enable off|status [local|project] [ルート]
+//                         0.5.9 までに足した使い方の指示を消す(scripts\setup-instructions.ps1)。off は省くと両方から消す。
 //                         引数なしは今の状態を出す。ルートを省くと、作業フォルダの git のルート、無ければ作業フォルダ。
+//                         on は断る(指示は MCP サーバーのツールを呼ばせるもので、0.5.10 からのプラグインには MCP サーバーが無い。
+//                         手で MCP サーバーを登録した人は scripts\setup-instructions.bat で足す)。
 //
 // 拡張は Copilot CLI の実験的機能で、機能フラグ EXTENSIONS が有効なときだけ読み込まれる。
 import { joinSession } from "@github/copilot-sdk/extension";
@@ -21,7 +22,7 @@ import { closeSync, existsSync, mkdirSync, openSync, readFileSync, statSync } fr
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { enableRoot, findLtidx, lastCwd, makeNotifier, parseEnableArgs, parseIndexArgs, parseProgress, pluginRoot, progressNote, projectChoices, savedProject, statusHint, targetRoot } from "./lib.mjs";
+import { ENABLE_ON_GONE, enableRoot, findLtidx, lastCwd, makeNotifier, parseEnableArgs, parseIndexArgs, parseProgress, pluginRoot, progressNote, projectChoices, savedProject, statusHint, targetRoot } from "./lib.mjs";
 
 function run(script, args, log) {
   return new Promise((done) => {
@@ -185,6 +186,10 @@ async function enableCommand(ctx) {
     await tell(`cxxref: ${a.error}`, "error");
     return;
   }
+  if (a.action === "Add") {
+    await tell(`cxxref: ${ENABLE_ON_GONE}`, "error");
+    return;
+  }
   const plugin = pluginRoot(dirname(fileURLToPath(import.meta.url)));
   const cwd = lastCwd(await session.getEvents()) || process.cwd();
   const t = enableRoot(a.root, cwd);
@@ -218,7 +223,7 @@ const session = await joinSession({
     },
     {
       name: "cxxref-enable",
-      description: "on|off|status [local|project] [ルート] — 使い方の指示を足す・消す。on は省くとローカル(自分だけ)(モデルは呼ばない)",
+      description: "off|status [local|project] [ルート] — 0.5.9 までに足した使い方の指示を消す・状態を出す。今のプラグインでは指示は要らない(モデルは呼ばない)",
       handler: (ctx) => {
         enableCommand(ctx).catch((err) => tell(`cxxref: ${err?.message ?? err}`, "error"));
       },

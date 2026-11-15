@@ -100,7 +100,7 @@ Copilot で C++ の呼び出し箇所を探すと、LSP(clangd)を渡しても�
 5. **使い方の指示を足す(推奨)**: `scripts\setup-instructions.bat` をダブルクリックし、ソースのルートを入れて番号を選びます。[scripts/cxxref-instructions.md](scripts/cxxref-instructions.md) の内容が入ります。やめるときは同じ .bat で「3: 消す」を選ぶと、足した分だけが消えます
    - 「1: ローカルに足す」: 自分の手元だけに効きます。`.github\instructions\cxxref.instructions.md` を置き、`.git\info\exclude` に足して git から外します(`git status` に出ません)
    - 「2: プロジェクトに足す」: `.github\copilot-instructions.md` に入れます。コミットすると、チームの全員に効きます
-   - プラグインの拡張を使うなら、セッションの中で `/cxxref-enable on` でも同じことができます(下の「`/cxxref-enable`」)
+   - この指示は、手で登録した MCP サーバー向けです。プラグイン(0.5.10 から)を使うなら要りません(下の「`/cxxref-enable`」)
 
 ## チームで使う(Copilot CLI のプラグイン)
 
@@ -169,8 +169,9 @@ MCP サーバーは、プラグインには入れていません。ツールの�
 | 索引の無いリポジトリ(C++ でないリポジトリを含む) | hook は何も足さない。常に送られるのは skill の説明文(約 100 トークン)だけ |
 
 - sessionStart の hook: 作業フォルダかその親に `.index` があるときだけ、skill の使いどころを 1 文(約 60 トークン)で足します。説明文だけでは、Claude Haiku 5.5 は skill を読まずに grep から始めました(gpt-6-luna は読みました)
-- preToolUse の hook: プラグインは作業フォルダの外にあるので、skill の実行するコマンドは毎回確認が要り、確認できない場面(`copilot -p`)では断られます。そこで、このプラグインの `cxxref_cli.py` を `refs` か `check` で呼ぶだけの PowerShell の 1 行に限って、確認を通します。ASCII 以外の文字・shell の記号(`; | & $` など)・フォルダ付きの `python`・`-I` の無いもの・`--root`・UNC のパスを含むものは通しません(ふだんの確認になります)
-- 自動で作り直すのは、この PC で `index-project`(`/cxxref-index` も同じ)が作った索引だけです。作り直しの記録(`.index\*.recipe.json`)の指紋を `%LOCALAPPDATA%\cxxref\trusted-recipes.json` に登録しておき、一致したときだけ作り直します。リポジトリに置かれた記録をそのまま信じると、細工したリポジトリを開いただけで、clang の引数を通じて任意の DLL を読ませられるためです。登録の無い索引は、行を付け直した結果で答え、作り直し方を添えます
+- preToolUse の hook: プラグインは作業フォルダの外にあるので、skill の実行するコマンドは毎回確認が要り、確認できない場面(`copilot -p`)では断られます。そこで、このプラグインの `cxxref_cli.py` を `refs` か `check` で呼ぶだけの PowerShell の 1 行に限って、確認を通します。引用符の外の shell の記号(`; | & $ ( ) < > @ #` など)・`"` の中の `` ` `` と `$`・引用符の重なり(`""`)や `\` で終わる引用・ASCII 以外の空白や全角の引用符とダッシュ・フォルダ付きの `python`・`-I` の無いもの・`--root` とその省略形(`--roo`・`--r=` など)・UNC のパスを含むものは通しません(ふだんの確認になります)。日本語のフォルダ名(プラグインの場所を含む)は通します。`operator()`・`Vec<int>` のような名前は `"…"` で囲めば通ります
+- 自動で作り直すのは、この PC で `index-project`(`/cxxref-index` も同じ)が作った索引だけです。作り直しの記録(`.index\*.recipe.json`)の指紋を `%LOCALAPPDATA%\cxxref\trusted` に記録 1 つにつき 1 ファイルで登録しておき(0.5.10 の `trusted-recipes.json` も読みます)、一致したときだけ作り直します。リポジトリに置かれた記録をそのまま信じると、細工したリポジトリを開いただけで、細工した `compile_commands.json` で ltidx を動かせるためです。登録の無い索引は、行を付け直した結果で答え、その索引の構成のまま変わった分だけを作り直すコマンドを添えます。`index-project` は、登録できなかったとき(動く Python が無い・`%LOCALAPPDATA%\cxxref` に書けない)にそう出します
+- 自動の作り直しは、どの経路でも(MCP サーバーからも)、`compile_commands.json` にコンパイラへコードを読ませうる引数(`-fplugin`・`-fpass-plugin`・`-Xclang -load`/`-plugin`・`--config`。応答ファイル `@file` の中も見ます)があれば行いません。登録済みの索引でも、後から取り込んだ変更で足された場合に止めるためです
 - skill からの実行は、呼ぶたびに索引を開き直します(MCP サーバーのように開いたまま保たない)。古い索引は作り直しを最大 120 秒待ってから答えます。時間より、モデルに送る量を減らすことを優先しています
 
 ### `/cxxref-index`(索引を作るスラッシュコマンド)
@@ -195,25 +196,21 @@ MCP サーバーは、プラグインには入れていません。ツールの�
 
 確かめたこと(Copilot CLI 1.0.105 のランタイムを SDK から画面なしで動かした): この形式(Agent Plugins 1.0)のプラグインで拡張が見つかり、`/cxxref-index` が一覧に出ること。小さなプロジェクトで実行すると索引ができ、2 回目は変わった分だけの作り直しになること。どちらもモデルの呼び出しは 0 回(`totalUserRequests` 0、`totalNanoAiu` 0)。作り元を選ぶダイアログは、Copilot CLI 1.0.107 のランタイムを SDK から画面なしで動かして確かめた(ソリューションが 2 つのプロジェクトで、選択肢が 2 つ出る・やめると何も作らない・選ぶとそれで索引ができ、2 回目は聞かない。どれもモデルの呼び出しは 0 回)。進み具合の表示も同じやり方で確かめた(240 TU のプロジェクトで、6%・58% の 2 行が出てから、できたと出る。モデルの呼び出しは 0 回)。GitHub Copilot app(ランタイム 1.0.106-8)では、信頼済みのリポジトリの新規セッションで、最初の発言の `/cxxref-enable status` の結果がダイアログに出ることを確かめた(ダイアログを付ける前は何も出なかった)。アプリでの `/cxxref-index` と、Copilot CLI の画面では、まだ試していません。
 
-### `/cxxref-enable`(使い方の指示を足す・消すスラッシュコマンド)
+### `/cxxref-enable`(0.5.9 までに足した使い方の指示を消すスラッシュコマンド)
 
-**プラグインの利用者には要りません**(skill と hooks が代わりをします)。入れる指示は MCP サーバーの `refs` / `check` を前提にしているので、MCP サーバーを手で登録して使う人向けです。
+**プラグインの利用者には、使い方の指示は要りません**(skill と hooks が代わりをします)。指示は MCP サーバーのツール `refs` / `check` を呼ぶよう求めるもので、0.5.10 からのプラグインには MCP サーバーがありません。残っていると、モデルが無いツールを探すうえ、指示の本文も毎回送られます。そのため、0.5.10 からは足せず(`on` は断ります)、0.5.9 までに足した指示を消すためだけに残しています。
 
-同じ拡張が足すコマンドです。`scripts\setup-instructions.ps1` を動かすだけで、モデルは呼びません。足す先を、ローカル(自分だけ)かプロジェクト(コミットすればチーム全員)から選べます。
+同じ拡張が足すコマンドです。`scripts\setup-instructions.ps1` を動かすだけで、モデルは呼びません。
 
 | 打つもの | すること |
 |---|---|
-| `/cxxref-enable` | 今の状態(ローカル・プロジェクトのどちらに入っているか)を出す。続けて、入っていなければ `on` / `on project` を、入っていれば `off` を案内する(拡張のコマンドには引数のヒントを付けられないため) |
-| `/cxxref-enable on` | ローカルに足す。`.github\instructions\cxxref.instructions.md` を置き、`.git\info\exclude` に足して git から外す |
-| `/cxxref-enable on project` | プロジェクトに足す。`.github\copilot-instructions.md` の末尾に、目印で囲んで入れる(目印の外は書き換えない) |
+| `/cxxref-enable` | 今の状態(ローカル・プロジェクトのどちらに入っているか)を出す。入っていれば `off` を案内する |
 | `/cxxref-enable off` | 入っている方(両方なら両方)から消す。`off local` / `off project` で片方だけ |
+| `/cxxref-enable on` | 断る(上のわけと、手で MCP サーバーを登録したときの足し方を出す) |
 
-- ルートは、作業フォルダの git のルートです(リポジトリでなければ作業フォルダ)。最後にルートを書けば、そこに足します(`/cxxref-enable on D:\src\game`)
-- 二重にはしません。プロジェクトに入っていればローカルには足さず、プロジェクトに足すとローカルの分を消します
-- ローカルの置き場所(`cxxref.instructions.md`)がコミットされているリポジトリでは、git から外せないので、ローカルには足しません
-- Copilot CLI には、Claude Code の `CLAUDE.local.md` のような「手元だけの指示ファイル」がありません(1.0.107 の本体の文字列で探しました)。そのため、ふつうの指示ファイルを git から外す形にしています。置いたファイルが指示として見つかることは `copilot instruction list` の「Repository instructions」で確かめました(1.0.107)。中身がモデルに渡ったかまでは確かめていません
-- 指示はセッションの始めに読まれるので、新しいセッションから効きます。今のセッションの途中から効くかは確かめていません
-- 入れる中身は [scripts/cxxref-instructions.md](scripts/cxxref-instructions.md) です(以前のプラグインの rule と同じもの)。プラグインを使わず MCP サーバーだけを登録しているリポジトリでは、`setup-instructions.bat` で同じことができます
+- ルートは、作業フォルダの git のルートです(リポジトリでなければ作業フォルダ)。最後にルートを書けば、そこを見ます(`/cxxref-enable off D:\src\game`)
+- 0.5.9 までに `/cxxref-enable on project` で `.github\copilot-instructions.md` に入れてコミットしたチームは、誰か 1 人が `/cxxref-enable off project` で消してコミットします
+- MCP サーバーを手で登録して使うリポジトリ(VS Code など skill の無いクライアント)では、`scripts\setup-instructions.bat` で指示を足せます。入れる中身は [scripts/cxxref-instructions.md](scripts/cxxref-instructions.md) です。置き場所(ローカルは `.github\instructions\cxxref.instructions.md` を git から外す、プロジェクトは `.github\copilot-instructions.md` に目印で囲んで入れる)と二重にしない扱いは [scripts/README.md](scripts/README.md) のとおりです
 
 `setup.bat` の Copilot CLI への登録との関係: cxxref プラグインが入っていれば、`setup.bat` は MCP サーバーを登録しません(skill が同じ索引を引くので、ツールの定義を足しても送る量が増えるだけです)。0.5.9 までのプラグインや手で登録した `code-ref-index` が残っていれば、`copilot mcp remove code-ref-index` で消せます。
 

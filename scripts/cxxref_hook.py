@@ -8,11 +8,17 @@ skill の cxxref は、プラグインの mcp/cxxref_cli.py を shell で呼ぶ�
 
 許す形(PowerShell の 1 行だけ)
   python[.exe] -I "<このプラグインの mcp\\cxxref_cli.py の絶対パス>" refs|check <引数>...
-- コマンド全体が ASCII の印字可能文字だけ。PowerShell は NBSP・全角空白などの非 ASCII の空白も区切りに使うので、
-  それを含むと、ここでの分け方と PowerShell の分け方が食い違う
+- 語は ASCII の空白 1 つ以上で区切る。語は次のどれか(ここでの分け方と、PowerShell・python の分け方が食い違わない形)
+  - 裸の語: 英数字と _ . : \\ / = + ~ - と、ASCII でない文字・数字(Unicode の L・M・N)だけ。PowerShell は NBSP・全角空白
+    などの非 ASCII の空白を区切りに、全角の引用符(‘ ’ “ ” など)を引用符に、– — を - に使うので、それらは受けない
+  - "…": 中に " ` $ を含まない(式の展開をさせない)。'…': 中に ' を含まない。どちらも、中は ASCII の印字可能文字と
+    上の非 ASCII の文字・数字だけ。空でなく、\\ で終わらない(Windows PowerShell 5.1 などの古い渡し方では、
+    中の \\" や "" で語が分かれたり、空の語が消えたりする【実測: 5.1.26100 で "X"" --root C:\\evil" が 3 つの引数になった】)。
+    閉じた引用符のすぐ後に文字を続けない
+  これで、関数名の operator() や Vec<int> は引用符の中で、日本語のフォルダ名やプラグインの場所は裸でも渡せる
 - 先頭は裸の python / python.exe / py(フォルダ付きは許さない。.\\python などは別の実行ファイルを動かせる)
 - 次は -I(必須。ほかのフラグは受けない)、その次は実体がこのプラグインの cxxref_cli.py である絶対パス
-- shell の記号(; & | < > ` $ ( ) { } % ^ @ #)を含まない。--root と、\\\\ や // で始まる引数(UNC)を含まない
+- --root と、その省略形(--roo・--r= など。argparse の省略は CLI の側でも切ってある)、// や \\\\ を含む引数(UNC)を含まない
   (--root で別の場所の索引と作り直しの記録を読ませない。UNC は開くだけで資格情報を送りうる)
 - 道具は powershell / pwsh だけ(ほかの shell は字句の規則が違う)
 
@@ -22,33 +28,72 @@ skill の cxxref は、プラグインの mcp/cxxref_cli.py を shell で呼ぶ�
 import json
 import os
 import re
-import shlex
+import string
 import sys
+import unicodedata
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CLI = os.path.normcase(os.path.realpath(os.path.join(HERE, '..', 'mcp', 'cxxref_cli.py')))
 SHELLS = {'powershell', 'pwsh'}
-PRINTABLE = re.compile(r'[\x20-\x7e]+')
-UNSAFE = re.compile(r'[;&|<>`$(){}%^@#]')
 PYTHON = re.compile(r'(?i)(?:python3?|py)(?:\.exe)?')
+_ASCII = {chr(c) for c in range(0x20, 0x7f)}
+BARE = set(string.ascii_letters + string.digits + '_.:\\/=+~-')  # 裸の語に使える ASCII
+QUOTED = {'"': _ASCII - set('"`$'), "'": _ASCII - {"'"}}  # 引用符の中に使える ASCII
+
+
+def _ok(ch, ascii_ok):
+    """ch を語に入れてよいか。ASCII は ascii_ok の中だけ、ほかは文字・結合文字・数字だけ(空白・引用符・ダッシュの類を除く)。"""
+    return ch in ascii_ok if ch < '\x80' else unicodedata.category(ch)[0] in 'LMN'
+
+
+def split_words(command):
+    """PowerShell の 1 行を語に分ける(引用符は外す)。分け方がここと PowerShell・python で食い違いうる形なら None。"""
+    words, i, n = [], 0, len(command)
+    while i < n:
+        if command[i] == ' ':
+            i += 1
+            continue
+        q = command[i]
+        if q in QUOTED:
+            j = command.find(q, i + 1)
+            if j < 0:
+                return None
+            body = command[i + 1:j]
+            if not body or body.endswith('\\') or not all(_ok(c, QUOTED[q]) for c in body):
+                return None
+            if j + 1 < n and command[j + 1] != ' ':  # "a""b"・"a"b のように続ける形
+                return None
+            words.append(body)
+            i = j + 1
+        else:
+            j = command.find(' ', i)
+            j = n if j < 0 else j
+            body = command[i:j]
+            if not all(_ok(c, BARE) for c in body):
+                return None
+            words.append(body)
+            i = j
+    return words
+
+
+def _root_option(word):
+    """word が --root(とその省略形 --r・--ro・--roo、-r など。= 付きも)なら True。"""
+    opt = word.split('=', 1)[0]
+    name = opt.lstrip('-')
+    return opt.startswith('-') and bool(name) and 'root'.startswith(name)
 
 
 def allowed(command):
     """command が、このプラグインの cxxref_cli.py を refs / check で呼ぶだけなら True。"""
-    if not isinstance(command, str) or not PRINTABLE.fullmatch(command) or UNSAFE.search(command):
+    words = split_words(command) if isinstance(command, str) else None
+    if not words or len(words) < 4 or not PYTHON.fullmatch(words[0]) or words[1] != '-I':
         return False
-    try:
-        words = shlex.split(command.replace('\\', '/'), posix=True)
-    except ValueError:
-        return False
-    if len(words) < 4 or not PYTHON.fullmatch(words[0]) or words[1] != '-I':
-        return False
-    script, sub, rest = words[2], words[3], words[4:]
+    script, sub, rest = words[2].replace('\\', '/'), words[3], words[4:]
     if not os.path.isabs(script) or script.startswith('//'):
         return False
     if os.path.normcase(os.path.realpath(script)) != CLI or sub not in ('refs', 'check'):
         return False
-    return not any(w == '--root' or w.startswith('--root=') or w.startswith('//') for w in rest)
+    return not any(_root_option(w) or '//' in w.replace('\\', '/') for w in rest)
 
 
 SESSION_NOTE = ('This repository has a cxxref index (.index, built by clang over every C++ translation unit). '
