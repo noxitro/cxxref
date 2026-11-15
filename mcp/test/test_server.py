@@ -110,8 +110,11 @@ class ServerTest(unittest.TestCase):
         self.assertTrue(r['isError'])
         self.assertIn('index not found', r['content'][0]['text'])
         # 作り方を、このサーバーの隣の scripts の絶対パスで添える(プラグインとして入れたときに場所が分かるように)
+        # PowerShell でも cmd でも動く形("…bat" で始めると PowerShell では構文エラー)
         scripts = os.path.normpath(os.path.join(os.path.dirname(SERVER), '..', 'scripts'))
-        self.assertIn(f'"{os.path.join(scripts, "index-project.bat")}" -Root "{self.root}"', r['content'][0]['text'])
+        self.assertIn(f'pwsh -NoProfile -ExecutionPolicy Bypass -File "{os.path.join(scripts, "index-project.ps1")}" '
+                      f'-Root "{self.root}"', r['content'][0]['text'])
+        self.assertNotIn('.bat"', r['content'][0]['text'])
 
     def test_large_result_is_shortened(self):
         # クライアントの上限(Copilot CLI は 20,480 バイト)を超える結果は、短い形にし、それでも超えれば末尾を切る
@@ -525,7 +528,10 @@ class ReuseTest(unittest.TestCase):
         os.utime(self.base + '.skip.tsv', (2000, 2000))
         self.cfg.close()
         self.cfg = self.server.Config(self.root, None, None, max_bytes=1600)
-        with mock.patch.object(self.server.autoupdate, 'stale_ltidx', return_value=('0.5.1', '0.6.0')):
+        # 注記に入る get-ltidx のコマンドは、プラグインの場所の長さで変わる。長いと 1 回目だけ短い形になり、並べる行が
+        # 変わって別の一覧になる(それは正しい)。ここで確かめたいのは注記を一覧に入れないことなので、長さを決めておく
+        with mock.patch.object(self.server.autoupdate, 'stale_ltidx', return_value=('0.5.1', '0.6.0')), \
+                mock.patch.object(self.server.autoupdate, 'script_command', return_value='get-ltidx'):
             first = self.refs()
             path = self.cfg.last_list
             ino = os.stat(path).st_ino

@@ -450,10 +450,11 @@ def run_ltq(cfg, args, start=None):
             cfg.told_ltidx = True
             old = autoupdate.stale_ltidx()
             if old:
-                get = os.path.join(autoupdate.SCRIPTS, 'get-ltidx.bat')
+                # コマンドは PowerShell でも cmd でも動く形(autoupdate.script_command)。"…bat" で始めると PowerShell では構文エラー
+                get = autoupdate.script_command('get-ltidx') or os.path.join(autoupdate.SCRIPTS, 'get-ltidx.bat')
                 note += (f'ltidx {old[0]} is older than this plugin ({old[1]}): the index lacks newer kinds of rows. '
                          'Ask the user to run /cxxref-index in Copilot CLI (it fetches the new ltidx and rebuilds the index), '
-                         f'or "{get}" and then rebuild the index.\n')
+                         f'or {get} and then rebuild the index.\n')
     elif not cfg.index:
         plugin = os.environ.get('PLUGIN_ROOT')
         if not start and plugin and os.path.normcase(root) == os.path.normcase(os.path.abspath(plugin)):
@@ -461,12 +462,16 @@ def run_ltq(cfg, args, start=None):
             note += ('The server could not tell which folder you are working in (it runs in the plugin folder). '
                      'Call again with `root` set to the absolute path of your workspace.\n')
         else:
-            # 索引の無いリポジトリ。プラグインとして入れたときは scripts が見つけにくいので、作り方を絶対パスで添える
-            index_project = os.path.join(autoupdate.SCRIPTS, 'index-project.bat')
+            # 索引の無いリポジトリ。プラグインとして入れたときは scripts が見つけにくいので、作り方を絶対パスで添える。
+            # コマンドは PowerShell でも cmd でも動く形(autoupdate.script_command)。作業フォルダの名前に埋められない文字が
+            # あれば、コマンドにせず場所だけを言う
+            build = autoupdate.script_command('index-project', ('Root', root))
+            build = (f'run this command: {build}' if build else
+                     f'run {os.path.join(autoupdate.SCRIPTS, "index-project.bat")} and enter the source root')
+            get = autoupdate.script_command('get-ltidx') or os.path.join(autoupdate.SCRIPTS, 'get-ltidx.bat')
             note += ('No cxxref index in this repository; search with rg as usual. To build one (it takes minutes; ask '
-                     f'the user first): "{index_project}" -Root "{root}"'
-                     + ('' if autoupdate.find_ltidx() else
-                        f' (first run "{os.path.join(autoupdate.SCRIPTS, "get-ltidx.bat")}" once to get ltidx.exe)')
+                     f'the user first), {build}'
+                     + ('' if autoupdate.find_ltidx() else f' (first run {get} once to get ltidx.exe)')
                      + '\n')
 
     def run(extra, noted=True, skip=None):

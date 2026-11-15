@@ -10,12 +10,19 @@ skill の cxxref は、プラグインの mcp/cxxref_cli.py を shell で呼ぶ�
   python[.exe] -I "<このプラグインの mcp\\cxxref_cli.py の絶対パス>" refs|check <引数>...
 - 語は ASCII の空白 1 つ以上で区切る。語は次のどれか(ここでの分け方と、PowerShell・python の分け方が食い違わない形)
   - 裸の語: 英数字と _ . : \\ / = + ~ - と、ASCII でない文字・数字(Unicode の L・M・N)だけ。PowerShell は NBSP・全角空白
-    などの非 ASCII の空白を区切りに、全角の引用符(‘ ’ “ ” など)を引用符に、– — を - に使うので、それらは受けない
-  - "…": 中に " ` $ を含まない(式の展開をさせない)。'…': 中に ' を含まない。どちらも、中は ASCII の印字可能文字と
+    などの非 ASCII の空白を区切りに、全角の引用符(‘ ’ “ ” など)を引用符に、– — を - に使うので、それらは受けない。
+    ~ で始まる語と、- 1 つで始まる語(-I を除く)も受けない。PowerShell が書き換えるため【実測: 5.1.26100 と 7.6 で
+    -a.b は -a と .b に分かれ、-x: は次の語とつながる。7.6 は ~ と ~\\x をホームフォルダに展開する。-- で始まる語と、
+    語の途中の ~(Foo::~Foo)はそのまま渡る】
+  - "…": 中に " ` $ を含まない(式の展開をさせない)。'…': 中に ' と " を含まない。どちらも、中は ASCII の印字可能文字と
     上の非 ASCII の文字・数字だけ。空でなく、\\ で終わらない(Windows PowerShell 5.1 などの古い渡し方では、
-    中の \\" や "" で語が分かれたり、空の語が消えたりする【実測: 5.1.26100 で "X"" --root C:\\evil" が 3 つの引数になった】)。
-    閉じた引用符のすぐ後に文字を続けない
-  これで、関数名の operator() や Vec<int> は引用符の中で、日本語のフォルダ名やプラグインの場所は裸でも渡せる
+    中の \\" や "" で語が分かれたり、空の語が消えたりする【実測: 5.1.26100 で "X"" --root C:\\evil" が 3 つの引数に、
+    '--exclude=\\"a --root C:\\evil --exclude=b\\"' が 4 つの引数になった】)。閉じた引用符のすぐ後に文字を続けない
+  - どの語にも & | < > ^ % を含まない(引用符の中でも)。python がバッチの shim(pyenv-win の python.bat など)だと
+    PowerShell は cmd.exe を通して呼び、引用符の中でも cmd がこれらを解釈する【実測: 5.1.26100 と 7.6 で、python.bat を
+    PATH の先頭に置くと "a>made.txt" はファイルを作り、"%OS%" は展開され、"a^b" は ab になった】
+  これで、関数名の operator() は引用符の中で、日本語のフォルダ名やプラグインの場所は裸でも渡せる。operator< や
+  Vec<int> のように < > などを含む名前は、ふだんの確認になる
 - 先頭は裸の python / python.exe / py(フォルダ付きは許さない。.\\python などは別の実行ファイルを動かせる)
 - 次は -I(必須。ほかのフラグは受けない)、その次は実体がこのプラグインの cxxref_cli.py である絶対パス
 - --root と、その省略形(--roo・--r= など。argparse の省略は CLI の側でも切ってある)、// や \\\\ を含む引数(UNC)を含まない
@@ -38,7 +45,9 @@ SHELLS = {'powershell', 'pwsh'}
 PYTHON = re.compile(r'(?i)(?:python3?|py)(?:\.exe)?')
 _ASCII = {chr(c) for c in range(0x20, 0x7f)}
 BARE = set(string.ascii_letters + string.digits + '_.:\\/=+~-')  # 裸の語に使える ASCII
-QUOTED = {'"': _ASCII - set('"`$'), "'": _ASCII - {"'"}}  # 引用符の中に使える ASCII
+_CMD = set('&|<>^%')  # python がバッチの shim だと cmd.exe を通り、引用符の中でも cmd が解釈する
+# 引用符の中に使える ASCII。' の中の " も受けない(5.1 は、空白がすべて " の対の内側にある引数を引用符で包まずに渡す)
+QUOTED = {'"': _ASCII - set('"`$') - _CMD, "'": _ASCII - set('\'"') - _CMD}
 
 
 def _ok(ch, ascii_ok):
@@ -70,6 +79,9 @@ def split_words(command):
             j = n if j < 0 else j
             body = command[i:j]
             if not all(_ok(c, BARE) for c in body):
+                return None
+            # PowerShell が書き換える裸の語: ~ で始まる(ホームフォルダに展開)、- 1 つで始まる(. で分ける・: で次とつなぐ)
+            if body.startswith('~') or (body.startswith('-') and not body.startswith('--') and body != '-I'):
                 return None
             words.append(body)
             i = j
