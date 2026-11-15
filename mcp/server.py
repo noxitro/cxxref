@@ -79,7 +79,7 @@ TOOLS = [
             'type': 'object',
             'properties': {
                 'name': {'type': 'string', 'description': 'Qualified name or its suffix, e.g. "ns::File::Read" or "File::Read"'},
-                'limit': {'type': 'integer', 'description': 'Max lines per section (default 200)'},
+                'limit': {'type': 'integer', 'minimum': 0, 'description': 'Max lines per section (default 200)'},
                 'exclude': {'type': 'array', 'items': {'type': 'string'},
                             'description': 'Folders or root-relative path prefixes to skip in the text search'},
                 'path': {'type': 'array', 'items': {'type': 'string'},
@@ -529,45 +529,91 @@ def run_ltq(cfg, args, start=None):
     # - 無効な #if の中やマクロの定義の中の一致もフォルダごとの件数にする(どのフォルダに何件あるかは残り、path で出し直せる)
     # - 上書きの族を全部並べたまま、索引が問い合わせに解決しなかった行(解決先の決まらないテンプレートの呼び出し、索引に無い
     #   一致など)の節の行数とフォルダの数を減らす(--other-limit。解決済みの呼び出しと上書きは答えそのものなので、先に減らさない)
-    # - 上書きの族を絞る(10、5、2。直接の呼び出しを減らす前に)
+    # - 上書きの族を絞り(10、5、2。直接の呼び出しを減らす前に)、それぞれで解決しなかった行をもう一度 60 から減らす
     # - 節ごとの行数を減らす(解決済みの行だけで数百行ある名前。呼び出し側が渡した limit より小さい値だけを試す。後ろに足した
     #   --limit が勝つ)
+    # 形は段に分け、段の中は大きい順に並べる。段のいちばん小さい形でも超えるなら、その段は飛ばす(上書きが数百ある名前で、
+    # 族を全部並べた形を 5 回流さない)。出力が同じになる形(族が n 個以下のときの --family n など)は流し直さない。
     # どの形でも、1 行ずつ並べなかった行は、残りの一覧としてファイルに書き、最後の行(coverage)の案内をその場所に置き換える
     # (結果と一覧を合わせると、名前を含む行がどれも 1 回ずつ出る。一覧は、結果の形が決まってから作る)
     asked = int(args[args.index('--limit') + 1]) if '--limit' in args else 200
     virt = '\n== virtual dispatch\n' in text
+    fam = family_size(text) if virt else 0
     short = ['--compact'] * 2
-    forms = ([['--family', str(min(10, asked))]] if virt else []) + [['--compact'], short]
+    others = [n for n in FIT_LIMITS if n < asked]  # 試す --other-limit と --limit(大きい順)
+    stages = [[None]] + ([[['--family', str(min(10, asked))]]] if virt else []) + [[['--compact']], [short]]
     # 短い形の族は既定で 10 行ずつ。解決しなかった行を減らす間は、族を全部並べる(UE5 の FAnimInstanceProxy::Initialize は、
     # 差分パスを掛けた索引で無効な #if とマクロの引数の行が増え、族を 2 まで絞ってから解決しなかった行を減らしていたので、
     # 14 ある上書きを 2 つしか並べず、モデルが残りの一覧を読みに行った)
     every = ['--family', str(asked)] if virt else []
-    forms += [short + every + ['--other-limit', str(n)] for n in FIT_LIMITS if n < asked]
+    stages.append([short + every + ['--other-limit', str(n)] for n in others])
     # 族を絞る(直接の呼び出しを減らす前に。同じ名前は、族を 10 にした短い形が上限を少し超え、節ごとの行数を 5 まで下げて、
-    # 16 ある直接の呼び出しを 5 つしか並べなかった)。絞った分は残りの一覧に出る
+    # 16 ある直接の呼び出しを 5 つしか並べなかった)。絞った族ごとに、解決しなかった行を 60 から減らし直す(族を絞ると
+    # 空いた分に、解決しなかった行が並ぶ)。絞った分は残りの一覧に出る
+    stages += [[short + ['--family', str(f), '--other-limit', str(n)] for n in others]
+               for f in FIT_FAMILY if virt and f < min(asked, fam)]
     least = ['--other-limit', str(min(FIT_LIMITS[-1], asked))]
-    forms += [short + least + ['--family', str(n)] for n in FIT_FAMILY if n < asked] if virt else []
     low = ['--family', str(min(FIT_FAMILY[-1], asked))] if virt else []
     # 節ごとの行数を下げるときは、各行数で、まずどの節も同じ行数にした形を試し(並ぶ行がいちばん多い)、超えたら
     # 解決しなかった行の節だけを最小にした形を試す(呼び出しを同じ行数に保ったまま縮む)
-    forms += [short + low + more + ['--limit', str(n)] for n in FIT_LIMITS if n < asked
-              for more in ([], least) if not more or n > FIT_LIMITS[-1]]
-    for form in [None] + forms:
-        if form is not None:
-            code, text = run(form)
+    stages.append([short + low + more + ['--limit', str(n)] for n in others
+                   for more in ([], least) if not more or n > FIT_LIMITS[-1]])
+    # 試した形の出力と、その実行で 1 行ずつ並べた行(残りの一覧は、結果の形の idx.last_refs から作る)
+    seen = {fit_key(None, asked, fam): (code, text, idx.last_refs)}
+
+    def output(form):
+        key = fit_key(form, asked, fam)
+        if key not in seen:
+            seen[key] = run(form) + (idx.last_refs,)
+        code, text, idx.last_refs = seen[key]
+        return code, text
+
+    for stage in stages:
+        if not stage:
+            continue
+        # 段のいちばん小さい形(最後の形)でも、一覧の案内を足す前に超えるなら、段のどの形も超える
+        code, text = output(stage[-1])
         if over(text):
             continue
-        if text.endswith(ltq.ALL_HINT + '\n'):
-            text = with_rest(text)
-        if not over(text):
-            return code, text
-        for p in cfg.last_lists:  # 案内を足して上限を超えた。次の形へ(この形の一覧は、結果で知らせないので消す)
-            with contextlib.suppress(OSError):
-                os.remove(p)
-        cfg.last_list, cfg.last_lists = None, []
+        for form in stage:
+            code, text = output(form)
+            if over(text):
+                continue
+            if text.endswith(ltq.ALL_HINT + '\n'):
+                text = with_rest(text)
+            if not over(text):
+                return code, text
+            for p in cfg.last_lists:  # 案内を足して上限を超えた。次の形へ(この形の一覧は、結果で知らせないので消す)
+                with contextlib.suppress(OSError):
+                    os.remove(p)
+            cfg.last_list, cfg.last_lists = None, []
     # どの形でも上限を超える。末尾を切り、名前を含む行を全部並べた一覧(ltq refs --all)の場所を添える
     all_code, all_text = run(['--all'], noted=False)
     return code, cut(text, write(all_text)[0] if all_code == 0 else [])
+
+
+def family_size(text):
+    """refs の全文の結果から、上書きの族の大きさ(上書きの数と、上書きへの呼び出しの数の大きい方)。--family n は、n がこれ
+    以上なら出力を変えない。読めなければ、どの n でも出力が変わりうるとみなす。"""
+    nums = [int(m) for m in re.findall(r'^  (?:overridden by|calls resolved to the overrides) \(.*?\): (\d+)', text, re.M)]
+    return max(nums) if nums else sys.maxsize
+
+
+def fit_key(form, asked, fam):
+    """短い形の引数が、結果のどこを変えるか(--compact の段、族の数、解決しなかった行の数、節の行数)。同じなら出力も同じ。"""
+    form = form or []
+    compact = form.count('--compact')
+
+    def last(flag):
+        i = max((k for k, x in enumerate(form) if x == flag), default=None)
+        return None if i is None else int(form[i + 1])
+
+    limit = last('--limit')
+    limit = asked if limit is None else limit
+    family = last('--family')
+    family = (limit if not compact else min(limit, 10)) if family is None else family
+    other = last('--other-limit')
+    return compact, min(family, fam), limit if other is None else min(limit, other), limit
 
 
 class UnknownTool(Exception):
@@ -580,6 +626,8 @@ def call_tool(cfg, name, a):
             return 2, 'refs needs "name" (a qualified name or a suffix of it)'
         args = ['refs', str(a['name'])]
         if a.get('limit'):
+            if int(a['limit']) < 0:
+                return 2, '"limit" must be 0 or more'
             args += ['--limit', str(int(a['limit']))]
         for x in a.get('exclude') or []:
             args += ['--exclude', str(x)]
