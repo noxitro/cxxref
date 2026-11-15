@@ -1,6 +1,6 @@
 """cxxref の問い合わせを、MCP サーバーを通さずに 1 回だけ実行する(skill から shell で呼ぶ入口)。
 
-  python -I cxxref_cli.py refs <名前> [--path P]... [--exclude X]... [--limit N] [--root R]
+  python -I cxxref_cli.py refs <名前> [--path P]... [--exclude X]... [--limit N] [--context N] [--root R]
   python -I cxxref_cli.py check <path:line>... [--root R]
 
 中身は MCP サーバー(server.py)の refs / check と同じ: 索引のあるフォルダを作業フォルダから親へさかのぼって探し、
@@ -34,7 +34,9 @@ def main(argv=None):
     r.add_argument('--path', action='append', default=[], help='list only lines under this root-relative folder or file')
     r.add_argument('--exclude', action='append', default=[], help='folder or root-relative prefix to skip in the text search')
     r.add_argument('--limit', type=int, help='max lines per section (default 200)')
-    r.add_argument('--context', type=int, help='also print N source lines around each line found (for editing callers)')
+    r.add_argument('--context', type=int,
+                   help='also print N (up to 10) source lines around each call, reference and declaration, when they are in '
+                        '5 or more files and the result stays under the size limit (for editing callers)')
     c = sub.add_parser('check', allow_abbrev=False, help='what the index has on each path:line[:col]')
     c.add_argument('locations', nargs='+')
     for p in (r, c):

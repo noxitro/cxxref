@@ -1327,5 +1327,37 @@ class LtqTest(unittest.TestCase):
         self.assertIn('[file not found]', out)
 
 
+    def test_context_covers_macro_expansions_and_overrides(self):
+        # --context の直す先には、マクロの展開と、上書きの宣言も入る(シグネチャを変えるなら、どちらも直す)
+        rows = [('MY_CHECK', 'macro', '', 'src/m.h:1:9', '#define MY_CHECK(x) (x)'),
+                ('Base::Run', 'decl', '', 'src/base.h:2:16', 'virtual void Run();'),
+                ('Derived::Run', 'decl', '', 'src/derived.h:2:8', 'void Run() override;'),
+                ('Derived::Run', 'override', 'Base::Run', 'src/derived.h:2:8', 'void Run() override;')]
+        self.write('src/m.h', '#define MY_CHECK(x) (x)\n', self.t0 - 10)
+        self.write('src/base.h', 'struct Base {\n  virtual void Run();\n};\n', self.t0 - 10)
+        self.write('src/derived.h', 'struct Derived : Base {\n  void Run() override;\n};\n', self.t0 - 10)
+        tus = []
+        for i in range(5):
+            self.write(f'src/u{i}.cpp', f'void U{i}(Base& b) {{\n  MY_CHECK(1);\n  b.Run();\n}}\n', self.t0 - 10)
+            rows += [('MY_CHECK', 'expand', f'U{i}', f'src/u{i}.cpp:2:3', 'MY_CHECK(1);'),
+                     ('Base::Run', 'call', f'U{i}', f'src/u{i}.cpp:3:5', 'b.Run();')]
+            tus.append(f'src/u{i}.cpp')
+        self.index('index', rows, [], tus=tuple(tus))
+        out = self.ltq('refs', 'MY_CHECK', '--context', '1')
+        part = out[out.index('== source around each line above (+-1 lines'):]
+        self.assertIn('--- src/u0.cpp', part)
+        self.assertIn('>    2|   MY_CHECK(1);', part)
+        self.assertIn('>    1| #define MY_CHECK(x) (x)', part)
+        out = self.ltq('refs', 'Base::Run', '--context', '1')
+        part = out[out.index('== source around each line above (+-1 lines'):]
+        self.assertIn('>    3|   b.Run();', part)
+        self.assertIn('--- src/derived.h', part)
+        self.assertIn('>    2|   void Run() override;', part)  # 上書きの宣言
+        self.assertLess(out.index('== virtual dispatch'), out.index('== source around each line above'))
+        self.assertNotIn('== source around', self.ltq('refs', 'Base::Run', '--context', '1', '--all'))  # 一覧には出さない
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            ltq.main(['--root', self.root, 'refs', 'Base::Run', '--context', '-2'])
+
+
 if __name__ == '__main__':
     unittest.main()

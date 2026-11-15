@@ -36,6 +36,11 @@ PROTOCOL = '2025-06-18'
 MAX_BYTES = 18000
 FIT_LIMITS = (60, 25, 10, 5, 2)  # 短い形でも上限を超えるときに、順に試す --limit(1 節に並べる行数)
 FIT_FAMILY = (10, 5, 2)  # 短い形でも上限を超えるときに、--limit の前に試す --family(並べる上書きの数、上書きへの呼び出しの数)
+# refs の前後の行(context。cxxref_cli.py だけが渡す)は、全文が上限に収まるときだけ、残りの大きさの分まで足す
+CONTEXT_SLACK = 800  # 残りの一覧の案内(ファイルの場所)が後から足される分の余裕
+CONTEXT_MIN_BYTES = 1500  # 残りがこれより小さければ、前後の行は出さない
+CONTEXT_SKIPPED = ('(source lines around the calls are not printed: with them the result would exceed the size limit. '
+                   'View the lines listed above with a small line range)\n')
 # 結果に 1 行ずつ並べきれなかったとき(上限に収めるために件数にまとめた行があるとき)は、結果に並べなかった行を 1 行ずつ並べた
 # 一覧(残りの一覧。結果と合わせると、名前を含む行がどれも 1 回ずつ出る)をファイルに書き、結果の最後の行でその場所を知らせる。
 # 名前やシグネチャを変えるときに、直す先を漏らさず、ソースを検索し直させないため
@@ -433,7 +438,7 @@ def write_lists(paths, root, args, texts, shown=None):
     return None, err
 
 
-def run_ltq(cfg, args, start=None):
+def run_ltq(cfg, args, start=None, context=0):
     idx = None
     root, note = cfg.resolve(start)
     base = ['--root', root] + (['--index', cfg.index] if cfg.index else [])
@@ -523,6 +528,30 @@ def run_ltq(cfg, args, start=None):
     if args[0] != 'refs' or code != 0 or idx is None:
         # 短い形があるのは refs だけ。ほかのコマンド(check に場所を数百渡したときなど)は、上限を超えたら末尾を切る
         return code, cut(text) if over(text) else text
+    ctx_note = ''
+    if context:
+        # 前後の行は、全文が上限に収まるときだけ足す。収まらなければ出さず、呼び出しの一覧を縮めない(前後の行を残して
+        # 一覧のほうを縮めると、答えそのものが減る【実測: 独立レビュー。呼び出しが 90 ファイルで並ぶ行が 60、200 ファイルで 10
+        # に減り、260 ファイル以上では結果が途中で切れた】)。短い形と残りの一覧(--all)には、前後の行を付けない
+        base_refs = idx.last_refs
+        room = min(ltq.CONTEXT_BYTES, cfg.max_bytes - nbytes(text) - CONTEXT_SLACK) if cfg.max_bytes else ltq.CONTEXT_BYTES
+        if room >= CONTEXT_MIN_BYTES:
+            c2, t2 = run(['--context', str(context), '--context-bytes', str(room)])
+            if c2 == 0:
+                if t2.endswith(ltq.ALL_HINT + '\n'):
+                    t2 = with_rest(t2)
+                if not over(t2):
+                    return c2, t2
+                for p in cfg.last_lists:
+                    with contextlib.suppress(OSError):
+                        os.remove(p)
+                cfg.last_list, cfg.last_lists = None, []
+        idx.last_refs = base_refs
+        ctx_note = CONTEXT_SKIPPED
+
+    def told(t):
+        """前後の行を出さなかったことを、上限に収まるなら最後に足す。"""
+        return t + ctx_note if ctx_note and not over(t + ctx_note) else t
     # クライアントは大きな結果をモデルに渡さない(Copilot CLI は 20,480 バイトを超えるとファイルに退かせ、先頭だけを見せる)。
     # 超えたら、短い形で出し直す。順に:
     # - 上書きの族(上書きと、上書きへの呼び出し)だけを 10 行ずつに絞る(他の節は全文のまま。大きな階層の virtual で効く)
@@ -583,7 +612,7 @@ def run_ltq(cfg, args, start=None):
             if text.endswith(ltq.ALL_HINT + '\n'):
                 text = with_rest(text)
             if not over(text):
-                return code, text
+                return code, told(text)
             for p in cfg.last_lists:  # 案内を足して上限を超えた。次の形へ(この形の一覧は、結果で知らせないので消す)
                 with contextlib.suppress(OSError):
                     os.remove(p)
@@ -622,6 +651,7 @@ class UnknownTool(Exception):
 
 
 def call_tool(cfg, name, a):
+    context = 0
     if name == 'refs':
         if not a.get('name'):
             return 2, 'refs needs "name" (a qualified name or a suffix of it)'
@@ -631,7 +661,9 @@ def call_tool(cfg, name, a):
                 return 2, '"limit" must be 0 or more'
             args += ['--limit', str(int(a['limit']))]
         if a.get('context'):  # cxxref_cli.py だけが渡す(ツールの定義には載せない。定義は毎回モデルに送られるため)
-            args += ['--context', str(max(0, min(10, int(a['context']))))]
+            if int(a['context']) < 0:
+                return 2, '"context" must be 0 or more'
+            context = min(10, int(a['context']))
         for x in a.get('exclude') or []:
             args += ['--exclude', str(x)]
         paths = a.get('path') or []
@@ -647,7 +679,7 @@ def call_tool(cfg, name, a):
     else:
         raise UnknownTool(name)
     root = a.get('root')
-    return run_ltq(cfg, args, str(root) if root else None)
+    return run_ltq(cfg, args, str(root) if root else None, context)
 
 
 def handle(msg, cfg):
