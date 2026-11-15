@@ -131,6 +131,7 @@ def has_index(cwd):
 # MANY_FILES 以上なら、その grep を 1 回だけ断り、理由に refs のコマンドをそのまま書く(skill を読む往復も要らない)。
 # 同じ名前の grep は、同じセッションでは 2 回目から通す(テキストの一致が要る場面を塞がない)
 MANY_FILES = 5
+EDIT_TOOLS = {'edit', 'create', 'write', 'str_replace', 'str_replace_editor', 'apply_patch'}
 SCAN_LIMIT = 300 << 20  # 目次(.names.cache)が無いとき、頭から読むのはこの大きさまで(hook の制限時間 10 秒に収める)
 NAME = re.compile(r'[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*')
 ESCAPES = re.compile(r'\\[bBsSwWdDnrtAZz<>]|\\.|\[[^\]]*\]|\(\?[^)]*\)')
@@ -194,6 +195,11 @@ def call_files(root, name):
             sym = cols[0]
             if sym != name.encode() and not sym.endswith(tail):
                 continue
+            if sym.startswith((b'std::', b'::std::', b'__')) or b'::__' in sym:
+                continue  # 標準ライブラリとコンパイラの名前(直す先はこのリポジトリに無い)
+            parts = sym.split(b'::')
+            if '::' not in name and len(parts) >= 2 and parts[-1] == parts[-2]:
+                continue  # 型の名前(`class Foo` の Foo)で、コンストラクタ Foo::Foo の呼び出しを数えない
             out.setdefault(sym.decode('utf-8', 'replace'), set()).add(cols[3].rsplit(b':', 2)[0])
     return out
 
@@ -240,23 +246,28 @@ def redirect_grep(data):
     if not names:
         return None
     state = _read_state(root)
-    told = set(state.get('told') or [])
+    if state.get('told') or state.get('edited'):
+        # 振り向けはセッションに 1 回だけ。編集の後もしない(索引が古くなり、refs は作り直しを待つ。確かめの grep を塞がない)
+        # 【実測: 試しの 1 回で、編集の後の確かめの grep に std::forward_like(37 ファイル)を案内していた】
+        return None
+    told = set()
     hits = []
-    for n in names:
+    for i, n in enumerate(names):
         if n in told:
             continue
         try:
             found = call_files(root, n)
         except (OSError, ValueError):
             continue
-        hits += [(len(fs), sym, n) for sym, fs in found.items() if len(fs) >= MANY_FILES]
+        # 一度案内した記号は、別の書き方の pattern(Wait の後の JobSystem::Wait など)でも 2 回目は案内しない
+        hits += [(i, -len(fs), sym, n) for sym, fs in found.items() if len(fs) >= MANY_FILES and sym not in told]
     if not hits:
         return None
-    hits.sort(reverse=True)
-    state['told'] = sorted(told | {n for _, _, n in hits})
+    hits.sort()  # pattern に先に書かれた名前、その中では呼び出しのファイルが多い記号から
+    state['told'] = sorted(told | {h[3] for h in hits} | {h[2] for h in hits})
     _write_state(root, state)
-    lines = [f'{sym} is called from {k} files' for k, sym, _ in hits[:3]]
-    sym = hits[0][1]
+    lines = [f'{sym} is called from {-k} files' for _, k, sym, _ in hits[:3]]
+    sym = hits[0][2]
     return ('cxxref (clang index of every translation unit): ' + '; '.join(lines) + '. Instead of this grep, run once '
             'in PowerShell, as a command of its own:\n'
             f'python -I "{os.path.join(os.path.dirname(HERE), "mcp", "cxxref_cli.py")}" refs {sym} --context 3\n'
@@ -286,13 +297,22 @@ def main(argv=None):
         return 0
     if argv[:1] == ['session']:
         return session_start(data)
-    if str(data.get('toolName', '')).lower() == 'grep':
+    tool = str(data.get('toolName', '')).lower()
+    if tool == 'grep':
         try:
             reason = redirect_grep(data)
         except Exception:  # 振り向けは補助。何があっても grep は止めない
             reason = None
         if reason:
             sys.stdout.write(json.dumps({'permissionDecision': 'deny', 'permissionDecisionReason': reason}))
+        return 0
+    if tool in EDIT_TOOLS:  # 編集が始まったら、振り向けをやめる(許可には何も返さない)
+        root = index_root(data.get('cwd'))
+        if root is not None:
+            state = _read_state(root)
+            if not state.get('edited'):
+                state['edited'] = True
+                _write_state(root, state)
         return 0
     if str(data.get('toolName', '')).lower() not in SHELLS:
         return 0

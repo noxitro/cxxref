@@ -52,7 +52,9 @@ class SkillTest(unittest.TestCase):
         root = tempfile.mkdtemp()
         try:
             os.makedirs(os.path.join(root, 'src'))
+            env = dict(os.environ, LOCALAPPDATA=root)  # 振り向けの記録を、利用者の %LOCALAPPDATA% に書かない
             run = lambda cwd: subprocess.run([sys.executable, '-I', HOOK, 'session'], capture_output=True, timeout=30,
+                                             env=env,
                                              input=json.dumps({'cwd': cwd, 'source': 'new'}).encode()).stdout.decode()
             self.assertEqual(run(os.path.join(root, 'src')), '')
             os.makedirs(os.path.join(root, '.index'))
@@ -123,6 +125,74 @@ class SkillTest(unittest.TestCase):
             self.assertIn('"allow"', p.stdout.decode('utf-8'), p.stderr)
         finally:
             shutil.rmtree(base)
+
+
+class GrepRedirectTest(unittest.TestCase):
+    """preToolUse の hook が、呼び出しの多い名前の grep を 1 回だけ断り、refs のコマンドを案内する。"""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        os.makedirs(os.path.join(self.root, '.index'))
+        rows = ['ns::Job::Wait\tdef\t\tsrc/job.cpp:10:6\tvoid ns::Job::Wait() {\n',
+                'ns::Lock::Wait\tcall\tns::A\tsrc/lock.cpp:3:3\tWait();\n',
+                'ns::Few::Run\tcall\tns::B\tsrc/b.cpp:3:3\tRun();\n',
+                'ns::Job::Job\tcall\tns::C\tsrc/c.cpp:3:3\tJob job;\n']
+        rows += [f'ns::Job::Wait\tcall\tns::F{i}\tsrc/f{i}.cpp:3:3\tjob.Wait();\n' for i in range(5)]
+        rows += [f'ns::Job::Job\tcall\tns::F{i}\tsrc/f{i}.cpp:2:3\tJob job;\n' for i in range(5)]
+        with open(os.path.join(self.root, '.index', 'index.tsv'), 'w', encoding='utf-8', newline='\n') as f:
+            f.writelines(rows)
+        self.env = dict(os.environ, LOCALAPPDATA=self.root)
+
+    def tearDown(self):
+        shutil.rmtree(self.root)
+
+    def run_hook(self, payload, *args):
+        p = subprocess.run([sys.executable, '-I', HOOK] + list(args), input=json.dumps(payload).encode(),
+                           capture_output=True, timeout=30, env=self.env)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return json.loads(p.stdout) if p.stdout.strip() else {}
+
+    def grep(self, pattern, tool='grep'):
+        return self.run_hook({'cwd': os.path.join(self.root, 'src'), 'toolName': tool, 'toolArgs': {'pattern': pattern}})
+
+    def test_redirects_once_per_symbol(self):
+        self.run_hook({'cwd': self.root}, 'session')
+        out = self.grep(r'\bWait\s*\(')
+        self.assertEqual(out.get('permissionDecision'), 'deny')
+        reason = out['permissionDecisionReason']
+        self.assertIn('ns::Job::Wait is called from 5 files', reason)
+        self.assertNotIn('ns::Lock::Wait', reason)  # 1 ファイルだけの同名の記号は挙げない
+        self.assertIn(f'python -I "{os.path.join(ROOT, "mcp", "cxxref_cli.py")}" refs ns::Job::Wait --context 3', reason)
+        self.assertEqual(self.grep(r'\bWait\s*\('), {})  # 2 回目は通す
+        self.assertEqual(self.grep('Job::Wait'), {})  # 書き方を変えても、同じ記号は案内しない
+        self.run_hook({'cwd': self.root}, 'session')  # 新しいセッションでは、もう一度 1 回だけ案内する
+        self.assertEqual(self.grep('Job::Wait').get('permissionDecision'), 'deny')
+
+    def test_no_redirect_after_edit_or_for_std(self):
+        with open(os.path.join(self.root, '.index', 'index.tsv'), 'a', encoding='utf-8', newline='\n') as f:
+            f.writelines(f'std::forward_like\tcall\tns::F{i}\tsrc/f{i}.cpp:4:3\tstd::forward_like<T>(x);\n' for i in range(9))
+        self.run_hook({'cwd': self.root}, 'session')
+        self.assertEqual(self.grep('forward_like'), {})  # 標準ライブラリの名前は案内しない
+        self.assertEqual(self.run_hook({'cwd': self.root, 'toolName': 'edit', 'toolArgs': {'path': 'src/a.cpp'}}), {})
+        self.assertEqual(self.grep(r'\bWait\s*\('), {})  # 編集の後は案内しない(索引が古い)
+
+    def test_passes_few_callers_and_other_patterns(self):
+        self.assertEqual(self.grep('Run'), {})  # 呼び出しが 5 ファイルに満たない
+        self.assertEqual(self.grep('class Job|struct Job'), {})  # 型の名前で、コンストラクタの呼び出しは数えない
+        self.assertEqual(self.grep('#include'), {})
+        self.assertEqual(self.grep(r'\bWait\b', tool='view'), {})  # grep 以外の道具は見ない
+        shutil.rmtree(os.path.join(self.root, '.index'))
+        self.assertEqual(self.grep(r'\bWait\s*\('), {})  # 索引の無いリポジトリでは何もしない
+
+    def test_pattern_names(self):
+        sys.path.insert(0, os.path.join(ROOT, 'scripts'))
+        try:
+            import cxxref_hook
+        finally:
+            sys.path.pop(0)
+        self.assertEqual(cxxref_hook.pattern_names(r'\bWait\s*\('), ['Wait'])
+        self.assertEqual(cxxref_hook.pattern_names('JobSystem::Wait|class JobSystem'), ['JobSystem::Wait', 'JobSystem'])
+        self.assertEqual(cxxref_hook.pattern_names(r'[A-Z]\w+\('), [])
 
 
 class TrustTest(unittest.TestCase):
