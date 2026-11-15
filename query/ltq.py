@@ -1284,6 +1284,9 @@ def section(title, items, limit, pos, listed, skip=None):
 
 
 CONTEXT_BYTES = 9000  # --context の節の上限(結果全体はクライアントの上限 18,000 バイトに収める。残りは場所だけ言う)
+# --context で前後の行を出すのは、呼び出しと参照がこの数以上のファイルに散るときだけ。v14e では、16 の呼び出しが散る問題で
+# rg だけの 0.81 倍、2〜3 ファイルの問題で 1.06〜1.27 倍だった【実測】。境目の 5 は推測
+CONTEXT_MIN_FILES = 5
 
 
 def print_context(idx, rs, n):
@@ -1546,7 +1549,14 @@ def cmd_refs(a, idx):
             [show(r, show_sym) for r in uses], a.limit, [(r[3], r[4]) for r in uses], listed, skip)
     section('definitions and declarations', [show(r, show_sym) for r in defs], a.limit, [(r[3], r[4]) for r in defs], listed, skip)
     if getattr(a, 'context', 0) and not remain:
-        print_context(idx, calls + uses + defs, a.context)
+        files = {r[3] for r in calls + uses}
+        if len(files) >= CONTEXT_MIN_FILES:
+            print_context(idx, calls + uses + defs, a.context)
+        else:
+            # 呼び出し側が少ないときは前後の行を出さない。v14e では、呼び出しが 2〜3 ファイルの問題で前後の行(約 3,500 文字)を
+            # 出しても、モデルは定義のファイルを開き、費用は rg だけの 1.06〜1.27 倍だった【実測】
+            print(f'\n== source around each line above: not printed (the calls and references are in {len(files)} '
+                  f'file{"s" * (len(files) != 1)}). View each line above with a small line range, then edit')
 
     # 基底のポインタや参照越しの呼び出しは、clang が基底のメソッドに解決する。実行時に上書きへ届くかは型次第
     bases, derived = closure(syms, up), closure(syms, down)

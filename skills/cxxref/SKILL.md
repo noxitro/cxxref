@@ -24,6 +24,6 @@ Reading the result
 - "No cxxref index": search with rg as usual. Building one takes minutes; ask the user first
 
 Changing a signature and fixing every caller
-- Run `refs <name> --context 3` once. Its last section shows the file text around every call, reference, declaration and definition (`>` marks the line; the text after `| ` is the exact file text)
+- Run `refs <name> --context 3` once. When the callers are in 5 or more files, a section shows the file text around every call, reference, declaration and definition (`>` marks the line; the text after `| ` is the exact file text). With fewer callers it is not printed: view each listed line with a small line range
 - Write each edit from those lines as the old text. Do not open the whole files; if an edit does not apply or you need more of a file (an include at the top, say), view only a line range
 - After editing, do not run `refs` again to verify (the index is being rebuilt); one grep for the name is enough

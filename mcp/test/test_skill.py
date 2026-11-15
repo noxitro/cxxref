@@ -251,8 +251,26 @@ class CliTest(unittest.TestCase):
         self.assertIn('src/a.cpp:3', text)
         self.assertIn('comment', text)
 
+    def add_callers(self, n):
+        """src/b<i>.cpp を n 個足し、それぞれで Run を呼ぶ行を索引に足す。"""
+        rows = []
+        for i in range(n):
+            with open(os.path.join(self.root, 'src', f'b{i}.cpp'), 'w', encoding='utf-8', newline='\n') as f:
+                f.write(f'void Run();\nvoid B{i}() {{\n  Run();\n}}\n')
+            rows.append(f'Run\tcall\tB{i}\tsrc/b{i}.cpp:3:3\tRun();\n')
+        with open(os.path.join(self.root, '.index', 'index.tsv'), 'a', encoding='utf-8', newline='\n') as f:
+            f.writelines(rows)
+
+    def test_context_only_for_many_callers(self):
+        # 呼び出しが 5 ファイルに満たないときは、前後の行を出さず、その旨だけ言う
+        code, text = self.run_cli('refs', 'Run', '--context', '1')
+        self.assertEqual(code, 0, text)
+        self.assertIn('== source around each line above: not printed (the calls and references are in 1 file)', text)
+        self.assertNotIn('--- src/a.cpp', text)
+
     def test_context_for_editing(self):
         # --context: 呼び出しと宣言の前後のソースを、ファイルごとに重なりをまとめて出す(印 > がその行)
+        self.add_callers(4)  # a.cpp と合わせて 5 ファイル
         code, text = self.run_cli('refs', 'Run', '--context', '1')
         self.assertEqual(code, 0, text)
         part = text[text.index('== source around each line above'):]
