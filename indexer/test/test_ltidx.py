@@ -197,7 +197,6 @@ class LtidxTest(unittest.TestCase):
         cl = ['clang-cl', '/c', '/DMARK']
         # 索引ができない(TU が通らない)と分かっている形。ファイルを書かないことと、ltidx が落ちないことだけを見る
         broken = [['clang++', '--driver-mode=dxc', '-DMARK', '-include', '-gen-cdb-fragment-path', 'out/dxc'],
-                  gcc + ['-DMODS', '-fmodules', '-fmodules-cache-path=out/mc', '-fmodule-map-file=m/module.modulemap'],
                   # ClangTool は -MJ だけを外し、値を入力のファイルとして残す(0.5.7 から同じ)
                   gcc + ['-MJ', 'out/o.json']]
         cases = broken + [
@@ -208,6 +207,8 @@ class LtidxTest(unittest.TestCase):
                   '/clang:-MJout/xo.json'],
             gcc + ['-fsyntax-only', 'a.cpp', '-diagnostic-log-file'],  # 末尾で値が無い。ltidx が足す語を値にさせない
             cl + ['a.cpp', '--serialize-diagnostics'], gcc + ['--config=./my.cfg'], gcc + ['--config', './my.cfg'],
+            # clang のヘッダーのモジュールは作らず、ヘッダーとして読む(前は作ろうとして ltidx ごと落ちた)
+            gcc + ['-DMODS', '-fmodules', '-fmodules-cache-path=out/mc', '-fmodule-map-file=m/module.modulemap'],
             gcc + ['--serialize-diagnostics', 'out/a.dia'], gcc + ['-serialize-diagnostics', 'out/b.dia'],
             gcc + ['-serialize-diagnostic-file', 'out/c.dia'], gcc + ['-diagnostic-log-file', 'out/d.log'],
             gcc + ['-Xclang', '-serialize-diagnostic-file', '-Xclang', 'out/e.dia'],
@@ -240,6 +241,15 @@ class LtidxTest(unittest.TestCase):
                 if argv not in broken:
                     self.assertEqual(rc, 0, err)
                     self.assertTrue(self.has('Marked', 'call', 'a.cpp:6:14'), argv)
+                # 設定ファイルを外すと索引の結果が変わりうるので、黙らずに知らせる(clang の中で空にするものは知らせない)
+                if any(a.startswith('--config') for a in argv):
+                    self.assertIn('ignored arguments that write files or read clang config files: --config', err)
+        # 外すものが無いコマンドでは、何も言わない
+        with open(os.path.join(self.root, 'compile_commands.json'), 'w', encoding='utf-8') as f:
+            json.dump([{'directory': d, 'file': f'{d}/a.cpp', 'arguments': gcc + ['-MD', '-MF', 'a.d', 'a.cpp']}], f)
+        rc, err = self.run_ltidx('-j', '1', cwd=self.root)
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn('ignored arguments', err)
 
     def test_utf8_unchanged(self):
         self.write('a.cpp', SJIS_SRC, ['/utf-8'])

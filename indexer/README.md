@@ -82,9 +82,9 @@ ltidx.exe -p <compile_commands.json のあるフォルダ> -root <索引に含�
 - 警告をエラーにする指定(`/WX` `-Werror` `-Werror=…`)は外して解析します。cl に無い clang の警告(`override` の付け忘れなど)で TU が失敗扱いになるのを防ぎます
 - ファイルを書かせる指定とコンパイラのプラグインは効かせません。ltidx は索引を書くだけで、コンパイルの出力は作りません。`compile_commands.json` はリポジトリ次第で選べるので、そこに書かれた引数で書き先を選べるファイルを書かせないためです(書き先を選べると、起動時に実行されるフォルダに `.bat` を置かれえます)
   - clang の中の設定(出力先・依存ファイル・ヘッダーの一覧・診断の記録・統計・時間計測・`-dump-minimization-hints=`・プラグイン・`-mllvm`)は、解析を始める前に空にします。clang が引数を読み解いた後の設定なので、`-Xclang`・`-Xclang=`・`-Wp,`・clang-cl の `/clang:` と `-clang:`・応答ファイルのどの書き方でも止まります
-  - 暗黙のモジュールのビルドは止めます(`-fmodules-cache-path=` の場所にフォルダとロックのファイルを作るため)。モジュールを作る TU は、これまでも ltidx ごと落ちていました(圧縮の部品を入れていないため)。`-fmodule-file=` で渡したモジュールは読みます
+  - clang のヘッダーのモジュール(`-fmodules`)は使わず、ヘッダーとして読みます。モジュールを作ると `-fmodules-cache-path=` の場所にフォルダとロックのファイルを作り、しかも圧縮の部品を入れていないので ltidx ごと落ちていました。モジュール全体の索引(`modules.idx`)も書きません。C++20 のモジュール(`-fmodule-file=` で渡したもの)は、そのまま読みます
   - ドライバーの段で書くもの(`-MJ`・`-gen-cdb-fragment-path`・`--serialize-diagnostics`・`-serialize-diagnostic-file`・`-diagnostic-log-file`)は、clang と同じオプション表で引数を読んで外します。どのモード(clang・clang-cl・dxc・flang)の読み方でも見つけ、`-Xarch_host` などの値の中も見ます。ltidx が足す引数の後に外すので、末尾で値の無い引数に、足した語が値として入ることもありません
-  - 明示した設定ファイル(`--config`・`--config-system-dir=`・`--config-user-dir=`)は読みません。設定ファイルは `-MJ` などを足せるためです。その設定ファイルで引数を足していた TU は、索引の結果が変わります
+  - 明示した設定ファイル(`--config`・`--config-system-dir=`・`--config-user-dir=`)は読みません。設定ファイルは `-MJ` などを足せるためです。その設定ファイルで引数を足していた TU は、索引の結果が変わります。外した引数は、TU ごとに `warning: <ファイル>: ignored arguments that write files or read clang config files: …` の 1 行で知らせます(`index-project` の出力と `.index\<名前>.log` に出ます)
   - 残るもの: コンパイラの隣に置かれた clang の既定の設定ファイル(`clang++.cfg` など。引数に無くても読まれます)に書かれた `-MJ`・`-gen-cdb-fragment-path` は外せません。MSYS2 の clang などは、この設定ファイルで既定の標準ライブラリを決めるので、読むままにしています。コンパイラのパスは `compile_commands.json` で選べるので、リポジトリの中に置いた設定ファイルも読まれます。MCP サーバーと skill の自動の作り直しは、コンパイラの隣に設定ファイルがあれば作り直しません(`mcp\autoupdate.py` の `unsafe_cdb`)
   - 確かめたこと: `test\test_ltidx.py` の `test_compile_arguments_write_no_files` が、34 通りの書き方で、ルートの中にも外の絶対パスにもファイルができないこと、ltidx が落ちないこと、索引ができる形では索引が変わらないことを見ます(0.5.7 の ltidx では 33 通りが落ちます)。書き方は、実測と Fable のレビューで見つかったものです
 

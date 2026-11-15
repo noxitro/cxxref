@@ -197,7 +197,11 @@ bool markDriverWrites(const std::vector<const char *> &Argv, std::vector<bool> &
 // clang-cl の /clang: と -clang: の中、-Xarch_host などの値の中も)。落とすと残りの読まれ方が変わりうるので、落とすものが
 // 無くなるまで読み直す(1 回ごとに 1 語以上減るので終わる)。ClangTool の調整のうち最後に動かす(後から足す語が、
 // 末尾で値の無い --serialize-diagnostics などの値にならないように)
-tooling::CommandLineArguments dropDriverWrites(const tooling::CommandLineArguments &A) {
+void sanitize(std::string &S);
+
+// Dropped には、外した語を足す
+tooling::CommandLineArguments dropDriverWrites(const tooling::CommandLineArguments &A,
+                                               std::vector<std::string> *Dropped = nullptr) {
   tooling::CommandLineArguments R = A;
   while (R.size() >= 2) {
     std::vector<const char *> Argv;
@@ -205,11 +209,25 @@ tooling::CommandLineArguments dropDriverWrites(const tooling::CommandLineArgumen
     std::vector<bool> Drop(Argv.size());
     if (!markDriverWrites(Argv, Drop)) return R;
     tooling::CommandLineArguments Next{R[0]};
-    for (size_t I = 0; I < Argv.size(); ++I)
+    for (size_t I = 0; I < Argv.size(); ++I) {
       if (!Drop[I]) Next.push_back(R[I + 1]);
+      else if (Dropped) Dropped->push_back(R[I + 1]);
+    }
     R = std::move(Next);
   }
   return R;
+}
+
+// 外した引数を、TU ごとに 1 行で知らせる(設定ファイルを外すと、索引の結果が変わりうるので黙らない)。
+// 進み具合の行([n/m])と混ざらないよう、行ごとに書く
+std::mutex WarnM;
+void warnDropped(llvm::StringRef File, const std::vector<std::string> &Dropped) {
+  if (Dropped.empty()) return;
+  std::string S = "warning: " + File.str() + ": ignored arguments that write files or read clang config files:";
+  for (const auto &D : Dropped) S += " " + D;
+  sanitize(S);
+  std::lock_guard<std::mutex> L(WarnM);
+  llvm::errs() << S << "\n";
 }
 
 // getMainExecutable に渡す、この実行ファイルの中の関数のアドレス(main のアドレスは C++ では使えない)
@@ -1003,10 +1021,14 @@ void scrubInvocation(CompilerInvocation &CI) {
   F.ActionName.clear();           // -plugin
   F.LLVMArgs.clear();             // -mllvm(LibTooling では使われないが、念のため)
   F.DumpMinimizationHintsPath.clear();  // -dump-minimization-hints=(どの FrontendAction でも開く。Fable のレビューで実測)
-  // 暗黙のモジュールのビルドを止める。-fmodules-cache-path= の場所にフォルダとロックのファイルを作る【Fable のレビューで実測】。
-  // モジュールを作る TU は、これまでも圧縮の部品が無いので ltidx ごと落ちていた(-fmodule-file= で渡したものは読む)
+  // clang のヘッダーのモジュール(-fmodules)を使わず、ヘッダーとして読む。モジュールを作ると -fmodules-cache-path= の場所に
+  // フォルダとロックのファイルを作り【Fable のレビューで実測】、圧縮の部品が無いので ltidx ごと落ちていた。
+  // C++20 のモジュール(-fmodule-file= で渡したもの)は、そのまま読む。モジュール全体の索引(modules.idx)も書かない
   CI.getHeaderSearchOpts().ModuleCachePath.clear();
+  CI.getLangOpts().Modules = 0;
   CI.getLangOpts().ImplicitModules = 0;
+  F.UseGlobalModuleIndex = 0;
+  F.GenerateGlobalModuleIndex = 0;
   DependencyOutputOptions &D = CI.getDependencyOutputOpts();
   D.OutputFile.clear();               // -dependency-file(-MD -MF・-Wp,-MD,<file>)
   D.HeaderIncludeOutputFile.clear();  // -header-include-file
@@ -1473,7 +1495,12 @@ int main(int argc, const char **argv) {
         });
       // ドライバーの段で書くファイルの引数を落とす(clang の中で書くものは Factory の scrubInvocation が止める)。
       // 足す調整の後に動かす(末尾で値の無い引数の値に、足した語がならないように)
-      Tool.appendArgumentsAdjuster([](const tooling::CommandLineArguments &A, llvm::StringRef) { return dropDriverWrites(A); });
+      Tool.appendArgumentsAdjuster([](const tooling::CommandLineArguments &A, llvm::StringRef File) {
+        std::vector<std::string> Dropped;
+        auto R = dropDriverWrites(A, &Dropped);
+        warnDropped(File, Dropped);
+        return R;
+      });
       ErrorCounter Diag;
       Tool.setDiagnosticConsumer(&Diag);
       Factory F(Roots, O);
