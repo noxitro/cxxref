@@ -828,15 +828,7 @@ class ListFilesTest(unittest.TestCase):
         # 減らし、上書き(14)は短い形の既定(10)で切らずに全部並べる(UE5 の FAnimInstanceProxy::Initialize で、14 ある上書きが
         # 2 つになり、モデルが残りの一覧を読みに行った)
         self.family(n=14, far=0, comments=0)
-        pad = 'y' * 70
-        path = os.path.join(self.root, 'src', 'u.h')
-        with open(path, 'w', encoding='utf-8', newline='\n') as f:
-            f.write('template <class T> void Each(T& t) {\n' + ''.join(f'  t.Tick({k});  // {pad}\n' for k in range(40)) + '}\n')
-        os.utime(path, (1000, 1000))
-        base = os.path.join(self.root, '.index', 'index.tsv')
-        with open(base, 'a', encoding='utf-8', newline='\n') as f:
-            f.write(''.join(f'?::Tick\tcall-dep\tEach\tsrc/u.h:{k + 2}:5\tt.Tick({k});  // {pad}\n' for k in range(40)))
-        os.utime(base, (2000, 2000))
+        self.unresolved(40)
         text = self.refs(5000, 18000)
         for i in range(14):
             self.assertIn(f'    D{i:02}::Tick  decl src/d.h:{i + 2}  def src/d.cpp:{i + 1}\n', text)
@@ -844,6 +836,60 @@ class ListFilesTest(unittest.TestCase):
         self.assertIn('src/u.h:6  [in Each]', text)
         self.assertNotIn('src/u.h:7  [in Each]', text)  # 解決しなかった行は 5 行まで。残りは一覧に
         self.assertIn('src/u.h:41  [in Each]', ''.join(self.read(p) for p in self.cfg.last_lists))
+
+    def unresolved(self, n):
+        """family() の索引に、テンプレートの中の解決先の決まらない呼び出し(src/u.h:2〜、各行 90 バイトほど)を n 行足す。"""
+        pad = 'y' * 70
+        path = os.path.join(self.root, 'src', 'u.h')
+        with open(path, 'w', encoding='utf-8', newline='\n') as f:
+            f.write('template <class T> void Each(T& t) {\n' + ''.join(f'  t.Tick({k});  // {pad}\n' for k in range(n)) + '}\n')
+        os.utime(path, (1000, 1000))
+        base = os.path.join(self.root, '.index', 'index.tsv')
+        with open(base, 'a', encoding='utf-8', newline='\n') as f:
+            f.write(''.join(f'?::Tick\tcall-dep\tEach\tsrc/u.h:{k + 2}:5\tt.Tick({k});  // {pad}\n' for k in range(n)))
+        os.utime(base, (2000, 2000))
+
+    def spied_refs(self, max_bytes, part_bytes):
+        """refs の結果と、サーバーが流した ltq refs の引数(名前より後ろ)の並び。"""
+        import ltq
+        runs, orig = [], ltq.main
+
+        def spy(argv, **kw):
+            runs.append(argv[argv.index('Base::Tick') + 1:])
+            return orig(argv, **kw)
+        ltq.main = spy
+        try:
+            text = self.refs(max_bytes, part_bytes)
+        finally:
+            ltq.main = orig
+        return text, [r for r in runs if '--all' not in r]
+
+    def test_large_family_keeps_unresolved_lines_when_trimmed(self):
+        # 族を全部並べると上限を超える大きな階層では、族を 10 に絞った形でも、解決しなかった行をいきなり 2 にせず、60 から
+        # 減らし直す(前は「族 10・解決しなかった行 2」へ飛び、収まる行まで一覧に回していた)。族を全部並べた段は、いちばん
+        # 小さい形が超えた時点で飛ばす(段の形を全部は流さない)
+        self.family(n=60, far=0, comments=0)
+        self.unresolved(40)
+        text, runs = self.spied_refs(10000, 18000)
+        self.assertIn('    ... 50 more overrides', text)
+        shown = set(re.findall(r'src/u\.h:(\d+)  \[in Each\]', text))
+        self.assertEqual(shown, {str(k) for k in range(2, 12)})  # 解決しなかった行は 10 行(--other-limit 10)
+        self.assertEqual([r for r in runs if r[-4:-2] == ['--family', '200']], [['--compact'] * 2 + ['--family', '200', '--other-limit', '2']])
+
+    def test_same_output_is_not_run_twice(self):
+        # 族が小さい(3)ときは、--family 10 や 5 を足しても出力は変わらないので流さない。どの形も、結果を変える引数の組が違う
+        self.family(n=3, far=0, comments=0)
+        self.unresolved(120)
+        text, runs = self.spied_refs(3000, 18000)
+        keys = [self.server.fit_key(r, 200, 3) for r in runs]
+        self.assertEqual(len(keys), len(set(keys)), runs)
+        self.assertFalse([r for r in runs if '--family' in r and r[r.index('--family') + 1] in ('10', '5')], runs)
+
+    def test_negative_limit_is_refused(self):
+        self.family(n=3, far=0, comments=0)
+        self.cfg = self.server.Config(self.root, None, None, max_bytes=18000, part_bytes=18000)
+        self.assertEqual(self.server.call_tool(self.cfg, 'refs', dict(name='Base::Tick', limit=-1)),
+                         (2, '"limit" must be 0 or more'))
 
     def test_result_cut_names_the_complete_list(self):
         # どの形でも上限を超えるときは末尾を切り、名前を含む行を全部並べた一覧(同じ分け方)の場所を添える

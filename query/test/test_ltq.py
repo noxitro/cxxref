@@ -992,6 +992,33 @@ class LtqTest(unittest.TestCase):
         for n in range(2, 8):
             self.assertIn(f'other/x.cpp:{n}  | x.Run();', out)
 
+    def test_other_limit_caps_the_folders_only_while_narrowing(self):
+        # --other-limit N が 5 より小さいときは、解決しなかった行の節のフォルダの数も N までにする(MCP サーバーの短い形で、
+        # 上書きを全部並べる場所を空けるため)。--limit だけを下げたときは、フォルダの数は 5 のまま
+        for k in range(4):
+            os.makedirs(os.path.join(self.root, f'o{k}'))
+            self.write(f'o{k}/x.cpp', 'void G() {\n' + '  x.Run();\n' * 3 + '}\n', self.t0 - 10)
+            self.write(f'o{k}/notes.md', 'Run\n' * 3, self.t0 - 10)
+        self.index('index', self.COMMON, [self.COMMENT])
+        folded = '    o1/  3 matches in 1 files\n    ... 3 more folders (8 matches) under: o2/ 3, o3/ 3, o0/ 2\n'
+        every = ''.join(f'    o{k}/  3 matches in 1 files\n' for k in (1, 2, 3)) + '    o0/  2 matches in 1 files\n'
+        out = self.ltq('refs', 'Run', '--compact', '--other-limit', '1')
+        self.assertIn('read them if they matter: 12\n    o0/x.cpp:2  | x.Run();\n' + folded, out)
+        self.assertIn('  o0/notes.md:1  | Run\n' + folded.replace('    ', '  '), out)
+        out = self.ltq('refs', 'Run', '--compact', '--limit', '1')
+        self.assertIn('read them if they matter: 12\n    o0/x.cpp:2  | x.Run();\n' + every, out)
+        self.assertIn('  o0/notes.md:1  | Run\n' + every.replace('    ', '  '), out)
+
+    def test_counts_must_not_be_negative(self):
+        # 負の行数は、切り出しが末尾から数えて黙って崩れる(フォルダの件数が実際より多く出る)ので、引数の誤りにする
+        self.index('index', self.COMMON, [self.COMMENT])
+        for flag in ('--limit', '--other-limit', '--family'):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as e:
+                ltq.main(['--root', self.root, 'refs', 'Run', flag, '-1'])
+            self.assertEqual(e.exception.code, 2)
+            self.assertIn('must be 0 or more (got -1)', err.getvalue())
+
     def test_path_limits_the_lines_but_not_the_symbol(self):
         # --path は並べる行だけを絞る。記号は索引の全体から決める(絞った先に宣言が無くても、同じ記号として引く)
         os.makedirs(os.path.join(self.root, 'lib'))

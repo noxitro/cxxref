@@ -1255,6 +1255,9 @@ def cmd_refs(a, idx):
     # 索引が問い合わせに解決しなかった行(解決先の決まらないテンプレートの呼び出し、索引に無い一致、C/C++ でないファイル)の
     # 節ごとの行数。既定は --limit。MCP サーバーは、解決済みの呼び出しを減らす前にこちらを減らす(一覧では効かせない)
     olimit = a.limit if a.all or getattr(a, 'other_limit', None) is None else min(a.limit, a.other_limit)
+    # その節で、件数にまとめた行を並べるフォルダの数。--other-limit で絞っているとき(MCP サーバーの短い形)だけ、5 つか、
+    # 行数がそれより少なければその数にする(--limit だけを下げたときは 5 のまま)
+    ofold = min(5, olimit) if olimit < a.limit else 5
     listed = set()  # 1 行ずつ出した行の位置 (パス, 行)。最後に、名前を含む行のうち何行を並べたかを出す
 
     def fresh(p, ln):
@@ -1567,7 +1570,7 @@ def cmd_refs(a, idx):
               + ', '.join(f'{s} ({n})' for s, n in top[:8]) + (f', ... {len(top) - 8} more symbols' if len(top) > 8 else '')
               + (' (listed one per line under "lines the index resolves to other symbols")'
                  if a.all else ''))
-        for s in [] if a.all else top_dirs(other_paths, min(5, olimit)):  # rg なら出る行。どこにあるかは残す(--path で 1 行ずつ出る)
+        for s in [] if a.all else top_dirs(other_paths, ofold):  # rg なら出る行。どこにあるかは残す(--path で 1 行ずつ出る)
             print('    ' + s)
     for s in dep_lines[:olimit]:
         print('  ' + s)
@@ -1721,8 +1724,8 @@ def cmd_refs(a, idx):
             one = [(p, s, ln) for p, s, v, ln in items if v]
             rest = [p for p, _, v, _ in items if not v]
             ndirs = len(rest)
-        if olimit < a.limit:  # 解決しなかった行を絞る形(MCP サーバーの短い形)。フォルダごとの件数も 5 つ(行数がそれより
-            ndirs = min(ndirs, 5, olimit)  # 少なければその数)までにする
+        if olimit < a.limit:  # 解決しなかった行を絞る形(MCP サーバーの短い形)。フォルダごとの件数も ofold までにする
+            ndirs = min(ndirs, ofold)
         rest = [p for p, _, _ in one[olimit:]] + rest
         for p, s, ln in one[:olimit]:
             print('    ' + s)
@@ -1747,7 +1750,7 @@ def cmd_refs(a, idx):
             print(f'  {p}:{ln}  | {src}')
             listed.add((p, ln))
         if extra[keep:]:
-            for s in top_dirs([p for p, _, _ in extra[keep:]], 10 if not a.compact else min(5, olimit)):
+            for s in top_dirs([p for p, _, _ in extra[keep:]], 10 if not a.compact else ofold):
                 print('  ' + s)
             folded = True
     if folded:
@@ -1876,6 +1879,14 @@ def find_root(start):
         d = parent
 
 
+def nonneg(s):
+    """0 以上の整数(行数・個数の引数)。負の値は、切り出しが末尾から数えて黙って崩れるので受け付けない。"""
+    n = int(s)
+    if n < 0:
+        raise argparse.ArgumentTypeError(f'must be 0 or more (got {s})')
+    return n
+
+
 def main(argv=None, idx=None, skip=None):
     """戻り値は終了コード。結果は標準出力に書く(MCP サーバーはこれを取り込んで返す)。
     idx を渡すと、索引を探さずにそれを引く(MCP サーバーが鮮度を確かめるのに作ったものを使い回す)。
@@ -1888,8 +1899,8 @@ def main(argv=None, idx=None, skip=None):
     sub = ap.add_subparsers(dest='cmd', required=True)
     r = sub.add_parser('refs', help='references, definitions, unresolved template calls, and why text matches are missing')
     r.add_argument('name', help='qualified name or its suffix, e.g. a::io::File::Read or File::Read')
-    r.add_argument('--limit', type=int, default=200, help='max lines per section (default 200)')
-    r.add_argument('--other-limit', type=int, default=None,
+    r.add_argument('--limit', type=nonneg, default=200, help='max lines per section (default 200)')
+    r.add_argument('--other-limit', type=nonneg, default=None,
                    help='max lines per section for lines the index does not resolve to the query (unresolved template '
                         'calls, text matches not in the index, files that are not C/C++ sources). Default: --limit')
     r.add_argument('--exclude', action='append', default=[], help='directory name to skip in the text search')
@@ -1899,7 +1910,7 @@ def main(argv=None, idx=None, skip=None):
     r.add_argument('--all', action='store_true',
                    help='list every line that contains the name, one per line (no --limit, no folder counts, lines that '
                         'resolve to other symbols included): the complete list for a rename or a signature change')
-    r.add_argument('--family', type=int, default=None,
+    r.add_argument('--family', type=nonneg, default=None,
                    help='max overrides, and max calls resolved to the overrides, listed under "virtual dispatch" '
                         '(default: --limit, or 10 with --compact)')
     r.add_argument('--compact', action='count', default=0,
