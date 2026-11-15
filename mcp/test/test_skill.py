@@ -295,7 +295,7 @@ class GrepRedirectTest(unittest.TestCase):
             sys.path.pop(0)
         names = cxxref_hook.pattern_names
         self.assertEqual(names(r'\bWait\s*\('), ['Wait'])
-        self.assertEqual(names('JobSystem::Wait|class JobSystem'), ['JobSystem::Wait', 'JobSystem'])
+        self.assertEqual(names('Pool::Wait|class Pool'), ['Pool::Wait', 'Pool'])
         self.assertEqual(names(r'[A-Z]\w+\('), [])
         self.assertEqual(names(r'\bGet\w+'), [])
         self.assertEqual(names('(?:Foo|Bar)::Init'), [])
