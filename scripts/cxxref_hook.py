@@ -97,8 +97,8 @@ def allowed(command):
 
 
 SESSION_NOTE = ('This repository has a cxxref index (.index, built by clang over every C++ translation unit). '
-                'When the question is where a C++ symbol is used or called, or what a change to it would affect, '
-                'or before changing a signature and fixing every caller, load the cxxref skill before grepping.')
+                'For where a C++ symbol is used or called, or what a change to it would affect, load the cxxref skill '
+                'before grepping. To make the change yourself, grep first; load it only if the callers are in 5+ files.')
 
 
 def has_index(cwd):

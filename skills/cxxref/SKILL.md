@@ -1,6 +1,6 @@
 ---
 name: cxxref
-description: Use before grep when the question is where a C++ function, type, variable or macro is used or called, or what a change to it would affect ("where is X used", "what breaks if X changes", list the callers), and before changing a signature and fixing every caller. Resolved by clang over every translation unit, with the reason for each text match it leaves out. Needs a .index folder in the repository. Not for explaining code or adding logs or tests - use grep and view as usual.
+description: Use before grep when the question is where a C++ function, type, variable or macro is used or called, or what a change to it would affect ("where is X used", "what breaks if X changes", list the callers). Resolved by clang over every translation unit. Needs a .index folder. When asked to change a signature and fix the callers yourself: grep first, and load this only if they are in 5 or more files. Not for explaining code or adding logs or tests.
 ---
 
 # cxxref
@@ -23,7 +23,7 @@ Reading the result
 - If the last line names list files, read those files (each fits in one read) instead of grepping
 - "No cxxref index": search with rg as usual. Building one takes minutes; ask the user first
 
-Changing a signature and fixing every caller
+Changing a signature and fixing every caller (after grep showed callers in 5 or more files)
 - Run `refs <name> --context 3` once. When the callers are in 5 or more files, a section shows the file text around every call, reference, declaration and definition (`>` marks the line; the text after `| ` is the exact file text). With fewer callers it is not printed: view each listed line with a small line range
 - Write each edit from those lines as the old text. Do not open the whole files; if an edit does not apply or you need more of a file (an include at the top, say), view only a line range
 - After editing, do not run `refs` again to verify (the index is being rebuilt); one grep for the name is enough
