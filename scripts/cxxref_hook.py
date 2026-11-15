@@ -25,6 +25,7 @@ skill の cxxref は、プラグインの mcp/cxxref_cli.py を shell で呼ぶ�
 自動で許可した呼び出しでは、CLI は、この PC で index-project(/cxxref-index も同じ)が作った索引だけを自動で作り直す
 (mcp/autoupdate.py の trusted_recipe。細工したリポジトリに置かれた作り直しの記録で ltidx や make-cdb を動かさない)。
 """
+import hashlib
 import json
 import os
 import re
@@ -97,32 +98,180 @@ def allowed(command):
 
 
 SESSION_NOTE = ('This repository has a cxxref index (.index, built by clang over every C++ translation unit). '
-                'For where a C++ symbol is used or called, or what a change to it would affect, load the cxxref skill '
-                'before grepping. To make the change yourself, grep first; load it only if the callers are in 5+ files.')
+                'When the question is where a C++ symbol is used or called, or what a change to it would affect, '
+                'load the cxxref skill before grepping. When asked to make the change yourself, grep as usual.')
 
 
-def has_index(cwd):
-    """cwd かその親に、索引(.index の中の .tsv)があるか(ltq.find_root と同じ探し方)。"""
+def index_root(cwd):
+    """cwd かその親で、索引(.index の中の .tsv)のあるフォルダ。無ければ None(ltq.find_root と同じ探し方)。"""
     d = os.path.abspath(cwd) if isinstance(cwd, str) and cwd else None
     while d:
         idx = os.path.join(d, '.index')
         if os.path.isdir(idx):
             try:
                 if any(f.endswith('.tsv') for f in os.listdir(idx)):
-                    return True
+                    return d
             except OSError:
-                return False
+                return None
         parent = os.path.dirname(d)
         if parent == d:
-            return False
+            return None
         d = parent
-    return False
+    return None
+
+
+def has_index(cwd):
+    return index_root(cwd) is not None
+
+
+# --- grep を refs に振り向ける ---------------------------------------------------------------------------------
+# 呼び出し側を直す作業では、呼び出しが多くのファイルに散るときだけ、索引を引くと rg だけより安い【実測: v14e・v14f で
+# 呼び出し 16 の問題は 0.71〜0.81 倍、2〜3 ファイルの問題は 1.06〜1.32 倍】。ただ、小さいモデルは grep の結果を見ても
+# skill を読まない【実測: v14g で 0/15】。そこで、C++ の名前の grep を見たときに索引で呼び出しのファイル数を数え、
+# MANY_FILES 以上なら、その grep を 1 回だけ断り、理由に refs のコマンドをそのまま書く(skill を読む往復も要らない)。
+# 同じ名前の grep は、同じセッションでは 2 回目から通す(テキストの一致が要る場面を塞がない)
+MANY_FILES = 5
+SCAN_LIMIT = 300 << 20  # 目次(.names.cache)が無いとき、頭から読むのはこの大きさまで(hook の制限時間 10 秒に収める)
+NAME = re.compile(r'[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*')
+ESCAPES = re.compile(r'\\[bBsSwWdDnrtAZz<>]|\\.|\[[^\]]*\]|\(\?[^)]*\)')
+SKIP_WORDS = {'class', 'struct', 'enum', 'union', 'void', 'const', 'static', 'virtual', 'override', 'inline',
+              'return', 'template', 'typename', 'auto', 'int', 'bool', 'char', 'float', 'double', 'unsigned',
+              'define', 'include', 'if', 'else', 'for', 'while', 'switch', 'case', 'new', 'delete'}
+
+
+def pattern_names(pattern):
+    """grep の pattern に書かれた、C++ の名前らしいもの(`\\bWait\\s*\\(` なら Wait、`A::B|class C` なら A::B と C)。"""
+    if not isinstance(pattern, str) or len(pattern) > 300:
+        return []
+    out = []
+    for m in NAME.finditer(ESCAPES.sub(' ', pattern)):
+        n = m.group(0)
+        if n not in out and n not in SKIP_WORDS and len(n.rsplit('::', 1)[-1]) >= 3:
+            out.append(n)
+    return out[:4]
+
+
+def _index_lines(path, short):
+    """索引 path の、記号の最後の部分が short(bytes)である行の候補(ハッシュの衝突を含む)。"""
+    sys.path.insert(0, os.path.join(HERE, '..', 'query'))
+    import namedir  # noqa: E402  (hook は呼ぶたびに別のプロセス。sessionStart では読まない)
+    nd = namedir.NameDir(path)
+    try:
+        if nd.open():
+            with open(path, 'rb') as f:
+                for off in nd.offsets(short):
+                    f.seek(off)
+                    yield f.readline()
+            return
+    finally:
+        nd.close()
+    if os.path.getsize(path) > SCAN_LIMIT:
+        return
+    with open(path, 'rb') as f:
+        data = f.read()
+    key = short + b'\tcall'
+    i = data.find(key)
+    while i >= 0:
+        s = data.rfind(b'\n', 0, i) + 1
+        e = data.find(b'\n', i)
+        yield data[s:e if e >= 0 else len(data)]
+        i = data.find(key, e if e >= 0 else len(data))
+
+
+def call_files(root, name):
+    """{記号: 呼び出しのあるファイルの集合}。name は修飾名かその後ろの部分(ltq の refs と同じ合わせ方)。"""
+    short = name.rsplit('::', 1)[-1].encode()
+    tail = b'::' + name.encode()
+    out = {}
+    idx = os.path.join(root, '.index')
+    for f in sorted(os.listdir(idx)):
+        if not f.endswith('.tsv') or f.count('.') != 1:  # 本体だけ(index.tsv.skip.tsv などの付属は除く)
+            continue
+        for line in _index_lines(os.path.join(idx, f), short):
+            cols = line.rstrip(b'\r\n').split(b'\t')
+            if len(cols) < 4 or not cols[1].startswith(b'call'):
+                continue
+            sym = cols[0]
+            if sym != name.encode() and not sym.endswith(tail):
+                continue
+            out.setdefault(sym.decode('utf-8', 'replace'), set()).add(cols[3].rsplit(b':', 2)[0])
+    return out
+
+
+def _state_path(root):
+    base = os.environ.get('LOCALAPPDATA') or os.environ.get('TEMP') or HERE
+    key = hashlib.sha1(os.path.normcase(os.path.abspath(root)).encode('utf-8')).hexdigest()[:16]
+    return os.path.join(base, 'cxxref', 'hook-state', key + '.json')
+
+
+def _read_state(root):
+    try:
+        with open(_state_path(root), encoding='utf-8') as f:
+            s = json.load(f)
+        return s if isinstance(s, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_state(root, state):
+    p = _state_path(root)
+    try:
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        tmp = f'{p}.{os.getpid()}.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(state, f)
+        os.replace(tmp, p)
+    except OSError:
+        pass
+
+
+def redirect_grep(data):
+    """grep の pattern の名前が、索引で MANY_FILES 以上のファイルから呼ばれていれば、断る理由(refs の案内)。"""
+    root = index_root(data.get('cwd'))
+    args = data.get('toolArgs')
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except ValueError:
+            return None
+    if root is None or not isinstance(args, dict):
+        return None
+    names = pattern_names(args.get('pattern'))
+    if not names:
+        return None
+    state = _read_state(root)
+    told = set(state.get('told') or [])
+    hits = []
+    for n in names:
+        if n in told:
+            continue
+        try:
+            found = call_files(root, n)
+        except (OSError, ValueError):
+            continue
+        hits += [(len(fs), sym, n) for sym, fs in found.items() if len(fs) >= MANY_FILES]
+    if not hits:
+        return None
+    hits.sort(reverse=True)
+    state['told'] = sorted(told | {n for _, _, n in hits})
+    _write_state(root, state)
+    lines = [f'{sym} is called from {k} files' for k, sym, _ in hits[:3]]
+    sym = hits[0][1]
+    return ('cxxref (clang index of every translation unit): ' + '; '.join(lines) + '. Instead of this grep, run once '
+            'in PowerShell, as a command of its own:\n'
+            f'python -I "{os.path.join(os.path.dirname(HERE), "mcp", "cxxref_cli.py")}" refs {sym} --context 3\n'
+            'It lists every call, reference, declaration and definition with the source lines around them; write the '
+            'edits from those lines without opening whole files. If you need the text matches too, run the same grep '
+            'again (this note is shown once per name).')
 
 
 def session_start(data):
     """sessionStart: 索引のあるリポジトリでだけ、skill を使う場面を 1 文で知らせる。索引が無ければ何も足さない
-    (skill の説明文だけでは、使わないモデルがいた【実測: Claude Haiku 5.5 は grep から始めた。gpt-6-luna は読んだ】)。"""
-    if has_index(data.get('cwd')):
+    (skill の説明文だけでは、使わないモデルがいた【実測: Claude Haiku 5.5 は grep から始めた。gpt-6-luna は読んだ】)。
+    grep を振り向けた名前の記録も、ここで空にする(新しいセッションでは、もう一度 1 回だけ振り向ける)。"""
+    root = index_root(data.get('cwd'))
+    if root is not None:
+        _write_state(root, {})
         sys.stdout.write(json.dumps({'additionalContext': SESSION_NOTE}))
     return 0
 
@@ -137,6 +286,14 @@ def main(argv=None):
         return 0
     if argv[:1] == ['session']:
         return session_start(data)
+    if str(data.get('toolName', '')).lower() == 'grep':
+        try:
+            reason = redirect_grep(data)
+        except Exception:  # 振り向けは補助。何があっても grep は止めない
+            reason = None
+        if reason:
+            sys.stdout.write(json.dumps({'permissionDecision': 'deny', 'permissionDecisionReason': reason}))
+        return 0
     if str(data.get('toolName', '')).lower() not in SHELLS:
         return 0
     args = data.get('toolArgs')

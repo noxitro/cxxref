@@ -1,6 +1,6 @@
 ---
 name: cxxref
-description: Use before grep when the question is where a C++ function, type, variable or macro is used or called, or what a change to it would affect ("where is X used", "what breaks if X changes", list the callers). Resolved by clang over every translation unit. Needs a .index folder. When asked to change a signature and fix the callers yourself: grep first, and load this only if they are in 5 or more files. Not for explaining code or adding logs or tests.
+description: Use before grep when the question is where a C++ function, type, variable or macro is used or called, or what a change to it would affect ("where is X used", "what breaks if X changes", list the callers). Resolved by clang over every translation unit, with the reason for each text match it leaves out. Needs a .index folder in the repository. Not when you are asked to make the change yourself (editing callers), explain code, or add logs or tests - use grep and view as usual.
 ---
 
 # cxxref
