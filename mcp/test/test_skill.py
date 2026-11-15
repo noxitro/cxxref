@@ -406,7 +406,8 @@ class TrustTest(unittest.TestCase):
                     'clang++ -fcrash-diagnostics-dir=x a.cpp', 'clang++ -Wp,-MD,x.d a.cpp', 'clang++ -Wp,-MMD,x.d a.cpp',
                     'clang-cl /clang:-MD /clang:-MFx.d a.cpp', 'clang-cl -clang:-MD a.cpp',
                     'clang-cl -clang:--serialize-diagnostics -clang:x a.cpp', 'clang-cl -clang:-fplugin=p.dll a.cpp',
-                    'clang++ -Xclang -MF -Xclang x a.cpp', 'clang++ -Xpreprocessor -MD a.cpp'):
+                    'clang++ -Xclang -MF -Xclang x a.cpp', 'clang++ -Xpreprocessor -MD a.cpp',
+                    'clang++ -Xclang -dump-minimization-hints=x a.cpp', 'clang++ -fmodules -fmodules-cache-path=x a.cpp'):
             self.assertIsNotNone(self.au.unsafe_cdb(self.cdb([{'command': cmd}])), cmd)
         # 応答ファイルの最後の -Xclang は、その次の語に効く(応答ファイルを置き換えてから並びとして見る)
         self.assertIsNotNone(self.au.unsafe_cdb(self.cdb([{'command': 'clang++ @inc.rsp -MF x a.cpp'}], rsp='-DA -Xclang')))

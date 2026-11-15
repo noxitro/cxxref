@@ -125,9 +125,19 @@ template <class Fn> void forEachDriverArg(llvm::ArrayRef<const char *> Argv, uns
 //   そこで書く(clang の中のオプションはドライバーとしては知らない引数の誤りになるが、ファイルは先に書かれる)
 // 【実測: ltidx 0.5.7 で、どれもファイルを作った(-MJ は /clang:-MJ のとき)。clang の中で書くものを空にした ltidx でも、
 // 診断のものはファイルを作った。前に何も付かない -MJ は、ClangTool が落とすので作らなかった】
+// --config・--config-system-dir=・--config-user-dir= も外す(設定ファイルは -MJ などを足せる。コンパイラの隣の既定の
+// 設定ファイルは、MSYS2 の clang などが標準ライブラリを決めるのに使うので読むまま)
 bool driverWritesFile(const llvm::opt::Arg &X) {
   unsigned Id = X.getOption().getUnaliasedOption().getID();
-  return Id == options::OPT_MJ || Id == options::OPT_gen_cdb_fragment_path;
+  return Id == options::OPT_MJ || Id == options::OPT_gen_cdb_fragment_path || Id == options::OPT_config ||
+         Id == options::OPT_config_system_dir_EQ || Id == options::OPT_config_user_dir_EQ;
+}
+
+// 値(最後の 1 語)を、ドライバーが引数として読み直すオプション(-Xarch_host -MJx など)
+bool wrapsDriverArg(const llvm::opt::Arg &X) {
+  unsigned Id = X.getOption().getUnaliasedOption().getID();
+  return Id == options::OPT_Xarch_host || Id == options::OPT_Xarch_device || Id == options::OPT_Xarch__ ||
+         Id == options::OPT_Xopenmp_target || Id == options::OPT_Xopenmp_target_EQ;
 }
 
 bool diagWritesFile(const llvm::opt::Arg &X) {
@@ -136,8 +146,21 @@ bool diagWritesFile(const llvm::opt::Arg &X) {
          Id == options::OPT_diagnostic_log_file;
 }
 
-// Argv から落とす位置を Drop に足す。足したら true
-bool markDriverWrites(const std::vector<const char *> &Argv, bool Cl, std::vector<bool> &Drop) {
+// X が、ドライバーの段で書く引数か、それを値に包んだ引数か
+bool writesInDriver(const llvm::opt::Arg &X) {
+  if (driverWritesFile(X)) return true;
+  if (!wrapsDriverArg(X) || X.getNumValues() == 0) return false;
+  const char *V = X.getValues().back();
+  bool Found = false;
+  forEachDriverArg(llvm::ArrayRef<const char *>(&V, 1), options::ClangOption,
+                   [&](const llvm::opt::Arg &Y, unsigned, unsigned) { Found |= driverWritesFile(Y) || diagWritesFile(Y); });
+  return Found;
+}
+
+// Argv から落とす位置を Drop に足す。足したら true。モードによって見えるオプションが違い、同じ語が別の引数の値にも
+// なるので、どのモード(clang・clang-cl・dxc・flang)の読み方でも見つけて落とす【Fable のレビュー: --driver-mode=dxc で、
+// clang の読み方では -include の値になる -gen-cdb-fragment-path が効いた】
+bool markDriverWrites(const std::vector<const char *> &Argv, std::vector<bool> &Drop) {
   bool Changed = false;
   auto mark = [&](unsigned B, unsigned E, const std::vector<unsigned> *Map = nullptr) {
     for (unsigned I = B; I < E; ++I) {
@@ -145,21 +168,23 @@ bool markDriverWrites(const std::vector<const char *> &Argv, bool Cl, std::vecto
       if (!Drop[J]) Drop[J] = Changed = true;
     }
   };
-  std::vector<unsigned> Pass;              // /clang: の位置
-  std::vector<const char *> PassValues;    // その値(clang-cl は、まとめて clang の引数として読み直す)
-  forEachDriverArg(Argv, Cl ? options::CLOption : options::ClangOption,
-                   [&](const llvm::opt::Arg &X, unsigned B, unsigned E) {
-                     if (driverWritesFile(X)) {
-                       mark(B, E);
-                     } else if (Cl && X.getOption().matches(options::OPT__SLASH_clang) && X.getNumValues() == 1) {
-                       Pass.push_back(B);
-                       PassValues.push_back(X.getValue());
-                     }
-                   });
-  if (!PassValues.empty())
-    forEachDriverArg(PassValues, options::ClangOption, [&](const llvm::opt::Arg &X, unsigned B, unsigned E) {
-      if (driverWritesFile(X) || diagWritesFile(X)) mark(B, E, &Pass);
+  for (unsigned Vis : {unsigned(options::ClangOption), unsigned(options::CLOption), unsigned(options::DXCOption),
+                       unsigned(options::FlangOption)}) {
+    std::vector<unsigned> Pass;              // /clang: の位置
+    std::vector<const char *> PassValues;    // その値(clang-cl は、まとめて clang の引数として読み直す)
+    forEachDriverArg(Argv, Vis, [&](const llvm::opt::Arg &X, unsigned B, unsigned E) {
+      if (writesInDriver(X)) {
+        mark(B, E);
+      } else if (X.getOption().matches(options::OPT__SLASH_clang) && X.getNumValues() == 1) {
+        Pass.push_back(B);
+        PassValues.push_back(X.getValue());
+      }
     });
+    if (!PassValues.empty())
+      forEachDriverArg(PassValues, options::ClangOption, [&](const llvm::opt::Arg &X, unsigned B, unsigned E) {
+        if (writesInDriver(X) || diagWritesFile(X)) mark(B, E, &Pass);
+      });
+  }
   // 診断の設定は、モードを問わず全部のオプションを見える形で読まれる(CreateAndPopulateDiagOpts)
   forEachDriverArg(Argv, ~0U, [&](const llvm::opt::Arg &X, unsigned B, unsigned E) {
     if (diagWritesFile(X)) mark(B, E);
@@ -169,14 +194,16 @@ bool markDriverWrites(const std::vector<const char *> &Argv, bool Cl, std::vecto
 
 // A(コンパイルのコマンド。応答ファイルは展開済み)から、ドライバーの段で書くファイルの引数を落とす。書き方は、
 // clang と同じオプション表で読んで見つける(-MJx・-MJ x、--serialize-diagnostics・-serialize-diagnostics、
-// clang-cl の /clang: と -clang: の中も)。落とすと残りの読まれ方が変わりうるので、落とすものが無くなるまで読み直す
+// clang-cl の /clang: と -clang: の中、-Xarch_host などの値の中も)。落とすと残りの読まれ方が変わりうるので、落とすものが
+// 無くなるまで読み直す(1 回ごとに 1 語以上減るので終わる)。ClangTool の調整のうち最後に動かす(後から足す語が、
+// 末尾で値の無い --serialize-diagnostics などの値にならないように)
 tooling::CommandLineArguments dropDriverWrites(const tooling::CommandLineArguments &A) {
   tooling::CommandLineArguments R = A;
-  for (int Round = 0; Round < 8 && R.size() >= 2; ++Round) {
+  while (R.size() >= 2) {
     std::vector<const char *> Argv;
     for (size_t I = 1; I < R.size(); ++I) Argv.push_back(R[I].c_str());
     std::vector<bool> Drop(Argv.size());
-    if (!markDriverWrites(Argv, isClDriver(R), Drop)) return R;
+    if (!markDriverWrites(Argv, Drop)) return R;
     tooling::CommandLineArguments Next{R[0]};
     for (size_t I = 0; I < Argv.size(); ++I)
       if (!Drop[I]) Next.push_back(R[I + 1]);
@@ -974,13 +1001,19 @@ void scrubInvocation(CompilerInvocation &CI) {
   F.AddPluginActions.clear();     // -add-plugin
   F.PluginArgs.clear();
   F.ActionName.clear();           // -plugin
-  F.LLVMArgs.clear();             // -mllvm(LLVM の全体の設定。ファイルを書くものがある)
+  F.LLVMArgs.clear();             // -mllvm(LibTooling では使われないが、念のため)
+  F.DumpMinimizationHintsPath.clear();  // -dump-minimization-hints=(どの FrontendAction でも開く。Fable のレビューで実測)
+  // 暗黙のモジュールのビルドを止める。-fmodules-cache-path= の場所にフォルダとロックのファイルを作る【Fable のレビューで実測】。
+  // モジュールを作る TU は、これまでも圧縮の部品が無いので ltidx ごと落ちていた(-fmodule-file= で渡したものは読む)
+  CI.getHeaderSearchOpts().ModuleCachePath.clear();
+  CI.getLangOpts().ImplicitModules = 0;
   DependencyOutputOptions &D = CI.getDependencyOutputOpts();
   D.OutputFile.clear();               // -dependency-file(-MD -MF・-Wp,-MD,<file>)
   D.HeaderIncludeOutputFile.clear();  // -header-include-file
   D.DOTOutputFile.clear();            // -dependency-dot
   D.ModuleDependencyOutputDir.clear();
   D.ShowHeaderIncludes = 0;           // -H(書き先を空にすると、ログに読んだヘッダーを全部書く)
+  D.ShowIncludesDest = ShowIncludesDestination::None;  // /showIncludes(同じく)
   DiagnosticOptions &G = CI.getDiagnosticOpts();
   G.DiagnosticLogFile.clear();            // -diagnostic-log-file
   G.DiagnosticSerializationFile.clear();  // --serialize-diagnostics・-serialize-diagnostic-file
@@ -1429,8 +1462,6 @@ int main(int argc, const char **argv) {
         }
         return R;
       });
-      // ドライバーの段で書くファイルの引数を落とす(clang の中で書くものは Factory の scrubInvocation が止める)
-      Tool.appendArgumentsAdjuster([](const tooling::CommandLineArguments &A, llvm::StringRef) { return dropDriverWrites(A); });
       Tool.appendArgumentsAdjuster(tooling::getInsertArgumentAdjuster(
           ("-resource-dir=" + ResourceDir).c_str(), tooling::ArgumentInsertPosition::BEGIN));
       // 遅延解析のままだと、実体化されないテンプレート本体の非依存呼び出しが索引に載らない。MSVC 向けでは
@@ -1440,6 +1471,9 @@ int main(int argc, const char **argv) {
           return tooling::getInsertArgumentAdjuster(isClDriver(A) ? "/Zc:twoPhase" : "-fno-delayed-template-parsing",
                                                     tooling::ArgumentInsertPosition::END)(A, File);
         });
+      // ドライバーの段で書くファイルの引数を落とす(clang の中で書くものは Factory の scrubInvocation が止める)。
+      // 足す調整の後に動かす(末尾で値の無い引数の値に、足した語がならないように)
+      Tool.appendArgumentsAdjuster([](const tooling::CommandLineArguments &A, llvm::StringRef) { return dropDriverWrites(A); });
       ErrorCounter Diag;
       Tool.setDiagnosticConsumer(&Diag);
       Factory F(Roots, O);
