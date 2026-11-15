@@ -80,6 +80,11 @@ ltidx.exe -p <compile_commands.json のあるフォルダ> -root <索引に含�
 - `-no-inst` は比較用です。テンプレートの暗黙の実体化を索引しません
 - PCH の指定(`/Yu` `/Yc` `/Fp`)は外して解析します
 - 警告をエラーにする指定(`/WX` `-Werror` `-Werror=…`)は外して解析します。cl に無い clang の警告(`override` の付け忘れなど)で TU が失敗扱いになるのを防ぎます
+- ファイルを書かせる指定とコンパイラのプラグインは効かせません。ltidx は索引を書くだけで、コンパイルの出力は作りません。`compile_commands.json` はリポジトリ次第で選べるので、そこに書かれた引数で書き先を選べるファイルを書かせないためです(書き先を選べると、起動時に実行されるフォルダに `.bat` を置かれえます)
+  - clang の中の設定(出力先・依存ファイル・ヘッダーの一覧・診断の記録・統計・時間計測・プラグイン・`-mllvm`)は、解析を始める前に空にします。clang が引数を読み解いた後の設定なので、書き方(`-Xclang`・`-Xclang=`・`-Wp,`・clang-cl の `/clang:` と `-clang:`・応答ファイル・clang の設定ファイル)を問いません
+  - ドライバーの段で書くもの(`-MJ`・`-gen-cdb-fragment-path`・`--serialize-diagnostics`・`-serialize-diagnostic-file`・`-diagnostic-log-file`)は、clang と同じオプション表で引数を読んで外します
+  - 残るもの: コンパイラの隣に置かれた clang の設定ファイル(`clang++.cfg` など。引数に無くても読まれます)に書かれた `-MJ`・`-gen-cdb-fragment-path` は外せません。MSYS2 の clang などは、この設定ファイルで既定の標準ライブラリを決めるので、設定ファイルは読むままにしています。MCP サーバーと skill の自動の作り直しは、コンパイラの隣に設定ファイルがあれば作り直しません(`mcp\autoupdate.py` の `unsafe_cdb`)
+  - 確かめたこと: `test\test_ltidx.py` の `test_compile_arguments_write_no_files` が、上の書き方 24 通りでファイルができないことと、索引は変わらないことを見ます(0.5.7 の ltidx では 23 通りでファイルができました)
 
 TSV を直接引く例:
 

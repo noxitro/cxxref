@@ -64,10 +64,10 @@ class LtidxTest(unittest.TestCase):
             json.dump([{'directory': d, 'file': f'{d}/{r}', 'arguments': ['cl.exe', '/c', '/std:c++17'] + a + [r]}
                        for r, a in self.cmds.items()], f)
 
-    def run_ltidx(self, *args, out='.index/index.tsv'):
+    def run_ltidx(self, *args, out='.index/index.tsv', cwd=None):
         os.makedirs(os.path.join(self.root, '.index'), exist_ok=True)
         r = subprocess.run([LTIDX, '-p', self.root, '-root', self.root, '-o', os.path.join(self.root, out)] + list(args),
-                           capture_output=True, text=True, encoding='utf-8', errors='replace')
+                           capture_output=True, text=True, encoding='utf-8', errors='replace', cwd=cwd)
         return r.returncode, r.stderr
 
     def rows(self, out='.index/index.tsv'):
@@ -178,6 +178,45 @@ class LtidxTest(unittest.TestCase):
                 self.assertEqual(rc, 0, err)
                 self.assertEqual(self.tus()['a.cpp'][1], '1', self.tus()['a.cpp'])
                 self.assertTrue(self.has('Run', 'call', 'a.cpp:2:36'))
+
+    def test_compile_arguments_write_no_files(self):
+        # compile_commands.json はリポジトリ次第で選べる。そこに書かれた引数で、ltidx に書き先を選べるファイルを書かせない
+        # (clang の中の出力先は scrubInvocation が、ドライバーの段のものは dropDriverWrites が止める)。
+        # 引数の効き目(-DMARK)は残し、索引は今までどおりにできる
+        self.write('a.cpp', '#ifdef MARK\nvoid Marked();\nvoid Use() { Marked(); }\n#endif\n')
+        with open(os.path.join(self.root, 'w.rsp'), 'w', encoding='utf-8') as f:
+            f.write('-DMARK --serialize-diagnostics out/r.dia -Xclang')  # 最後の -Xclang は、応答ファイルの外の次の語に効く
+        d = self.root.replace('\\', '/')
+        gcc = ['clang++', '-c', '-DMARK']
+        cl = ['clang-cl', '/c', '/DMARK']
+        cases = [
+            gcc + ['--serialize-diagnostics', 'out/a.dia'], gcc + ['-serialize-diagnostics', 'out/b.dia'],
+            gcc + ['-serialize-diagnostic-file', 'out/c.dia'], gcc + ['-diagnostic-log-file', 'out/d.log'],
+            gcc + ['-Xclang', '-serialize-diagnostic-file', '-Xclang', 'out/e.dia'],
+            gcc + ['-Xclang=-dependency-file', '-Xclang=out/f.d', '-Xclang=-MT', '-Xclang=t'],
+            gcc + ['-Wp,-MD,out/g.d'], gcc + ['-Wp,-MMD,out/h.d'], gcc + ['--write-dependencies', '-MF', 'out/i.d'],
+            gcc + ['-H', '-Xclang', '-header-include-file', '-Xclang', 'out/j.txt'],
+            gcc + ['-Xclang', '-diagnostic-log-file', '-Xclang', 'out/k.log', '-Wall'],
+            gcc + ['-Xclang', '-dependency-dot', '-Xclang', 'out/l.dot'], gcc + ['-Xclang', '-stats-file=out/m.json'],
+            gcc + ['-save-stats=cwd'], gcc + ['-gen-cdb-fragment-path', 'out/n'], gcc + ['-MJ', 'out/o.json'],
+            gcc + ['@w.rsp', '-serialize-diagnostic-file', '-Xclang', 'out/p.dia'],
+            cl + ['/clang:-MD', '/clang:-MFout/q.d'], cl + ['-clang:-MD', '-clang:-MF', '-clang:out/r.d'],
+            cl + ['/clang:--serialize-diagnostics', '/clang:out/s.dia'], cl + ['/clang:-MJ', '/clang:out/t.json'],
+            cl + ['/clang:-gen-cdb-fragment-path', '/clang:out/u'], cl + ['--serialize-diagnostics', 'out/v.dia'],
+            cl + ['-gen-cdb-fragment-path', 'out/w'],
+        ]
+        for argv in cases:
+            with self.subTest(' '.join(argv[3:])):
+                shutil.rmtree(os.path.join(self.root, 'out'), ignore_errors=True)
+                os.makedirs(os.path.join(self.root, 'out'))
+                with open(os.path.join(self.root, 'compile_commands.json'), 'w', encoding='utf-8') as f:
+                    json.dump([{'directory': d, 'file': f'{d}/a.cpp', 'arguments': argv + ['a.cpp']}], f)
+                before = set(os.listdir(self.root))
+                # 相対パスは、ltidx を動かしたフォルダから決まるものがある(-save-stats=cwd など)。どちらも self.root にする
+                self.run_ltidx('-j', '1', cwd=self.root)
+                self.assertEqual(os.listdir(os.path.join(self.root, 'out')), [])
+                self.assertEqual(set(os.listdir(self.root)) - before - {'.index'}, set())  # a.stats など、隣にも書かない
+                self.assertTrue(self.has('Marked', 'call', 'a.cpp:3:14'), argv)
 
     def test_utf8_unchanged(self):
         self.write('a.cpp', SJIS_SRC, ['/utf-8'])
