@@ -62,6 +62,35 @@ def is_other(ext, size):
     return ext not in SRC_EXT and size > 0
 
 
+RESERVED = {'CON', 'PRN', 'AUX', 'NUL', 'CONIN$', 'CONOUT$'} | {f'{d}{n}' for d in ('COM', 'LPT') for n in '123456789'}
+
+
+def safe_path(root, path, read=True):
+    """索引・その付属ファイル・引数に書かれたパス(ルートからの相対)を、触れてよい絶対パスにする。だめなら None。
+    索引は作業中のリポジトリの中にあり、細工されうる(clone したリポジトリの .index は、そのリポジトリの作者が書ける)。
+    - UNC(\\\\host\\share・//host/share)とデバイス(\\\\.\\ \\\\?\\)には、どの操作でも触れない
+      (Windows は、UNC のパスの有無を見るだけでそのサーバーへつなぎ、資格情報を送りうる)
+    - read(中身を読む)のときは、ルートの内側だけ。.. や絶対パスでルートの外へ出るものと、Windows の予約名
+      (CON・NUL など。開くと端末の入力を待つ)は読まない。ltidx はルートの外のファイルの行を書かない
+    - 有無と更新日時だけを見るとき(read=False)は、ルートの外のローカルのパスも許す
+      (ルートの外にある TU の主ファイルが消えたかを見る。.tu.tsv の絶対パス)"""
+    if not isinstance(path, str) or not path or '\0' in path:
+        return None
+    full = os.path.normpath(os.path.join(root, path))
+    if full.replace('\\', '/').startswith('//'):
+        return None
+    if read:
+        base = os.path.normpath(root)
+        try:
+            rel = os.path.relpath(full, base)
+        except ValueError:  # 別のドライブ
+            return None
+        parts = rel.replace('\\', '/').split('/')
+        if parts[0] == '..' or os.path.isabs(rel) or any(p.split('.')[0].rstrip(' ').upper() in RESERVED for p in parts):
+            return None
+    return full
+
+
 def tree_place(d, root):
     """フォルダ d が、ルートから見てどこにあるか: 'out'(ルートの外)、'hidden'(ルートの下の、. で始まるフォルダの中。
     テキスト検索は読まない)、'open'(ルートの下の、テキスト検索が読む所)。"""
@@ -386,26 +415,43 @@ class Index:
 
     def _current(self, path):
         if path not in self._lines:
-            try:
-                with open(os.path.join(self.root, path), 'rb') as f:
-                    data = to_utf8(f.read(), self.codec())
-            except OSError:
-                data = None
+            data = self.read(path)
             self._lines[path] = None if data is None else [canon_line(x) for x in data.split(b'\n')]
         return self._lines[path]
+
+    def read(self, path, raw=False):
+        """索引に書かれたパス(ルートからの相対)のファイルの中身(UTF-8 に直したもの。raw なら元のバイト列)。
+        ルートの外を指すパスと読めないファイルは None(safe_path)。"""
+        fp = safe_path(self.root, path)
+        if fp is None:
+            return None
+        try:
+            with open(fp, 'rb') as f:
+                data = f.read()
+        except OSError:
+            return None
+        return data if raw else to_utf8(data, self.codec())
+
+    def gone(self, path):
+        """索引に書かれたパスのファイルが、無くなっているか。触れてはいけないパス(UNC など。safe_path)は、
+        無くなったと数えない(有無を見に行かない)。"""
+        fp = safe_path(self.root, path, read=False)
+        return fp is not None and not os.path.exists(fp)
 
     def _stale(self, part):
         """その索引の後に変わった(か消えた)、索引にあるファイル。"""
         out = set()
         for path in self.freshness()[0]:
+            fp = safe_path(self.root, path, read=False)
+            if fp is None:
+                continue
             try:
-                if os.path.getmtime(os.path.join(self.root, path)) > part.mtime:
+                if os.path.getmtime(fp) > part.mtime:
                     out.add(path)
             except OSError:
                 out.add(path)
         src = self.sources()
-        return out | {p for p in self.seen()[part.name]
-                      if p not in src and not os.path.exists(os.path.join(self.root, p))}
+        return out | {p for p in self.seen()[part.name] if p not in src and self.gone(p)}
 
     def _line_map(self, path, anchors):
         """索引にある (行, ソース行) を今のファイルから探し、{索引の行: 今の行 か None}。
@@ -616,11 +662,7 @@ class Index:
         条件は索引に持たず、今のソースから読む。有効な分岐(インクルードガードなど)は外側から除き、
         無効な分岐から内側だけを並べる。囲む #if が無ければ ''。"""
         if path not in self._groups:
-            try:
-                with open(os.path.join(self.root, path), 'rb') as f:
-                    data = to_utf8(f.read(), self.codec())
-            except OSError:
-                data = b''
+            data = self.read(path) or b''
             comment = set()  # コメントの中の行(コメントの始まりの行は、前にコードがありうるので除かない)
             for k, b, e, _ in ranges:
                 if k == 'comment':
@@ -708,8 +750,7 @@ class Index:
             elif os.path.splitext(fp)[1].lower() in TU_EXT:
                 new.append(rel)
         src = self.sources()
-        missing = sorted(p for p in self.tu_status()[2]
-                         if p not in src and not os.path.exists(os.path.join(self.root, p)))
+        missing = sorted(p for p in self.tu_status()[2] if p not in src and self.gone(p))
         self._fresh = (sorted(changed), sorted(new), missing)
         return self._fresh
 
@@ -1406,11 +1447,8 @@ def cmd_refs(a, idx):
     def line(path, ln):
         """ソースの行(バイト列。読めなければ None)。前の ltidx の索引で、形が行の文面から決まらない呼び出しの行だけが使う。"""
         if path not in lines:
-            try:
-                with open(os.path.join(idx.root, path), 'rb') as f:
-                    lines[path] = f.read().split(b'\n')
-            except OSError:
-                lines[path] = []
+            data = idx.read(path, raw=True)
+            lines[path] = [] if data is None else data.split(b'\n')
         ls = lines[path]
         return ls[ln - 1].rstrip(b'\r') if 0 < ln <= len(ls) else None
 
@@ -1821,9 +1859,9 @@ def cmd_check(a, idx):
     idx.header(paths)  # 問われたファイルの分だけ並べる
     for path, line, col in locs:
         here = [r for r in rows if r[3] == path and r[4] == line and (col is None or r[5] == col)]
-        fp = os.path.join(idx.root, path)
+        fp = safe_path(idx.root, path, read=False)  # 引数のパスも、UNC などには触れない
         tag = ''
-        if not os.path.exists(fp):
+        if fp is None or not os.path.exists(fp):
             tag = '  [file not found]'
         elif os.path.getmtime(fp) > idx.mtime:
             tag = '  [file changed after indexing]'
