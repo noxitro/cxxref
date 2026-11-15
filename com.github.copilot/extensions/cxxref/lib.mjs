@@ -179,14 +179,23 @@ export function parseEnableArgs(arg) {
   return { action, scope, root: rest.trim() };
 }
 
+// /cxxref-enable on を断るときの文。0.5.10 からプラグインは MCP サーバーを持たず、skill で索引を引く。入れる指示は
+// MCP サーバーのツール(refs / check)を呼ぶよう求めるので、プラグインから足すと、無いツールを探させるだけになる
+export const ENABLE_ON_GONE = "使い方の指示は、0.5.10 からのプラグインでは要りません(skill の cxxref が代わりをします)。"
+  + "指示は MCP サーバーのツールを呼ぶよう求めるもので、プラグインには MCP サーバーがありません。"
+  + "MCP サーバーを手で登録して使うときだけ、scripts\\setup-instructions.bat で足してください。"
+  + "前に足した指示は /cxxref-enable off で消せます";
+
 // /cxxref-enable(状態)の出力(setup-instructions.ps1 の Show-State)に添える、次に打つコマンドの案内。読めなければ ""
 //   拡張のコマンドには引数のヒントを付けられない(SDK の CommandDefinition は name・description だけ)ので、ここで教える
 export function statusHint(out) {
   const project = /^プロジェクト\(.*\): 入っています$/m.test(out);
   const local = /^ローカル\(.*\): 入っています$/m.test(out);
-  if (project || local) return "消すには: /cxxref-enable off(入っている方から消す)";
+  if (project || local) {
+    return "この指示は 0.5.9 までの形(MCP サーバー)のもので、今のプラグイン(skill)では要りません。消すには: /cxxref-enable off(入っている方から消す)";
+  }
   if (!/^プロジェクト\(.*\): 入っていません$/m.test(out)) return "";
-  return "足すには: /cxxref-enable on(自分だけ。git から外す)か /cxxref-enable on project(コミットするとチームの全員)";
+  return "今のプラグインでは、使い方の指示は要りません(skill の cxxref が代わりをします)";
 }
 
 // 指示を足すルート。引数があれば targetRoot と同じ扱い、無ければ git のルート、それも無ければ作業フォルダ

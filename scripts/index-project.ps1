@@ -60,10 +60,23 @@ $out = "$Root\.index\$Name.tsv"
 # makeCdb は compile_commands.json を作ったときの make-cdb.ps1 の引数。手元のものを使ったときは null(作り直さない)
 $recipe = [ordered]@{ version = 1; root = $Root; cdb = $Cdb; out = $out; jobs = $Jobs; makeCdb = $mk; alt = -not $NoAlt }
 $recipe | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath "$out.recipe.json" -Encoding utf8NoBOM
+# 使える Python(登録と差分パスに使う)。名前があっても動かないもの(Microsoft Store へ誘うだけの python.exe など)は除く
+$py = $null
+foreach ($c in @('python', 'py')) {
+    if (-not (Get-Command $c -ErrorAction SilentlyContinue)) { continue }
+    try { & $c -I -c 'pass' 2>$null | Out-Null } catch { continue }
+    if ($LASTEXITCODE -eq 0) { $py = $c; break }
+}
 # この PC で作った記録として、指紋をリポジトリの外(%LOCALAPPDATA%\cxxref)に登録する。skill から呼ぶ CLI は、登録した記録の
-# 索引だけを自動で作り直す(リポジトリに置かれた記録で ltidx や make-cdb を動かさない)。Python が無ければ登録しない
-$pyTrust = @('python', 'py') | Where-Object { Get-Command $_ -ErrorAction SilentlyContinue } | Select-Object -First 1
-if ($pyTrust) { & $pyTrust -I (Join-Path $PSScriptRoot '..\mcp\autoupdate.py') --trust $out | Out-Null }
+# 索引だけを自動で作り直す(リポジトリに置かれた記録で ltidx や make-cdb を動かさない)。登録できなければ、そう知らせる
+if (-not $py) {
+    'Python が見つからないので、この索引を自動更新の対象に登録できませんでした(skill からの呼び出しでは、ソースを変えても作り直しません)'
+} else {
+    & $py -I (Join-Path $PSScriptRoot '..\mcp\autoupdate.py') --trust $out | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        "この索引を自動更新の対象に登録できませんでした(終了コード $LASTEXITCODE。%LOCALAPPDATA%\cxxref に書けるか確かめてください)。skill からの呼び出しでは、ソースを変えても作り直しません"
+    }
+}
 $t0 = Get-Date
 $ltidxArgs = @('-p', "`"$Cdb`"", '-root', "`"$Root`"", '-o', "`"$out`"", '-j', $Jobs)
 if ($Update) {
@@ -86,7 +99,6 @@ if ($p.ExitCode -eq 1) {
 }
 # 差分パス: 無効な #if の中の呼び出しや定義を、索引の差分にする。失敗しても索引はできているので、知らせるだけ
 if (-not $NoAlt) {
-    $py = @('python', 'py') | Where-Object { Get-Command $_ -ErrorAction SilentlyContinue } | Select-Object -First 1
     if (-not $py) {
         "Python が見つからないので、無効な #if の中の解析(差分パス)を飛ばしました。無効な行は、文字列の一致としてだけ出ます"
     } else {

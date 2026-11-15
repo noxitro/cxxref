@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { test } from "node:test";
-import { enableRoot, escapeMarkdown, findLtidx, gitTop, indexRoot, lastCwd, makeNotifier, parseEnableArgs, parseIndexArgs, parseProgress, pathKey, pluginRoot, progressNote, projectChoices, savedProject, runsUnderCli, statusHint, targetRoot, wantDialog } from "./lib.mjs";
+import { ENABLE_ON_GONE, enableRoot, escapeMarkdown, findLtidx, gitTop, indexRoot, lastCwd, makeNotifier, parseEnableArgs, parseIndexArgs, parseProgress, pathKey, pluginRoot, progressNote, projectChoices, savedProject, runsUnderCli, statusHint, targetRoot, wantDialog } from "./lib.mjs";
 
 test("projectChoices: フルパスの行を、ルートからの相対パスの選択肢にする", () => {
   const root = join(tmpdir(), "cxxref-lib-test");
@@ -135,12 +135,19 @@ test("parseEnableArgs: on は省くとローカル、off は省くと両方、�
   assert.match(parseEnableArgs("enable").error, /使い方/);
 });
 
-test("statusHint: 入っていなければ on を、入っていれば off を案内する", () => {
+test("statusHint: 入っていれば off を案内し、入っていなければ要らないと言う(on は勧めない)", () => {
   const state = (p, l) => `プロジェクト(E:\\src\\.github\\copilot-instructions.md): ${p}\r\nローカル(E:\\src\\.github\\instructions\\cxxref.instructions.md): ${l}`;
-  assert.match(statusHint(state("入っていません", "入っていません")), /on project/);
+  const none = statusHint(state("入っていません", "入っていません"));
+  assert.match(none, /要りません/);
+  assert.doesNotMatch(none, /cxxref-enable on/);
   assert.match(statusHint(state("入っています", "入っていません")), /off/);
   assert.match(statusHint(state("入っていません", "入っています")), /off/);
   assert.equal(statusHint("何か別の出力"), "");
+});
+
+test("ENABLE_ON_GONE: on を断るときに、手で登録する人の手順と off を示す", () => {
+  assert.match(ENABLE_ON_GONE, /setup-instructions\.bat/);
+  assert.match(ENABLE_ON_GONE, /cxxref-enable off/);
 });
 
 test("enableRoot: 引数が無ければ git のルート、リポジトリでなければ作業フォルダ", () => {

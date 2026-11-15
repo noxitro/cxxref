@@ -11,6 +11,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -82,18 +83,29 @@ def recipe_of(index):
 
 # この PC で index-project(/cxxref-index も同じもの)が書いた作り直しの記録の指紋。リポジトリの外に置く。
 # skill から自動で許可された CLI の呼び出しは、ここに載った記録の索引だけを作り直す。リポジトリに置かれた記録
-# (compile_commands.json の場所と make-cdb の引数)を信じると、細工したリポジトリを開いただけで、clang の -fplugin などで
-# 任意の DLL を読ませられるため
+# (compile_commands.json の場所と make-cdb の引数)を信じると、細工したリポジトリを開いただけで、作り直しが
+# 細工した compile_commands.json で ltidx を動かすため(コンパイラのプラグインを読ませる引数は、別に unsafe_cdb で止める)。
+# 記録 1 つごとに 1 ファイル(trusted\<鍵のハッシュ>.json)。1 つのファイルを読んで足して書き戻すと、索引づくりを
+# 同時に走らせたときに片方の登録が消えるため。0.5.10 の trusted-recipes.json(全部を 1 つに書いたもの)も読む
+TRUST_DIR = 'trusted'
 TRUST_FILE = 'trusted-recipes.json'
 
 
-def _trust_path():
+def _trust_base():
     base = os.environ.get('LOCALAPPDATA')
-    return os.path.join(base, 'cxxref', TRUST_FILE) if base else None
+    return os.path.join(base, 'cxxref') if base else None
 
 
 def _recipe_key(index):
     return os.path.normcase(os.path.realpath(index + RECIPE))
+
+
+def _trust_path(index):
+    base = _trust_base()
+    if not base:
+        return None
+    name = hashlib.sha256(_recipe_key(index).encode('utf-8')).hexdigest()[:32] + '.json'
+    return os.path.join(base, TRUST_DIR, name)
 
 
 def _recipe_digest(index):
@@ -104,10 +116,7 @@ def _recipe_digest(index):
         return None
 
 
-def _read_trust():
-    p = _trust_path()
-    if not p:
-        return {}
+def _read_json(p):
     try:
         with open(p, encoding='utf-8') as f:
             d = json.load(f)
@@ -116,25 +125,88 @@ def _read_trust():
         return {}
 
 
+def trust_available():
+    """登録を置く場所(%LOCALAPPDATA%\\cxxref)があるか。"""
+    return _trust_base() is not None
+
+
 def trust_recipe(index):
     """index の作り直しの記録を、この PC で作ったものとして登録する(index-project.ps1 が記録を書いた直後に呼ぶ)。"""
-    p, digest = _trust_path(), _recipe_digest(index)
+    p, digest = _trust_path(index), _recipe_digest(index)
     if not p or not digest:
         return False
-    d = _read_trust()
-    d[_recipe_key(index)] = digest
     os.makedirs(os.path.dirname(p), exist_ok=True)
     tmp = f'{p}.{os.getpid()}.tmp'
     with open(tmp, 'w', encoding='utf-8') as f:
-        json.dump(d, f, ensure_ascii=False, indent=1)
+        json.dump({'recipe': _recipe_key(index), 'digest': digest}, f, ensure_ascii=False)
     os.replace(tmp, p)
     return True
 
 
 def trusted_recipe(index):
     """index の作り直しの記録が、登録したときから変わっていなければ True。"""
-    digest = _recipe_digest(index)
-    return bool(digest) and _read_trust().get(_recipe_key(index)) == digest
+    digest, p = _recipe_digest(index), _trust_path(index)
+    if not digest or not p:
+        return False
+    d = _read_json(p)
+    if d.get('recipe') == _recipe_key(index):
+        return d.get('digest') == digest
+    return _read_json(os.path.join(_trust_base(), TRUST_FILE)).get(_recipe_key(index)) == digest
+
+
+def rebuild_hint(index, root):
+    """登録の無い索引を、この PC で作り直して登録するコマンド(作り直しの記録の構成のまま、変わった分だけ)。"""
+    name = os.path.basename(index)[:-len('.tsv')] if index.endswith('.tsv') else 'index'
+    cmd = f'"{os.path.join(SCRIPTS, "index-project.bat")}" -Root "{root}"' + (f' -Name {name}' if name != 'index' else '')
+    rec = recipe_of(index) or {}
+    mk = rec.get('makeCdb')
+    if isinstance(mk, dict):
+        for k in ('Project', 'Configuration', 'Platform', 'CMakeArgs'):
+            if mk.get(k) not in (None, ''):
+                cmd += f' -{k} "{mk[k]}"'
+    elif rec.get('cdb') and os.path.normcase(os.path.abspath(rec['cdb'])) != os.path.normcase(os.path.abspath(root)):
+        cmd += f' -Cdb "{rec["cdb"]}"'
+    return cmd + ' -Update'
+
+
+# compile_commands.json の中で、ltidx(clang)にファイルからコードを読ませうる引数。作り直しの前に見て、あれば作り直さない
+# (コンパイラのプラグイン、clang の設定ファイル)。応答ファイル(@file)は中身も見る(CMake の Ninja が include の一覧に使う)
+UNSAFE_ARG = re.compile(r'(?:/clang:|-Xclang=)?(?:-fplugin\b|-fpass-plugin\b|-load$|-plugin$|-add-plugin$|-plugin-arg-|--config\b)')
+
+
+def _unsafe_args(args, cwd, depth=0):
+    for t in args:
+        t = t.strip('"\'')
+        if UNSAFE_ARG.match(t):
+            return t
+        if t.startswith('@'):
+            if depth or t[1:].replace('\\', '/').startswith('//'):  # UNC は開くだけで資格情報を送りうる
+                return t  # 応答ファイルの中の応答ファイルまでは追わない
+            try:
+                with open(os.path.join(cwd, t[1:]), encoding='utf-8', errors='replace') as f:
+                    bad = _unsafe_args(f.read().split(), cwd, depth + 1)
+            except OSError:
+                continue  # 読めない応答ファイルは clang も読めない
+            if bad:
+                return f'{bad} (in {t})'
+    return None
+
+
+def unsafe_cdb(cdb):
+    """cdb(compile_commands.json のフォルダ)に、コードを読ませうる引数があれば、その引数。無い・読めなければ None。"""
+    try:
+        with open(os.path.join(cdb, 'compile_commands.json'), encoding='utf-8-sig') as f:
+            entries = json.load(f)
+    except (OSError, ValueError):
+        return None  # ltidx が誤りにする
+    for e in entries if isinstance(entries, list) else []:
+        if not isinstance(e, dict):
+            continue
+        args = e.get('arguments') if isinstance(e.get('arguments'), list) else str(e.get('command') or '').split()
+        bad = _unsafe_args([str(a) for a in args], str(e.get('directory') or cdb))
+        if bad:
+            return bad
+    return None
 
 
 def _path(d, name):
@@ -197,10 +269,16 @@ def refresh(idx, paths, root, wait, trusted_only=False):
     if any(recipe_of(p) is None for p in paths):
         return idx, ('auto-update: off for this index (no .recipe.json). Rebuild it once with '
                      f'{os.path.join(SCRIPTS, "index-project.bat")} to turn it on.\n')
-    if trusted_only and not all(trusted_recipe(p) for p in paths):
+    untrusted = [p for p in paths if not trusted_recipe(p)] if trusted_only else []
+    if untrusted and not trust_available():
+        return idx, ('auto-update: off for this index (LOCALAPPDATA is not set, so indexes built on this PC cannot be '
+                     'recorded). Results use the current index (lines re-located).\n')
+    if untrusted:
+        # 作り直しの記録の構成のまま(-Name・作り元・-Update)。-Root だけだと、既定の構成を最初から作るだけになる
         return idx, ('auto-update: off for this index (it was not built on this PC with index-project.bat or '
                      '/cxxref-index). Results use the current index (lines re-located). To turn it on, ask the user to '
-                     f'rebuild it once: "{os.path.join(SCRIPTS, "index-project.bat")}" -Root "{root}"\n')
+                     'rebuild it once (only changed files are parsed): '
+                     + '; '.join(rebuild_hint(p, root) for p in untrusted) + '\n')
     d = os.path.dirname(os.path.abspath(paths[0]))
     n = len(changed) + len(new) + len(missing)
     asked = time.time()
@@ -238,6 +316,10 @@ def run_recipe(rec, full, log):
         rc = subprocess.run(args, stdin=subprocess.DEVNULL, stdout=log, stderr=log).returncode
         if rc != 0:
             return f'make-cdb exit {rc}'
+    bad = unsafe_cdb(rec['cdb'])
+    if bad:
+        return (f'compile_commands.json has an argument that loads code into the compiler ({bad}); not rebuilt '
+                'automatically. Rebuild it with index-project.bat if you trust it')
     out = rec['out']
     ltidx = find_ltidx()
     if not ltidx or not os.path.exists(ltidx):

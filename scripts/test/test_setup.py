@@ -101,7 +101,9 @@ class SetupFlowTest(SetupBase):
             f.write('void f() {}\nint main() { f(); }\n')
 
     def setup(self, *args, registered=None):
-        env = {'PATH': self.bin + os.pathsep + os.environ['PATH'], 'FAKE_COPILOT_LOG': self.log}
+        # LOCALAPPDATA: index-project の自動更新の登録(%LOCALAPPDATA%\cxxref\trusted)を、利用者のものではなく一時フォルダに書かせる
+        env = {'PATH': self.bin + os.pathsep + os.environ['PATH'], 'FAKE_COPILOT_LOG': self.log,
+               'LOCALAPPDATA': os.path.join(self.tmp, 'local')}
         if registered:
             env['FAKE_COPILOT_SERVER'] = registered
         r = self.run_ps('-LlvmRoot', llvm_root(), *args, env=env)
