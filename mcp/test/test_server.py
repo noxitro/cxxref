@@ -110,8 +110,11 @@ class ServerTest(unittest.TestCase):
         self.assertTrue(r['isError'])
         self.assertIn('index not found', r['content'][0]['text'])
         # 作り方を、このサーバーの隣の scripts の絶対パスで添える(プラグインとして入れたときに場所が分かるように)
+        # PowerShell でも cmd でも動く形("…bat" で始めると PowerShell では構文エラー)
         scripts = os.path.normpath(os.path.join(os.path.dirname(SERVER), '..', 'scripts'))
-        self.assertIn(f'"{os.path.join(scripts, "index-project.bat")}" -Root "{self.root}"', r['content'][0]['text'])
+        self.assertIn(f'pwsh -NoProfile -ExecutionPolicy Bypass -File "{os.path.join(scripts, "index-project.ps1")}" '
+                      f'-Root "{self.root}"', r['content'][0]['text'])
+        self.assertNotIn('.bat"', r['content'][0]['text'])
 
     def test_large_result_is_shortened(self):
         # クライアントの上限(Copilot CLI は 20,480 バイト)を超える結果は、短い形にし、それでも超えれば末尾を切る

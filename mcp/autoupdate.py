@@ -184,14 +184,23 @@ def _rebase(p, old, new):
     return p if rel == os.pardir or rel.startswith(os.pardir + os.sep) else os.path.normpath(os.path.join(new, rel))
 
 
+def script_command(name, *args):
+    """scripts\\<name>.ps1 を、PowerShell(5.1・7)でも cmd でもそのまま動く形で動かすコマンド(rebuild_hint と同じ形)。
+    args は (引数の名前, 値) の並び。値に埋められない文字があれば None(作業フォルダの名前もリポジトリ次第で選べる)。"""
+    script = os.path.join(SCRIPTS, name + '.ps1')
+    if not _hint_value(script) or not all(_hint_value(v) for _, v in args):
+        return None
+    return f'pwsh -NoProfile -ExecutionPolicy Bypass -File "{script}"' + ''.join(f' -{k} "{v}"' for k, v in args)
+
+
 def rebuild_hint(index, root):
     """登録の無い索引を、この PC で作り直して登録するコマンド(作り直しの記録の構成のまま、変わった分だけ)と、
     コマンドに入れられなかった引数の名前。(コマンド, [引数の名前])。コマンドを作れなければ (None, [])。
     PowerShell(5.1・7)でも cmd でもそのまま動く形にする【実測: "…bat" -Root … は PowerShell では構文エラー、
     & "…bat" は cmd で誤り。pwsh -File "…ps1" は 3 つとも通る】。.bat を通さないので、cmd が値を解釈し直すこともない。"""
     name = os.path.basename(index)[:-len('.tsv')] if index.endswith('.tsv') else ''
-    script = os.path.join(SCRIPTS, 'index-project.ps1')
-    if not (_HINT_NAME.fullmatch(name) and _hint_value(script) and _hint_value(root)):
+    cmd = script_command('index-project', ('Root', root))
+    if not (_HINT_NAME.fullmatch(name) and cmd):
         return None, []
     rec = recipe_of(index)
     rec = rec if isinstance(rec, dict) else {}
@@ -216,13 +225,26 @@ def rebuild_hint(index, root):
         opts.append(f'-Jobs {jobs}')
     if rec.get('alt') is False:
         opts.append('-NoAlt')
-    cmd = f'pwsh -NoProfile -ExecutionPolicy Bypass -File "{script}" -Root "{root}"'
     return ' '.join([cmd] + ([f'-Name {name}'] if name != 'index' else []) + opts + ['-Update']), left
 
 
-# compile_commands.json の中で、ltidx(clang)にコードを読ませうる・引数をファイルから足させる引数(コンパイラのプラグイン、
-# clang の設定ファイル)。作り直しの前に見て、あれば作り直さない。ltidx と同じ読み方で見る(下の unsafe_cdb)
-UNSAFE_ARG = re.compile(r'(?:/clang:|-Xclang=)?(?:-fplugin\b|-fpass-plugin\b|-load$|-plugin$|-add-plugin$|-plugin-arg-|--config\b)')
+# compile_commands.json の中で、ltidx(clang)にコードを読ませうる・引数をファイルから足させる・ファイルを書かせる引数。
+# 作り直しの前に見て、あれば作り直さない。ltidx と同じ読み方で見る(下の unsafe_cdb)。前に付きうるもの: clang-cl の
+# /clang: と -clang:(どちらも効く。/CLANG: は効かない)、-Xclang=【実測: ltidx 0.5.7】
+_PREFIX = r'(?:[/-]clang:|-Xclang=)?'
+# コンパイラのプラグイン、clang の設定ファイル
+UNSAFE_ARG = re.compile(_PREFIX + r'(?:-fplugin\b|-fpass-plugin\b|-load$|-plugin$|-add-plugin$|-plugin-arg-|--config\b)')
+# 書き先を選べるファイルを書かせる引数。ltidx は -o・-MD・-MF・-MJ を(前に何も付かなければ)落とすが、ほかは落とさない
+# 【実測: ltidx 0.5.7 で、次の形はどれも指定した場所にファイルを作った: --serialize-diagnostics・-serialize-diagnostic-file・
+# -header-include-file・-diagnostic-log-file・-dependency-dot・-dependency-file・-stats-file=・-save-stats・
+# -gen-cdb-fragment-path・--write-dependencies・--write-user-dependencies。/clang:-MD・-clang:-MF・-Wp,-MMD,<file> も作った。
+# 前に何も付かない -MD -MF <file>・-o <file>・-MJ <file> は作らなかった】。依存ファイルは -MT で中身の先頭を選べるので、
+# 起動時に実行されるフォルダへ .bat を置かれうる。-fcrash-diagnostics-dir は、clang が落ちたときにソースと再現用のスクリプトを書く
+OUTPUT_ARG = re.compile(_PREFIX + r'(?:--serialize-diagnostics\b|-serialize-diagnostic-file\b|-header-include-file\b|'
+                        r'-diagnostic-log-file\b|-dependency-dot\b|-dependency-file\b|-stats-file\b|-save-stats\b|'
+                        r'-gen-cdb-fragment-path\b|--write-(?:user-)?dependencies\b|-fcrash-diagnostics-dir\b)')
+PREFIXED_DEP = re.compile(r'(?:[/-]clang:|-Xclang=)-M')  # 前に付けた -M…(ltidx が落とさない形)
+PASS_ON = {'-Xclang', '-Xpreprocessor'}  # 次の語を、そのまま clang の中に渡す(-Xclang -MF は ltidx が落とさない)
 WRAPPERS = {'ccache', 'sccache', 'distcc', 'gomacc'}  # 後ろの語がコンパイラ(clang は、その隣の設定ファイルを読む)
 RSP_DEPTH = 32
 
@@ -266,10 +288,12 @@ def _win_tokens(s):
         yield ''.join(tok)
 
 
-# 語に分ける前の絞り込み。見つけたい引数(UNSAFE_ARG と @file)は、どれも下のどれかの文字の並びを含む。語に分けるときに
-# 消えるのは " と \\ だけなので、それらを除いた文字列にどれも無ければ、分けた語にも無い(大きな compile_commands.json の
-# ほとんどのコマンドは、ここで済む【実測: O3DE の 32 MB・6,168 件で、全部を語に分けると 3.0 秒、絞り込むと 0.5 秒】)
-_SUSPECT = ('plugin', '-load', '--config', '@')
+# 語に分ける前の絞り込み。見つけたい引数(UNSAFE_ARG・OUTPUT_ARG・PREFIXED_DEP・PASS_ON・-Wp, と @file)は、どれも下のどれかの
+# 文字の並びを含む。語に分けるときに消えるのは " と \\ だけなので、それらを除いた文字列にどれも無ければ、分けた語にも無い
+# (大きな compile_commands.json のほとんどのコマンドは、ここで済む【実測: O3DE の 32 MB・6,168 件で、全部を語に分けると
+# 3.0 秒、絞り込むと 0.3 秒】)
+_SUSPECT = ('plugin', '-load', '--config', '@', 'serializ', 'header-include', 'diagnostic-log', 'dependenc', 'stats',
+            'cdb-fragment', 'crash-diag', 'clang:-M', 'Xclang', '-Xpreprocessor', '-Wp,')
 _NO_QUOTING = str.maketrans('', '', '"\\')
 
 
@@ -287,47 +311,73 @@ def _rsp_text(path):
     return (data[3:] if data[:3] == b'\xef\xbb\xbf' else data).decode('utf-8', errors='replace')
 
 
-def _unsafe_arg(t):
-    if UNSAFE_ARG.match(t):
+def _unsafe_arg(t, prev):
+    """語 t(前の語は prev)が、コードを読ませる・ファイルを書かせる引数なら、そのわけ。"""
+    if UNSAFE_ARG.match(t) or OUTPUT_ARG.match(t) or PREFIXED_DEP.match(t):
         return t
-    if t.startswith('-Wp,') and any(UNSAFE_ARG.match(p) for p in t.split(',')[1:]):
-        return t
+    if prev in PASS_ON and t.startswith('-M'):
+        return f'{prev} {t}'
+    if t.startswith('-Wp,'):  # -Wp,-MD,<file> のように、, で区切って clang の中に渡す
+        parts = t.split(',')[1:]
+        if any(UNSAFE_ARG.match(p) or OUTPUT_ARG.match(p) or p.startswith('-M') for p in parts):
+            return t
     return None
 
 
-def _unsafe_args(args, cwd, memo, depth=0):
-    """args(引用符を外した語)に、コードを読ませうる引数があれば、その引数。応答ファイル(@file)は中身も見る
-    (CMake の Ninja が include の一覧に、UE が TU ごとの引数に使う)。ltidx は @file を cwd(directory)から探し、
-    応答ファイルの中の @file も追う。無いファイルは引数のまま残す(害は無い)【実測: ltidx 0.5.7】。
-    memo は見たファイルの結果(同じ応答ファイルを何度も読まない。循環も止める)。"""
+class _Refuse(Exception):
+    """応答ファイルを、ltidx と同じように開けると言い切れない(だから中身を確かめられない)。"""
+
+
+def _expand(args, cwd, memo, depth=0):
+    """args(引用符を外した語)の応答ファイル(@file)を、ltidx と同じく中身の語に置き換えた並び(CMake の Ninja が
+    include の一覧に、UE が TU ごとの引数に使う)。ltidx は @file を cwd(directory)から探し、応答ファイルの中の @file も追い、
+    無いファイル・循環したファイルは引数のまま残す(害は無い)【実測: ltidx 0.5.7】。中身を見られないときは _Refuse。
+    置き換えてから並びとして見るのは、応答ファイルの最後の -Xclang が、その次の語に効くため【実測: ltidx 0.5.7】。
+    memo は、読んだファイルの置き換え後の並び(同じ応答ファイルを何度も読まない)。"""
+    out = []
     for t in args:
-        bad = _unsafe_arg(t)
-        if bad:
-            return bad
         if not t.startswith('@') or len(t) == 1:
+            out.append(t)
             continue
         name = t[1:]
         if not os.path.isabs(name) and not cwd:
-            return f'{t} (relative to a "directory" that is not absolute)'
+            raise _Refuse(f'{t} (relative to a "directory" that is not absolute)')
         full = os.path.normpath(os.path.join(cwd or '', name))
         if full.replace('\\', '/').startswith('//'):
-            return f'{t} (network path)'  # UNC は開くだけで資格情報を送りうる(\\?\ で始まるパスも、ここで止める)
+            raise _Refuse(f'{t} (network path)')  # UNC は開くだけで資格情報を送りうる(\\?\ で始まるパスも、ここで止める)
         key = os.path.normcase(full)
         if key not in memo:
-            memo[key] = None  # 読んでいる途中(循環は ltidx が誤りにして、引数のまま残す)
-            if depth >= RSP_DEPTH:
-                memo[key] = f'{t} (response files nested deeper than {RSP_DEPTH})'
-            else:
+            memo[key] = [t]  # 読んでいる途中にまた出てきたら、循環(ltidx は誤りにして、引数のまま残す)
+            try:
+                if depth >= RSP_DEPTH:
+                    raise _Refuse(f'{t} (response files nested deeper than {RSP_DEPTH})')
                 try:
-                    inner = _unsafe_args(_win_tokens(_rsp_text(full)), cwd, memo, depth + 1)
-                    memo[key] = f'{inner} (in {t})' if inner else None
+                    text = _rsp_text(full)
                 except (FileNotFoundError, NotADirectoryError):
-                    pass  # 無い: ltidx も開けない
+                    text = None  # 無い: ltidx も開けない
                 except (OSError, ValueError) as e:
                     if not os.path.isdir(full):  # フォルダは ltidx も開けない。ほかは、読めたら何があるか分からない
-                        memo[key] = f'{t} (cannot read it: {type(e).__name__})'
-        if memo[key]:
-            return memo[key]
+                        raise _Refuse(f'{t} (cannot read it: {type(e).__name__})')
+                    text = None
+                if text is not None:
+                    memo[key] = _expand(_win_tokens(text), cwd, memo, depth + 1)
+            except _Refuse as e:
+                memo[key] = e  # 次に出てきたときも断る
+                raise
+        if isinstance(memo[key], _Refuse):
+            raise memo[key]
+        out.extend(memo[key])
+    return out
+
+
+def _scan(args):
+    """args(応答ファイルを置き換えた語の並び)に、コードを読ませる・ファイルを書かせる引数があれば、そのわけ。"""
+    prev = ''
+    for t in args:
+        bad = _unsafe_arg(t, prev)
+        if bad:
+            return bad
+        prev = t
     return None
 
 
@@ -377,7 +427,7 @@ def unsafe_cdb(cdb):
       ブロック形式)も受ける【実測: ltidx 0.5.7。どれも Python の json は断り、ltidx は -DMARK を効かせた】。
       厳密な JSON として読めないもの・同じキーが 2 度あるものは、安全でないとする(CMake と make-cdb.ps1 の出力は厳密な JSON)
     - command は Windows のコマンドラインの規則で分ける(_win_tokens)。arguments と command の両方があれば両方を見る
-    - 応答ファイルは directory から探して中も見る(_unsafe_args)。コンパイラの隣の設定ファイルも見る(_config_beside)"""
+    - 応答ファイルは directory から探して中身に置き換えて見る(_expand)。コンパイラの隣の設定ファイルも見る(_config_beside)"""
     try:
         with open(os.path.join(cdb, 'compile_commands.json'), 'rb') as f:
             data = f.read()
@@ -392,15 +442,26 @@ def unsafe_cdb(cdb):
         if not isinstance(e, dict):
             continue
         cwd = e.get('directory') if isinstance(e.get('directory'), str) and os.path.isabs(e['directory']) else None
-        bad = None
+        lists = []
         if isinstance(e.get('arguments'), list):  # 文字列でない要素は ltidx が誤りにするか、そのまま文字にする
             args = [str(a).split('\0', 1)[0] for a in e['arguments']]  # ltidx は NUL で切る【実測: ltidx 0.5.7】
-            bad = (_unsafe_args(args, cwd, rsp) if _suspect('\n'.join(args)) else None) or _config_beside(args, cwd, cfg)
-        if not bad and isinstance(e.get('command'), str):
-            s = e['command']
-            bad = (_unsafe_args(_win_tokens(s), cwd, rsp) if _suspect(s) else None) or _config_beside(_win_tokens(s), cwd, cfg)
-        if bad:
-            return bad
+            lists.append((args, '\n'.join(args)))
+        if isinstance(e.get('command'), str):
+            lists.append((None, e['command']))
+        for args, raw in lists:
+            if args is None:  # 語に分けるのは要るところまで(_config_beside は先頭の数語しか見ない)
+                args = list(_win_tokens(raw)) if _suspect(raw) else _win_tokens(raw)
+            if _suspect(raw):
+                try:
+                    args = _expand(args, cwd, rsp)  # 応答ファイルの中のコンパイラも、隣の設定ファイルを読む
+                except _Refuse as err:
+                    return str(err)
+                bad = _scan(args)
+                if bad:
+                    return bad
+            bad = _config_beside(args, cwd, cfg)
+            if bad:
+                return bad
     return None
 
 

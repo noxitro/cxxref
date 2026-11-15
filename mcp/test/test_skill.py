@@ -395,6 +395,33 @@ class TrustTest(unittest.TestCase):
         for c in ok:
             self.assertIsNone(self.au.unsafe_cdb(self.cdb(c.get('entries'), c.get('rsp'), c.get('raw'), c.get('files'))), c)
 
+    def test_unsafe_cdb_refuses_arguments_that_write_files(self):
+        # 書き先を選べるファイルを書かせる引数【実測: ltidx 0.5.7 で、どれも指定した場所にファイルを作った】
+        for cmd in ('clang++ --serialize-diagnostics x.dia a.cpp', 'clang++ -Xclang -serialize-diagnostic-file -Xclang x a.cpp',
+                    'clang++ -H -Xclang -header-include-file -Xclang x a.cpp', 'clang++ -Xclang -diagnostic-log-file -Xclang x a.cpp',
+                    'clang++ -Xclang -dependency-dot -Xclang x a.cpp', 'clang++ -Xclang=-dependency-file -Xclang=x a.cpp',
+                    'clang++ -Xclang -stats-file=x a.cpp', 'clang++ -save-stats=cwd a.cpp', 'clang++ -gen-cdb-fragment-path x a.cpp',
+                    'clang++ --write-dependencies -MF x a.cpp', 'clang++ --write-user-dependencies a.cpp',
+                    'clang++ -fcrash-diagnostics-dir=x a.cpp', 'clang++ -Wp,-MD,x.d a.cpp', 'clang++ -Wp,-MMD,x.d a.cpp',
+                    'clang-cl /clang:-MD /clang:-MFx.d a.cpp', 'clang-cl -clang:-MD a.cpp',
+                    'clang-cl -clang:--serialize-diagnostics -clang:x a.cpp', 'clang-cl -clang:-fplugin=p.dll a.cpp',
+                    'clang++ -Xclang -MF -Xclang x a.cpp', 'clang++ -Xpreprocessor -MD a.cpp'):
+            self.assertIsNotNone(self.au.unsafe_cdb(self.cdb([{'command': cmd}])), cmd)
+        # 応答ファイルの最後の -Xclang は、その次の語に効く(応答ファイルを置き換えてから並びとして見る)
+        self.assertIsNotNone(self.au.unsafe_cdb(self.cdb([{'command': 'clang++ @inc.rsp -MF x a.cpp'}], rsp='-DA -Xclang')))
+        # ltidx が落とす形(前に何も付かない -o・-MD・-MF・-MJ)と MSVC の出力先は、普通のプロジェクトにあるので止めない
+        for cmd in ('clang++ -MD -MT a.o -MF a.d -c a.cpp -o a.o', 'clang++ -MMD -MFa.d -MJ a.json -c a.cpp',
+                    'cl.exe /nologo /MD /Fo:a.obj /Fdx.pdb /Fpa.pch /Yupch.h /showIncludes /c a.cpp',
+                    'clang++ -Xclang -fno-pch-timestamp -ftime-trace -c a.cpp'):
+            self.assertIsNone(self.au.unsafe_cdb(self.cdb([{'command': cmd}])), cmd)
+
+    def test_script_command(self):
+        cmd = self.au.script_command('index-project', ('Root', self.repo))
+        script = os.path.join(ROOT, 'scripts', 'index-project.ps1')
+        self.assertEqual(cmd, f'pwsh -NoProfile -ExecutionPolicy Bypass -File "{script}" -Root "{self.repo}"')
+        self.assertIsNone(self.au.script_command('index-project', ('Root', 'C:\\a$(calc)')))
+        self.assertIsNone(self.au.script_command('index-project', ('Root', 'C:\\')))  # \ で終わると 5.1 は引用符を消す
+
     def test_unsafe_cdb_reads_each_response_file_once(self):
         # CMake の Ninja は、ターゲットの全 TU に同じ応答ファイルを付ける。TU の数だけ読み直さない
         d = self.cdb([{'command': 'clang++ @inc.rsp a.cpp', 'file': f'{i}.cpp'} for i in range(50)], rsp='-Iinc')

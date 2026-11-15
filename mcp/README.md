@@ -28,7 +28,7 @@ code-ref-index-mcp.cmd [--root <ソースのルート>] [--index <索引.tsv>] [
 - `--root` を省くと、起動されたときのカレントフォルダから親へさかのぼり、`.index` のある最初のフォルダをルートにします(`.git` と同じ探し方)。Copilot CLI は作業フォルダで起動するので、ソースのルートより下で起動しても、ルートの索引を引きます。そのときは出力の先頭に `root: <ルート> (the index is in this parent folder ...)` と出し、パスはルートからの相対で返します。探すのは呼び出しのたびなので、サーバーの起動後に作った索引も拾います
   - ツールの引数 `root`(作業中のフォルダの絶対パス)を渡されたときは、そこからさかのぼって探します
   - プラグインとして起動されると、作業フォルダはプラグインの場所になり、MCP の roots も空です(Copilot CLI 1.0.105 で確かめました)。そのとき(作業フォルダが環境変数 `PLUGIN_ROOT` と同じとき)は、`root` が渡されなければ、Copilot CLI のセッションの記録(`<COPILOT_HOME か ~\.copilot>\session-state\<COPILOT_AGENT_SESSION_ID>\workspace.yaml` の `cwd`)から作業フォルダを取ります。この記録は公開の仕様ではないので、プラグインの rule は `root` を渡すようモデルに指示しています
-  - 索引が見つからなければ、索引の作り方(`scripts\index-project.bat` と、ltidx が無ければ `scripts\get-ltidx.bat`)を、このサーバーの隣の絶対パスで添えます
+  - 索引が見つからなければ、索引の作り方(`scripts\index-project.ps1` と、ltidx が無ければ `scripts\get-ltidx.ps1`)を、このサーバーの隣の絶対パスで添えます。`pwsh -NoProfile -ExecutionPolicy Bypass -File "…"` の形なので、PowerShell でも cmd でもそのまま動きます(`"…\index-project.bat" -Root …` の形は、PowerShell では構文エラーになります)
 - `--index` を省くと、`<ルート>\.index` の中の索引本体(構成ごとの `<名前>.tsv`)をすべてまとめて引きます
 - 環境変数 `CRI_ROOT` と `CRI_INDEX` でも指定できます
 - `--auto-update-wait`(既定 10 秒)と `--no-auto-update` は、下の「索引の自動更新」を参照してください。環境変数 `CRI_AUTO_UPDATE_WAIT`・`CRI_AUTO_UPDATE=0` でも指定できます
