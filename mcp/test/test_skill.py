@@ -521,6 +521,33 @@ class CliTest(unittest.TestCase):
         self.assertNotIn('== source around', none)
         self.assertTrue(none.endswith(server.CONTEXT_SKIPPED), none[-300:])
 
+    def test_context_prefers_compacting_low_value_sections(self):
+        # 前後の行が入りきらないときは、報告しない節(コメントの中の一致など)を件数にまとめた形で、前後の行を全部出す
+        # 【実測: v14j。全文の形に残りの分だけ足すと、索引に無い一致の節が残り、8 ファイル中 3 つの前後の行が入らなかった】
+        sys.path.insert(0, os.path.join(ROOT, 'mcp'))
+        try:
+            import server
+        finally:
+            sys.path.pop(0)
+        self.add_callers(6)
+        n = 120
+        with open(os.path.join(self.root, 'src', 'notes.cpp'), 'w', encoding='utf-8', newline='\n') as f:
+            f.writelines(f'// Run is called here too, note number {i}\n' for i in range(n))
+        with open(os.path.join(self.root, '.index', 'index.tsv.skip.tsv'), 'a', encoding='utf-8', newline='\n') as f:
+            f.writelines(f'src/notes.cpp\tcomment\t{i + 1}:1\t{i + 1}:44\n' for i in range(n))
+        plain = server.call_tool(server.Config(self.root, None, None, resident=False), 'refs', {'name': 'Run'})[1]
+        self.assertIn('note number 119', plain)  # 全文では、コメントの中の一致を 1 行ずつ並べる
+        max_bytes = len(plain.encode('utf-8')) + 800 + 1000  # 全文の形では、前後の行の残りが足りない
+        cfg = server.Config(self.root, None, None, max_bytes=max_bytes, resident=False)
+        code, text = server.call_tool(cfg, 'refs', {'name': 'Run', 'context': 1})
+        self.assertEqual(code, 0, text)
+        self.assertLessEqual(len(text.encode('utf-8')), max_bytes)
+        self.assertEqual(text.count('\n--- src/'), 7, text)  # 呼び出しのある 7 ファイルとも
+        self.assertNotIn(server.CONTEXT_LEFT, text)
+        self.assertNotIn('note number 119', text)  # コメントの中の一致は件数にまとめた
+        calls = text[text.index('== calls'):].split('\n== ')[0]
+        self.assertEqual(calls.count('| Run();'), 7)
+
     def test_check(self):
         code, text = self.run_cli('check', 'src/a.cpp:4')
         self.assertEqual(code, 0, text)
