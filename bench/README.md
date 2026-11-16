@@ -94,6 +94,21 @@ python -I ratio13.py --round v13 --tasks local/v13-tasks-stage2-a.json --conds A
 python -I trace13.py v13q-C2-createinstance-Q-r4
 ```
 
+### 大きなコードベース(`run_big.py`)と、観点の指示つきの問題(`score_sem.py`)
+
+O3DE・UE5 のように索引が数十 GB ある写しでは、`run13.py` のように回ごとに索引を写せません。`run_big.py` は、写しに置いた索引(`<写し>\.index`)をそのまま使って 1 問を流します。条件は A(rg だけ。回の間だけ索引を写しの外に退かす)・V(MCP 版)・W(skill 版)で、中身は `run13.py` と同じです。記録も同じ `runs13\index.jsonl` に入るので、`ratio13.py` がそのまま使えます。
+
+- `git clean` はしません(追跡していない `.index`・`.cdb` が消えるため)。回の前の `git status` を基準に、増えた変更だけを戻します。写しに残っている前の計測の設定(`.mcp.json`・`.github` の指示)は、回の間だけ退かして戻します
+- 索引を引いた呼び出しの秒数(`cli_sec`)も記録しますが、skill 版の長いコマンドは、シェルの道具が約 30 秒で一度返すので、その値になります(UE5。本当の時間は CLI を直接呼んで測る)
+- `tasks-sem-o3de.json` は、5 つの観点(継承関係・基底呼び出し・virtual dispatch の可能性・条件コンパイル・テンプレートの実体化)を調べる指示と、答えの形(`path:line [種類]`)の指定を足した問題です。S-OV1・S-OV2 は同じ名前の仮想関数の 2 系統(`ComputeFragmentation`)、S-O2・S-O3 は `tasks-o3de.json` の O2・O3 に同じ指示を足したものです。正解には、行ごとの種類(decl・override・virtual-call・call)と印(inactive・template)が入っています。rg と読解で作り、索引は使っていません
+- `score_sem.py` は、回答の行と種類を正解と突き合わせます(正解の行の割合、種類の合っていた割合、inactive・template の行を挙げた数と印を付けた数)。`path:34, 98` のようなまとめ書きも拾います
+
+```powershell
+python -I run_big.py --ws <O3DE の写し> --tasks tasks-sem-o3de.json --task S-OV1 --cond W --rep 1 --round <名前>
+python -I score_sem.py --round <名前> --tasks tasks-sem-o3de.json --runs
+python -I ratio13.py --round <名前> --conds A,V,W --metric haiku_usd --only S-O
+```
+
 ## rg との突き合わせ(`parity.py`)
 
 Copilot を使わずに、「ふつうのエージェントが rg で見つける行が、cxxref の結果のどこにも出ない」ことが無いかを確かめます。名前ごとに `rg -w -F <名前>` の一致行と、`ltq refs` の 3 つの形(全文・短い形の 1 段目・2 段目)と、MCP サーバーが実際に返す文面(`mcp/server.py` の `run_ltq`)、漏れのない一覧(`ltq refs --all`)、MCP の文面にそれが指す一覧のファイルを全部足したもの(`mcp+file`)、そのうち丸ごと読める大きさのファイルだけを足したもの(`mcp+read`)を突き合わせ、rg の行を「1 行ずつ出ている(listed)」「フォルダの件数に入っている(folded)」「上の階層の件数に入っている(area)」「どこにも出ていない(hidden)」「全文にも無い(missing)」に分けます。hidden と missing が 0 であること、`all` と `mcp+file` では全部の行が listed であること、MCP の文面と一覧のファイルの両方に出ている行が 0 であること(合わせて 1 回ずつ)が目標です。rg は PATH の `rg.exe` か、Copilot CLI に同梱のものを使います。
