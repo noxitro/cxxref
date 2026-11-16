@@ -179,6 +179,30 @@ class LtidxTest(unittest.TestCase):
                 self.assertEqual(self.tus()['a.cpp'][1], '1', self.tus()['a.cpp'])
                 self.assertTrue(self.has('Run', 'call', 'a.cpp:2:36'))
 
+    def test_missing_compile_directory(self):
+        # compile_commands.json のビルドフォルダが無い TU(他所から持ってきたもの・フォルダを消した後)は、その TU だけを
+        # 失敗にする。前は、ClangTool がそこへ移れずにプロセスごと止まり、ほかの TU の索引も残らなかった
+        self.write('a.cpp', 'void A();\nvoid UseA() { A(); }\n')
+        self.write('b.cpp', 'void B();\nvoid UseB() { B(); }\n')
+        d = self.root.replace('\\', '/')
+        with open(os.path.join(self.root, 'compile_commands.json'), 'w', encoding='utf-8') as f:
+            json.dump([{'directory': f'{d}/gone', 'file': f'{d}/a.cpp', 'arguments': ['cl.exe', '/c', f'{d}/a.cpp']},
+                       {'directory': d, 'file': f'{d}/b.cpp', 'arguments': ['cl.exe', '/c', 'b.cpp']}], f)
+        rc, err = self.run_ltidx()
+        self.assertEqual(rc, 1, err)  # エラーのある TU があるときの終了コード(索引はできている)
+        tus = self.tus()
+        self.assertEqual((tus['a.cpp'][1], tus['b.cpp'][1]), ('0', '1'), err)
+        self.assertIn('compile directory does not exist', tus['a.cpp'][5])
+        self.assertIn('compile directory does not exist', err)  # ログにも理由が出る
+        self.assertTrue(self.has('B', 'call', 'b.cpp:2:15', caller='UseB'))
+        # フォルダができれば、-update がその TU だけを解析し直して通る
+        os.makedirs(os.path.join(self.root, 'gone'))
+        rc, err = self.run_ltidx('-update')
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.tus()['a.cpp'][1], '1')
+        self.assertTrue(self.has('A', 'call', 'a.cpp:2:15', caller='UseA'))
+        self.assertTrue(self.has('B', 'call', 'b.cpp:2:15', caller='UseB'))
+
     def test_cpp98_code(self):
         # C++11 より前の書き方(動的例外指定・auto_ptr・binary_function・bind2nd・register・`> >`)の TU が通り、
         # override の無い上書きと、その呼び出しが載る。古い VS のプロジェクトのように /std を付けない形
