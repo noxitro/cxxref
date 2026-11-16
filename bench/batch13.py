@@ -2,7 +2,7 @@
 回を外側にして、どこで止まっても条件と問題の間で回数が揃うようにする。並べては流さない。
 
 usage: python -I batch13.py --tasks v13/tasks-stage1.json --conds A,P --reps 5 [--round v13] [--model ...] [--provider ...]
-       [--only ID,ID] [--stop-file <path>](このファイルがあれば、次の回の前に止まる)
+       [--only ID,ID] [--rotate] [--stop-file <path>](このファイルがあれば、次の回の前に止まる)
 """
 import argparse, json, os, subprocess, sys
 
@@ -17,6 +17,7 @@ ap.add_argument('--model', default='gpt-6-luna')
 ap.add_argument('--provider', default='')
 ap.add_argument('--only', default='')
 ap.add_argument('--stop-file', default=os.path.join(BENCH, 'runs13', 'STOP'))
+ap.add_argument('--rotate', action='store_true', help='条件の順番を回ごとに 1 つずつずらす(前の回のプロンプトのキャッシュを読める順番が、条件で偏らないように)')
 a = ap.parse_args()
 
 tasks = [t['id'] for t in json.load(open(os.path.join(BENCH, a.tasks), encoding='utf-8'))]
@@ -30,8 +31,11 @@ if os.path.exists(idx):
         if r.get('exit') == 0:
             done.add(r['name'])
 for rep in range(1, a.reps + 1):
+    conds = a.conds.split(',')
+    if a.rotate:
+        conds = conds[(rep - 1) % len(conds):] + conds[:(rep - 1) % len(conds)]
     for t in tasks:
-        for c in a.conds.split(','):
+        for c in conds:
             name = f'{a.round}-{t}-{c}-r{rep}'
             if name in done:
                 continue

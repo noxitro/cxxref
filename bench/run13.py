@@ -13,6 +13,10 @@ usage: python -I run13.py --tasks v13/tasks-stage1.json --task S1-req-usage --co
   R: skill 版。A の空の COPILOT_HOME に、このリポジトリの今のプラグインから MCP の定義(mcp.json)と拡張を除いた写し
      (v13/plugin-R。skill の cxxref と、それが呼ぶ mcp/cxxref_cli.py)を --plugin-dir で足す。常にモデルに送るのは
      skill の説明文だけ。索引は今の ltidx で作ったもの(codebase-a.json の index_r)、自動更新もその ltidx
+  V: MCP 版。A の空の COPILOT_HOME に、タグ v0.5.9(MCP の形の最後の版)のプラグインから拡張を除いた写し(v13/plugin-V。
+     mcp.json と MCP サーバー)をインストール済みとして足す。索引のあるリポジトリには、/cxxref-enable on(既定のローカル)が
+     置くのと同じ使い方の指示(.github/instructions/cxxref.instructions.md)を置く。索引・ltidx・索引の更新日時の扱いは
+     R と同じ(R と同じ時期に交互に流して、形の違いだけを比べる)
 
 作業フォルダは git で管理した写し。実行の前と後に、追跡しているファイルを戻し、増えたファイルを消す(git checkout と git clean)。
 回答の後の差分は runs13/<名前>.diff に残す。採点は score13.py。
@@ -54,14 +58,48 @@ PLUGIN_R = os.path.join(V13, 'plugin-R')
 PLUGIN_R_PARTS = ['plugin.json', 'com.github.copilot/hooks', 'skills', 'mcp', 'query', 'scripts', 'LICENSE']
 
 
-def install_plugin_r(home):
-    """COPILOT_HOME に、条件 R の写しをインストール済みのプラグインとして登録する。--plugin-dir で足したプラグインは
-    hooks(hooks.json)が読まれない【実測: 1.0.109。hook のイベントが出なかった】ので、インストール済みの形にする。"""
-    entry = {'name': 'cxxref', 'marketplace': 'cxxref-bench', 'version': json.load(open(os.path.join(PLUGIN_R, 'plugin.json'), encoding='utf-8'))['version'],
-             'installed_at': datetime.now(timezone.utc).isoformat(), 'cache_path': PLUGIN_R,
-             'installed_source': {'source': 'local', 'path': PLUGIN_R}, 'enabled': True}
+PLUGIN_V = os.path.join(V13, 'plugin-V')
+PLUGIN_V_TAG = 'v0.5.9'  # MCP の形の最後の版
+# 条件 V のプラグインの写しに入れるもの(R と同じく、拡張 com.github.copilot/extensions は入れない)
+PLUGIN_V_PARTS = ['plugin.json', 'mcp.json', 'mcp', 'query', 'scripts', 'LICENSE']
+
+
+def install_plugin_r(home, plugin=None):
+    """COPILOT_HOME に、条件 R(plugin を渡せばその写し)をインストール済みのプラグインとして登録する。--plugin-dir で足した
+    プラグインは hooks(hooks.json)が読まれない【実測: 1.0.109。hook のイベントが出なかった】ので、インストール済みの形にする。"""
+    plugin = plugin or PLUGIN_R
+    entry = {'name': 'cxxref', 'marketplace': 'cxxref-bench', 'version': json.load(open(os.path.join(plugin, 'plugin.json'), encoding='utf-8'))['version'],
+             'installed_at': datetime.now(timezone.utc).isoformat(), 'cache_path': plugin,
+             'installed_source': {'source': 'local', 'path': plugin}, 'enabled': True}
     with open(os.path.join(home, 'config.json'), 'w', encoding='utf-8') as f:
         json.dump({'installedPlugins': [entry]}, f, ensure_ascii=False, indent=2)
+
+
+def make_plugin_v():
+    """タグ v0.5.9 のファイルから、条件 V のプラグインの写しを作る(タグは変わらないので、あれば作り直さない)。"""
+    import io, tarfile
+    mark = os.path.join(PLUGIN_V, '.tag')
+    if os.path.exists(mark) and open(mark, encoding='utf-8').read().strip() == PLUGIN_V_TAG:
+        return
+    if os.path.exists(PLUGIN_V):
+        shutil.rmtree(PLUGIN_V)
+    os.makedirs(PLUGIN_V)
+    tar = subprocess.run(['git', '-C', REPO, 'archive', '--format=tar', PLUGIN_V_TAG, '--'] + PLUGIN_V_PARTS, capture_output=True, check=True).stdout
+    with tarfile.open(fileobj=io.BytesIO(tar)) as t:
+        t.extractall(PLUGIN_V, members=[m for m in t.getmembers() if '/test/' not in '/' + m.name + '/'], filter='data')
+    with open(mark, 'w', encoding='utf-8') as f:
+        f.write(PLUGIN_V_TAG)
+
+
+def place_instructions_v(ws):
+    """使い方の指示を、v0.5.9 の /cxxref-enable on(ローカル)と同じ形で置く(scripts/setup-instructions.ps1 の Add-Local。
+    git の除外(.git/info/exclude)には触れない: 写しは .github を無視していて、回の前後に reset_ws が消す)。"""
+    body = open(os.path.join(PLUGIN_V, 'scripts', 'cxxref-instructions.md'), encoding='utf-8-sig').read().strip().replace('\r\n', '\n')
+    mark = '<!-- cxxref:local (cxxref が管理。git から外してある。消すときは /cxxref-enable off か setup-instructions.bat で) -->'
+    d = os.path.join(ws, '.github', 'instructions')
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, 'cxxref.instructions.md'), 'w', encoding='utf-8', newline='\n') as f:
+        f.write('---\napplyTo: "**"\n---\n' + mark + '\n' + body + '\n')
 
 
 def make_plugin_r():
@@ -214,6 +252,8 @@ def collect(home, usage_file):
         c.close()
         rec['calls'] = len(u)
         rec['first_input'] = u[0][0] if u else 0
+        # 1 回目の呼び出しのキャッシュ読み(前の回が書いた共通の前置きを読めたか。条件の順番による費用の差を見分ける)
+        rec['first_cache_read'] = (u[0][1] or 0) if u else 0
         rec['input'] = sum(x[0] or 0 for x in u)
         rec['cache_read'] = sum(x[1] or 0 for x in u)
         rec['cache_write'] = sum(x[2] or 0 for x in u)
@@ -231,7 +271,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--tasks', required=True)
     ap.add_argument('--task', required=True)
-    ap.add_argument('--cond', required=True, choices=['A', 'P', 'M', 'X', 'Q', 'R'])
+    ap.add_argument('--cond', required=True, choices=['A', 'P', 'M', 'X', 'Q', 'R', 'V'])
     ap.add_argument('--rep', type=int, default=1)
     ap.add_argument('--round', default='v13')
     ap.add_argument('--model', default='gpt-6-luna')
@@ -248,16 +288,21 @@ def main():
     os.makedirs(RUNS, exist_ok=True)
 
     reset_ws(w)
-    src = w.get('index_r') if a.cond == 'R' else None
-    touched = {}  # 条件 R で更新日時を今にした索引のファイル(stash_index が元に戻す)
-    if a.cond == 'R' and w.get('index') and not src:
-        raise SystemExit('condition R needs index_r in bench/local/codebase-a.json (an index built with the current ltidx)')
-    if a.cond in ('P', 'M', 'X', 'Q', 'R') and w.get('index'):
+    src = w.get('index_r') if a.cond in ('R', 'V') else None
+    touched = {}  # 条件 R・V で更新日時を今にした索引のファイル(stash_index が元に戻す)
+    if a.cond in ('R', 'V') and w.get('index') and not src:
+        raise SystemExit('conditions R and V need index_r in bench/local/codebase-a.json (an index built with the current ltidx)')
+    if a.cond in ('P', 'M', 'X', 'Q', 'R', 'V') and w.get('index'):
         place_index(w, src)
-    if a.cond == 'R' and w.get('index'):  # 利用者が index-project で作ったのと同じく、作り直しの記録を登録する
-        sys.path.insert(0, os.path.join(REPO, 'mcp'))
-        import autoupdate
-        autoupdate.trust_recipe(os.path.join(ws, '.index', 'index.tsv'))
+    if a.cond == 'V':
+        make_plugin_v()
+        if w.get('index'):
+            place_instructions_v(ws)
+    if a.cond in ('R', 'V') and w.get('index'):
+        if a.cond == 'R':  # 利用者が index-project で作ったのと同じく、作り直しの記録を登録する(v0.5.9 にはこの登録が無い)
+            sys.path.insert(0, os.path.join(REPO, 'mcp'))
+            import autoupdate
+            autoupdate.trust_recipe(os.path.join(ws, '.index', 'index.tsv'))
         # 索引は HEAD の写しから作った(中身は同じ)が、前の回の後始末(git checkout)でソースの更新日時が索引より新しくなり、
         # 毎回「古い」と見なされて作り直しを待っていた(v14h の R の 87 回中 86 回)。索引の更新日時を今にして、
         # 編集の前は新しい索引、という実際の使い方に揃える
@@ -292,7 +337,9 @@ def main():
     if a.cond == 'R':
         make_plugin_r()
         install_plugin_r(home)
-    env = dict(os.environ, COPILOT_HOME=home, LTIDX={'Q': LTIDX_NEXT, 'R': LTIDX_R}.get(a.cond, LTIDX))
+    if a.cond == 'V':
+        install_plugin_r(home, PLUGIN_V)
+    env = dict(os.environ, COPILOT_HOME=home, LTIDX={'Q': LTIDX_NEXT, 'R': LTIDX_R, 'V': LTIDX_R}.get(a.cond, LTIDX))
     for v in ('COPILOT_PROVIDER_TYPE', 'COPILOT_PROVIDER_BASE_URL', 'COPILOT_PROVIDER_API_KEY', 'COPILOT_PROVIDER_API_KEY_COMMAND',
               'COPILOT_MODEL', 'COPILOT_PROVIDER_MODEL_ID', 'COPILOT_PROVIDER_WIRE_MODEL'):
         env.pop(v, None)
