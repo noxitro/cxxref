@@ -70,9 +70,12 @@ if ((Split-Path $Project -Leaf) -eq 'CMakeLists.txt') {
     $src = Split-Path $Project
     $build = Join-Path $Out 'cmake'
     $arch = if ($Platform -eq 'Win32') { 'x86' } else { $Platform }
-    # cmake と ninja はフルパスで渡す(cmd の 1 行の %PATH% は vcvarsall の前に展開されるので、PATH は書き換えない)
+    # cmake と ninja はフルパスで渡す(cmd の 1 行の %PATH% は vcvarsall の前に展開されるので、PATH は書き換えない)。
+    # CMake 4 は cmake_minimum_required(VERSION 3.5 未満) の古いプロジェクトの構成を断るので、CMAKE_POLICY_VERSION_MINIMUM で
+    # 3.5 として読ませる(3.5 以上を求めるプロジェクトには効かない。CMake 3 は知らない変数として警告するだけ)。
+    # -CMakeArgs で同じ変数を渡せば、後ろにあるそちらが勝つ
     $cfg = "`"$cm\CMake\bin\cmake.exe`" -S `"$src`" -B `"$build`" -G Ninja `"-DCMAKE_MAKE_PROGRAM=$cm\Ninja\ninja.exe`"" +
-           " -DCMAKE_BUILD_TYPE=$Configuration -DCMAKE_EXPORT_COMPILE_COMMANDS=ON $CMakeArgs"
+           " -DCMAKE_BUILD_TYPE=$Configuration -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_POLICY_VERSION_MINIMUM=3.5 $CMakeArgs"
     # vcvarsall.bat は中で vswhere.exe を PATH から呼ぶ
     $env:PATH = "$(Split-Path $vswhere);$env:PATH"
     cmd /c "call `"$vs\VC\Auxiliary\Build\vcvarsall.bat`" $arch >nul && $cfg"

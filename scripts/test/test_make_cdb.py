@@ -188,6 +188,13 @@ class MakeCdbTest(unittest.TestCase):
         self.assertIn('-DA=1', cmd)
         self.assertIn('-DB=2', cmd)  # 2 つ目の引数も CMake に届く
 
+    def test_cmake_old_minimum_version(self):
+        # C++98 の頃のプロジェクトは cmake_minimum_required(VERSION 2.x) のものが多い。VS 同梱の CMake 4 でも構成できる
+        self.write('CMakeLists.txt', 'cmake_minimum_required(VERSION 2.6)\nproject(p CXX)\nadd_library(p STATIC a.cpp)\n')
+        out = os.path.join(self.root, 'out-cmake')
+        self.ps('make-cdb.ps1', '-Root', self.root, '-Out', out)
+        self.assertEqual(set(self.cdb(out)), {'a.cpp'})
+
     @unittest.skipUnless(os.path.exists(LTIDX), 'ltidx.exe is not built')
     def test_index_project_makes_cdb(self):
         # compile_commands.json が無いルートでも、index-project だけで索引ができる
