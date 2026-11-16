@@ -179,6 +179,34 @@ class LtidxTest(unittest.TestCase):
                 self.assertEqual(self.tus()['a.cpp'][1], '1', self.tus()['a.cpp'])
                 self.assertTrue(self.has('Run', 'call', 'a.cpp:2:36'))
 
+    def test_cpp98_code(self):
+        # C++11 より前の書き方(動的例外指定・auto_ptr・binary_function・bind2nd・register・`> >`)の TU が通り、
+        # override の無い上書きと、その呼び出しが載る。古い VS のプロジェクトのように /std を付けない形
+        # (MSVC の STL は C++14 より前を受けないので、gcc 形式の -std=c++98 は TU が通らない)
+        self.write('a.cpp', '#include <memory>\n#include <functional>\n#include <algorithm>\n#include <map>\n'
+                   '#include <vector>\n#include <new>\n'
+                   'struct Shape { virtual ~Shape() throw() {} virtual void Scale(double) throw(std::bad_alloc); };\n'
+                   'struct Circle : Shape { void Scale(double) throw(std::bad_alloc); };\n'
+                   'struct Less : std::binary_function<int, int, bool> { bool operator()(int, int) const; };\n'
+                   'void Circle::Scale(double k) throw(std::bad_alloc) { register double r = k; (void)r; }\n'
+                   'void Use() {\n'
+                   '  std::auto_ptr<Shape> p(new Circle);\n'
+                   '  p->Scale(2.0);\n'
+                   '  std::map<int, std::vector<int> > m;\n'
+                   '  std::vector<int>::iterator it = std::find_if(m[0].begin(), m[0].end(),'
+                   ' std::bind2nd(std::greater<int>(), 3));\n'
+                   '  std::sort(m[0].begin(), it, Less());\n'
+                   '}\n')
+        d = self.root.replace('\\', '/')
+        with open(os.path.join(self.root, 'compile_commands.json'), 'w', encoding='utf-8') as f:
+            json.dump([{'directory': d, 'file': f'{d}/a.cpp', 'arguments': ['cl.exe', '/c', '/EHsc', 'a.cpp']}], f)
+        rc, err = self.run_ltidx()
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.tus()['a.cpp'][1], '1', self.tus()['a.cpp'])
+        self.assertTrue(self.has('Circle::Scale', 'override', 'a.cpp:8:30'))
+        self.assertTrue(self.has('Shape::Scale', 'call-dynamic', 'a.cpp:13:6', caller='Use'))
+        self.assertTrue(self.has('Less', 'ref', 'a.cpp:16:31', caller='Use'))
+
     def test_compile_arguments_write_no_files(self):
         # compile_commands.json はリポジトリ次第で選べる。そこに書かれた引数で、ltidx に書き先を選べるファイルを書かせない
         # (clang の中の出力先は scrubInvocation が、ドライバーの段のものは dropDriverWrites が止める)。

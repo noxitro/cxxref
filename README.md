@@ -228,8 +228,8 @@ MCP サーバーは、プラグインには入れていません。ツールの�
 |---|---|---|
 | ltq(`query\test`) | 合成した小さな索引で、構成の統合・行の付け直し・仮想関数・Shift_JIS のソースを確かめる | 不要 |
 | MCP サーバー(`mcp\test`) | `server.py` を起動し、`initialize`・`tools/list`・`refs`・`check` を JSON-RPC で呼ぶ | 不要 |
-| make-cdb・index-project(`scripts\test`) | 一時フォルダに作った `.vcxproj`・`.slnx`・`.sln`・CMake のプロジェクトから `compile_commands.json` を作り、`index-project` だけで索引ができることを確かめる | 不要(Visual Studio の C++ ツールが要る。index-project の確認には `ltidx.exe` も要る) |
-| ltidx(`indexer\test`) | サンプルを索引にして期待値と比べる。Shift_JIS・UTF-16 のソース、仮想関数の上書き、`-update` と全体の作り直しの一致 | ビルド済みの `ltidx.exe` が要る(無ければ飛ばす) |
+| make-cdb・index-project(`scripts\test`) | 一時フォルダに作った `.vcxproj`・`.slnx`・`.sln`・CMake のプロジェクト(`cmake_minimum_required(VERSION 2.6)` の古いものを含む)から `compile_commands.json` を作り、`index-project` だけで索引ができることを確かめる | 不要(Visual Studio の C++ ツールが要る。index-project の確認には `ltidx.exe` も要る) |
+| ltidx(`indexer\test`) | サンプルを索引にして期待値と比べる。Shift_JIS・UTF-16 のソース、仮想関数の上書き、C++11 より前の書き方、`-update` と全体の作り直しの一致 | ビルド済みの `ltidx.exe` が要る(無ければ飛ばす) |
 
 GitHub Actions でも、push と pull request のたびに同じテストを流します(ltidx は LLVM の公式配布物でビルドします)。
 
