@@ -28,11 +28,15 @@
 #include "clang/Lex/MacroArgs.h"
 #include "clang/Lex/PPCallbacks.h"
 #include "clang/Lex/Preprocessor.h"
+#include "clang/Options/Options.h"
 #include "clang/Tooling/ArgumentsAdjusters.h"
 #include "clang/Tooling/CompilationDatabase.h"
 #include "clang/Tooling/Tooling.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/StringExtras.h"
+#include "llvm/Option/Arg.h"
+#include "llvm/Option/ArgList.h"
+#include "llvm/Option/OptTable.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/ConvertUTF.h"
 #include "llvm/Support/Endian.h"
@@ -98,6 +102,132 @@ bool isClDriver(const tooling::CommandLineArguments &A) {
   std::vector<const char *> Argv;
   for (const auto &S : A) Argv.push_back(S.c_str());
   return driver::IsClangCL(driver::getDriverMode(A[0], llvm::ArrayRef<const char *>(Argv).drop_front()));
+}
+
+// Argv をドライバーのオプション表(Vis の見える範囲)で読み、読んだ引数ごとに Fn(引数, Argv の始め, 終わり) を呼ぶ。
+// 引数の占める範囲は、次の引数の始めまで(値を別の語に取る -MJ <file> は 2 語)
+template <class Fn> void forEachDriverArg(llvm::ArrayRef<const char *> Argv, unsigned Vis, Fn F) {
+  unsigned MissingIndex = 0, MissingCount = 0;
+  llvm::opt::InputArgList L = getDriverOptTable().ParseArgs(Argv, MissingIndex, MissingCount, llvm::opt::Visibility(Vis));
+  std::vector<const llvm::opt::Arg *> Xs;
+  for (const llvm::opt::Arg *X : L)
+    if (X) Xs.push_back(X);
+  for (size_t I = 0; I < Xs.size(); ++I)
+    F(*Xs[I], Xs[I]->getIndex(), I + 1 < Xs.size() ? Xs[I + 1]->getIndex() : unsigned(Argv.size()));
+}
+
+// ドライバーの段(clang の中に渡す前)で書くファイルの引数を、2 つの読み方で見つける。ここで書かれるので
+// scrubInvocation では止まらない
+// - ドライバーの読み方(そのモードで見えるオプション): -MJ <file>・-gen-cdb-fragment-path <dir>。コマンドを組み立てる
+//   ときに、コンパイルの記録を書く
+// - 診断の設定の読み方(clang の中のオプションも見える): --serialize-diagnostics・-serialize-diagnostic-file・
+//   -diagnostic-log-file。ClangTool は、コマンドを読む段の診断を、コマンドからこの読み方で作った設定で出すので、
+//   そこで書く(clang の中のオプションはドライバーとしては知らない引数の誤りになるが、ファイルは先に書かれる)
+// 【実測: ltidx 0.5.7 で、どれもファイルを作った(-MJ は /clang:-MJ のとき)。clang の中で書くものを空にした ltidx でも、
+// 診断のものはファイルを作った。前に何も付かない -MJ は、ClangTool が落とすので作らなかった】
+// --config・--config-system-dir=・--config-user-dir= も外す(設定ファイルは -MJ などを足せる。コンパイラの隣の既定の
+// 設定ファイルは、MSYS2 の clang などが標準ライブラリを決めるのに使うので読むまま)
+bool driverWritesFile(const llvm::opt::Arg &X) {
+  unsigned Id = X.getOption().getUnaliasedOption().getID();
+  return Id == options::OPT_MJ || Id == options::OPT_gen_cdb_fragment_path || Id == options::OPT_config ||
+         Id == options::OPT_config_system_dir_EQ || Id == options::OPT_config_user_dir_EQ;
+}
+
+// 値(最後の 1 語)を、ドライバーが引数として読み直すオプション(-Xarch_host -MJx など)
+bool wrapsDriverArg(const llvm::opt::Arg &X) {
+  unsigned Id = X.getOption().getUnaliasedOption().getID();
+  return Id == options::OPT_Xarch_host || Id == options::OPT_Xarch_device || Id == options::OPT_Xarch__ ||
+         Id == options::OPT_Xopenmp_target || Id == options::OPT_Xopenmp_target_EQ;
+}
+
+bool diagWritesFile(const llvm::opt::Arg &X) {
+  unsigned Id = X.getOption().getUnaliasedOption().getID();
+  return Id == options::OPT__serialize_diags || Id == options::OPT_diagnostic_serialized_file ||
+         Id == options::OPT_diagnostic_log_file;
+}
+
+// X が、ドライバーの段で書く引数か、それを値に包んだ引数か
+bool writesInDriver(const llvm::opt::Arg &X) {
+  if (driverWritesFile(X)) return true;
+  if (!wrapsDriverArg(X) || X.getNumValues() == 0) return false;
+  const char *V = X.getValues().back();
+  bool Found = false;
+  forEachDriverArg(llvm::ArrayRef<const char *>(&V, 1), options::ClangOption,
+                   [&](const llvm::opt::Arg &Y, unsigned, unsigned) { Found |= driverWritesFile(Y) || diagWritesFile(Y); });
+  return Found;
+}
+
+// Argv から落とす位置を Drop に足す。足したら true。モードによって見えるオプションが違い、同じ語が別の引数の値にも
+// なるので、どのモード(clang・clang-cl・dxc・flang)の読み方でも見つけて落とす【Fable のレビュー: --driver-mode=dxc で、
+// clang の読み方では -include の値になる -gen-cdb-fragment-path が効いた】
+bool markDriverWrites(const std::vector<const char *> &Argv, std::vector<bool> &Drop) {
+  bool Changed = false;
+  auto mark = [&](unsigned B, unsigned E, const std::vector<unsigned> *Map = nullptr) {
+    for (unsigned I = B; I < E; ++I) {
+      unsigned J = Map ? (*Map)[I] : I;
+      if (!Drop[J]) Drop[J] = Changed = true;
+    }
+  };
+  for (unsigned Vis : {unsigned(options::ClangOption), unsigned(options::CLOption), unsigned(options::DXCOption),
+                       unsigned(options::FlangOption)}) {
+    std::vector<unsigned> Pass;              // /clang: の位置
+    std::vector<const char *> PassValues;    // その値(clang-cl は、まとめて clang の引数として読み直す)
+    forEachDriverArg(Argv, Vis, [&](const llvm::opt::Arg &X, unsigned B, unsigned E) {
+      if (writesInDriver(X)) {
+        mark(B, E);
+      } else if (X.getOption().matches(options::OPT__SLASH_clang) && X.getNumValues() == 1) {
+        Pass.push_back(B);
+        PassValues.push_back(X.getValue());
+      }
+    });
+    if (!PassValues.empty())
+      forEachDriverArg(PassValues, options::ClangOption, [&](const llvm::opt::Arg &X, unsigned B, unsigned E) {
+        if (writesInDriver(X) || diagWritesFile(X)) mark(B, E, &Pass);
+      });
+  }
+  // 診断の設定は、モードを問わず全部のオプションを見える形で読まれる(CreateAndPopulateDiagOpts)
+  forEachDriverArg(Argv, ~0U, [&](const llvm::opt::Arg &X, unsigned B, unsigned E) {
+    if (diagWritesFile(X)) mark(B, E);
+  });
+  return Changed;
+}
+
+// A(コンパイルのコマンド。応答ファイルは展開済み)から、ドライバーの段で書くファイルの引数を落とす。書き方は、
+// clang と同じオプション表で読んで見つける(-MJx・-MJ x、--serialize-diagnostics・-serialize-diagnostics、
+// clang-cl の /clang: と -clang: の中、-Xarch_host などの値の中も)。落とすと残りの読まれ方が変わりうるので、落とすものが
+// 無くなるまで読み直す(1 回ごとに 1 語以上減るので終わる)。ClangTool の調整のうち最後に動かす(後から足す語が、
+// 末尾で値の無い --serialize-diagnostics などの値にならないように)
+void sanitize(std::string &S);
+
+// Dropped には、外した語を足す
+tooling::CommandLineArguments dropDriverWrites(const tooling::CommandLineArguments &A,
+                                               std::vector<std::string> *Dropped = nullptr) {
+  tooling::CommandLineArguments R = A;
+  while (R.size() >= 2) {
+    std::vector<const char *> Argv;
+    for (size_t I = 1; I < R.size(); ++I) Argv.push_back(R[I].c_str());
+    std::vector<bool> Drop(Argv.size());
+    if (!markDriverWrites(Argv, Drop)) return R;
+    tooling::CommandLineArguments Next{R[0]};
+    for (size_t I = 0; I < Argv.size(); ++I) {
+      if (!Drop[I]) Next.push_back(R[I + 1]);
+      else if (Dropped) Dropped->push_back(R[I + 1]);
+    }
+    R = std::move(Next);
+  }
+  return R;
+}
+
+// 外した引数を、TU ごとに 1 行で知らせる(設定ファイルを外すと、索引の結果が変わりうるので黙らない)。
+// 進み具合の行([n/m])と混ざらないよう、行ごとに書く
+std::mutex WarnM;
+void warnDropped(llvm::StringRef File, const std::vector<std::string> &Dropped) {
+  if (Dropped.empty()) return;
+  std::string S = "warning: " + File.str() + ": ignored arguments that write files or read clang config files:";
+  for (const auto &D : Dropped) S += " " + D;
+  sanitize(S);
+  std::lock_guard<std::mutex> L(WarnM);
+  llvm::errs() << S << "\n";
 }
 
 // getMainExecutable に渡す、この実行ファイルの中の関数のアドレス(main のアドレスは C++ では使えない)
@@ -872,10 +1002,55 @@ private:
   SkippedRanges *Skipped = nullptr;  // 同上
 };
 
+// clang の中(cc1)に渡った設定のうち、ファイルを書く・コードを読み込むものを空にする。ltidx は索引を作るだけで、
+// コンパイルの出力は要らない。compile_commands.json はリポジトリ次第で選べるので、そこに書かれた引数でファイルを書かせない
+// (書き先を選べると、起動時に実行されるフォルダに .bat を置かれうる)。引数の書き方(-Xclang・-Xclang=・-Wp,・/clang:・
+// -clang:・応答ファイル・clang の設定ファイル)は、ここに来るまでに clang が読み解いているので、どの書き方でも止まる
+// 【実測: ltidx 0.5.7 では --serialize-diagnostics・-Xclang -dependency-file・-Wp,-MD,<file>・/clang:-MD・-save-stats・
+// -Xclang -header-include-file・-Xclang -diagnostic-log-file・-Xclang -dependency-dot が、指定した場所にファイルを作った】
+void scrubInvocation(CompilerInvocation &CI) {
+  FrontendOptions &F = CI.getFrontendOpts();
+  F.OutputFile.clear();
+  F.StatsFile.clear();            // -save-stats・-stats-file=
+  F.TimeTracePath.clear();        // -ftime-trace=
+  F.ModuleOutputPath.clear();     // -fmodule-output=
+  F.SymbolGraphOutputDir.clear();
+  F.Plugins.clear();              // -load(-fplugin=)
+  F.AddPluginActions.clear();     // -add-plugin
+  F.PluginArgs.clear();
+  F.ActionName.clear();           // -plugin
+  F.LLVMArgs.clear();             // -mllvm(LibTooling では使われないが、念のため)
+  F.DumpMinimizationHintsPath.clear();  // -dump-minimization-hints=(どの FrontendAction でも開く。Fable のレビューで実測)
+  // clang のヘッダーのモジュール(-fmodules)を使わず、ヘッダーとして読む。モジュールを作ると -fmodules-cache-path= の場所に
+  // フォルダとロックのファイルを作り【Fable のレビューで実測】、圧縮の部品が無いので ltidx ごと落ちていた。
+  // C++20 のモジュール(-fmodule-file= で渡したもの)は、そのまま読む。モジュール全体の索引(modules.idx)も書かない
+  CI.getHeaderSearchOpts().ModuleCachePath.clear();
+  CI.getLangOpts().Modules = 0;
+  CI.getLangOpts().ImplicitModules = 0;
+  F.UseGlobalModuleIndex = 0;
+  F.GenerateGlobalModuleIndex = 0;
+  DependencyOutputOptions &D = CI.getDependencyOutputOpts();
+  D.OutputFile.clear();               // -dependency-file(-MD -MF・-Wp,-MD,<file>)
+  D.HeaderIncludeOutputFile.clear();  // -header-include-file
+  D.DOTOutputFile.clear();            // -dependency-dot
+  D.ModuleDependencyOutputDir.clear();
+  D.ShowHeaderIncludes = 0;           // -H(書き先を空にすると、ログに読んだヘッダーを全部書く)
+  D.ShowIncludesDest = ShowIncludesDestination::None;  // /showIncludes(同じく)
+  DiagnosticOptions &G = CI.getDiagnosticOpts();
+  G.DiagnosticLogFile.clear();            // -diagnostic-log-file
+  G.DiagnosticSerializationFile.clear();  // --serialize-diagnostics・-serialize-diagnostic-file
+  CI.getCodeGenOpts().PassPlugins.clear();  // -fpass-plugin=
+}
+
 class Factory : public tooling::FrontendActionFactory {
 public:
   Factory(const std::vector<std::string> &R, Output &O) : Roots(R), O(O) {}
   std::unique_ptr<FrontendAction> create() override { return std::make_unique<IndexAction>(Roots, O); }
+  bool runInvocation(std::shared_ptr<CompilerInvocation> Invocation, FileManager *Files,
+                     std::shared_ptr<PCHContainerOperations> PCH, DiagnosticConsumer *DiagConsumer) override {
+    scrubInvocation(*Invocation);  // 診断の書き先は、この後の CompilerInstance::createDiagnostics が設定から作る
+    return tooling::FrontendActionFactory::runInvocation(std::move(Invocation), Files, std::move(PCH), DiagConsumer);
+  }
 
 private:
   std::vector<std::string> Roots;
@@ -1318,6 +1493,14 @@ int main(int argc, const char **argv) {
           return tooling::getInsertArgumentAdjuster(isClDriver(A) ? "/Zc:twoPhase" : "-fno-delayed-template-parsing",
                                                     tooling::ArgumentInsertPosition::END)(A, File);
         });
+      // ドライバーの段で書くファイルの引数を落とす(clang の中で書くものは Factory の scrubInvocation が止める)。
+      // 足す調整の後に動かす(末尾で値の無い引数の値に、足した語がならないように)
+      Tool.appendArgumentsAdjuster([](const tooling::CommandLineArguments &A, llvm::StringRef File) {
+        std::vector<std::string> Dropped;
+        auto R = dropDriverWrites(A, &Dropped);
+        warnDropped(File, Dropped);
+        return R;
+      });
       ErrorCounter Diag;
       Tool.setDiagnosticConsumer(&Diag);
       Factory F(Roots, O);

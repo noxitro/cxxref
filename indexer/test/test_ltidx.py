@@ -64,10 +64,10 @@ class LtidxTest(unittest.TestCase):
             json.dump([{'directory': d, 'file': f'{d}/{r}', 'arguments': ['cl.exe', '/c', '/std:c++17'] + a + [r]}
                        for r, a in self.cmds.items()], f)
 
-    def run_ltidx(self, *args, out='.index/index.tsv'):
+    def run_ltidx(self, *args, out='.index/index.tsv', cwd=None):
         os.makedirs(os.path.join(self.root, '.index'), exist_ok=True)
         r = subprocess.run([LTIDX, '-p', self.root, '-root', self.root, '-o', os.path.join(self.root, out)] + list(args),
-                           capture_output=True, text=True, encoding='utf-8', errors='replace')
+                           capture_output=True, text=True, encoding='utf-8', errors='replace', cwd=cwd)
         return r.returncode, r.stderr
 
     def rows(self, out='.index/index.tsv'):
@@ -178,6 +178,78 @@ class LtidxTest(unittest.TestCase):
                 self.assertEqual(rc, 0, err)
                 self.assertEqual(self.tus()['a.cpp'][1], '1', self.tus()['a.cpp'])
                 self.assertTrue(self.has('Run', 'call', 'a.cpp:2:36'))
+
+    def test_compile_arguments_write_no_files(self):
+        # compile_commands.json はリポジトリ次第で選べる。そこに書かれた引数で、ltidx に書き先を選べるファイルを書かせない
+        # (clang の中の出力先は scrubInvocation が、ドライバーの段のものは dropDriverWrites が止める)。
+        # 引数の効き目(-DMARK)は残し、索引は今までどおりにできる
+        self.write('a.cpp', '#ifdef MODS\n#include "m/m.h"\n#endif\n#ifdef MARK\nvoid Marked();\nvoid Use() { Marked(); }\n#endif\n')
+        self.write('m/m.h', 'void InModule();\n')
+        self.write('m/module.modulemap', 'module M { header "m.h" export * }\n')
+        with open(os.path.join(self.root, 'w.rsp'), 'w', encoding='utf-8') as f:
+            f.write('-DMARK --serialize-diagnostics out/r.dia -Xclang')  # 最後の -Xclang は、応答ファイルの外の次の語に効く
+        with open(os.path.join(self.root, 'my.cfg'), 'w', encoding='utf-8') as f:
+            f.write('-gen-cdb-fragment-path out/cfg\n')
+        outside = tempfile.mkdtemp()  # ルートの外の絶対パス
+        self.addCleanup(shutil.rmtree, outside, True)
+        d, o = self.root.replace('\\', '/'), outside.replace('\\', '/')
+        gcc = ['clang++', '-c', '-DMARK']
+        cl = ['clang-cl', '/c', '/DMARK']
+        # 索引ができない(TU が通らない)と分かっている形。ファイルを書かないことと、ltidx が落ちないことだけを見る
+        broken = [['clang++', '--driver-mode=dxc', '-DMARK', '-include', '-gen-cdb-fragment-path', 'out/dxc'],
+                  # ClangTool は -MJ だけを外し、値を入力のファイルとして残す(0.5.7 から同じ)
+                  gcc + ['-MJ', 'out/o.json']]
+        cases = broken + [
+            # Fable のレビューで見つかった形
+            gcc + ['-Xclang', f'-dump-minimization-hints={o}/x.json'], gcc + ['--serialize-diagnostics', f'{o}/y.dia'],
+            cl + ['/clang:-Xarch_host', '/clang:-MJout/xa.json'],
+            cl + ['/clang:-fopenmp', '/clang:-fopenmp-targets=x86_64-pc-windows-msvc', '/clang:-Xopenmp-target',
+                  '/clang:-MJout/xo.json'],
+            gcc + ['-fsyntax-only', 'a.cpp', '-diagnostic-log-file'],  # 末尾で値が無い。ltidx が足す語を値にさせない
+            cl + ['a.cpp', '--serialize-diagnostics'], gcc + ['--config=./my.cfg'], gcc + ['--config', './my.cfg'],
+            # clang のヘッダーのモジュールは作らず、ヘッダーとして読む(前は作ろうとして ltidx ごと落ちた)
+            gcc + ['-DMODS', '-fmodules', '-fmodules-cache-path=out/mc', '-fmodule-map-file=m/module.modulemap'],
+            gcc + ['--serialize-diagnostics', 'out/a.dia'], gcc + ['-serialize-diagnostics', 'out/b.dia'],
+            gcc + ['-serialize-diagnostic-file', 'out/c.dia'], gcc + ['-diagnostic-log-file', 'out/d.log'],
+            gcc + ['-Xclang', '-serialize-diagnostic-file', '-Xclang', 'out/e.dia'],
+            gcc + ['-Xclang=-dependency-file', '-Xclang=out/f.d', '-Xclang=-MT', '-Xclang=t'],
+            gcc + ['-Wp,-MD,out/g.d'], gcc + ['-Wp,-MMD,out/h.d'], gcc + ['--write-dependencies', '-MF', 'out/i.d'],
+            gcc + ['-H', '-Xclang', '-header-include-file', '-Xclang', 'out/j.txt'],
+            gcc + ['-Xclang', '-diagnostic-log-file', '-Xclang', 'out/k.log', '-Wall'],
+            gcc + ['-Xclang', '-dependency-dot', '-Xclang', 'out/l.dot'], gcc + ['-Xclang', '-stats-file=out/m.json'],
+            gcc + ['-save-stats=cwd'], gcc + ['-gen-cdb-fragment-path', 'out/n'],
+            gcc + ['@w.rsp', '-serialize-diagnostic-file', '-Xclang', 'out/p.dia'],
+            cl + ['/clang:-MD', '/clang:-MFout/q.d'], cl + ['-clang:-MD', '-clang:-MF', '-clang:out/r.d'],
+            cl + ['/clang:--serialize-diagnostics', '/clang:out/s.dia'], cl + ['/clang:-MJ', '/clang:out/t.json'],
+            cl + ['/clang:-gen-cdb-fragment-path', '/clang:out/u'], cl + ['--serialize-diagnostics', 'out/v.dia'],
+            cl + ['-gen-cdb-fragment-path', 'out/w'],
+        ]
+        for argv in cases:
+            with self.subTest(' '.join(argv[3:])):
+                shutil.rmtree(os.path.join(self.root, 'out'), ignore_errors=True)
+                os.makedirs(os.path.join(self.root, 'out'))
+                with open(os.path.join(self.root, 'compile_commands.json'), 'w', encoding='utf-8') as f:
+                    json.dump([{'directory': d, 'file': f'{d}/a.cpp',
+                                'arguments': argv + ([] if 'a.cpp' in argv else ['a.cpp'])}], f)
+                before = set(os.listdir(self.root))
+                # 相対パスは、ltidx を動かしたフォルダから決まるものがある(-save-stats=cwd など)。どちらも self.root にする
+                rc, err = self.run_ltidx('-j', '1', cwd=self.root)
+                self.assertIn(rc, (0, 1), err)  # 0: すべての TU が通った、1: 解析にエラーのあった TU がある(落ちていない)
+                self.assertEqual(os.listdir(os.path.join(self.root, 'out')), [])
+                self.assertEqual(os.listdir(outside), [])
+                self.assertEqual(set(os.listdir(self.root)) - before - {'.index'}, set())  # a.stats など、隣にも書かない
+                if argv not in broken:
+                    self.assertEqual(rc, 0, err)
+                    self.assertTrue(self.has('Marked', 'call', 'a.cpp:6:14'), argv)
+                # 設定ファイルを外すと索引の結果が変わりうるので、黙らずに知らせる(clang の中で空にするものは知らせない)
+                if any(a.startswith('--config') for a in argv):
+                    self.assertIn('ignored arguments that write files or read clang config files: --config', err)
+        # 外すものが無いコマンドでは、何も言わない
+        with open(os.path.join(self.root, 'compile_commands.json'), 'w', encoding='utf-8') as f:
+            json.dump([{'directory': d, 'file': f'{d}/a.cpp', 'arguments': gcc + ['-MD', '-MF', 'a.d', 'a.cpp']}], f)
+        rc, err = self.run_ltidx('-j', '1', cwd=self.root)
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn('ignored arguments', err)
 
     def test_utf8_unchanged(self):
         self.write('a.cpp', SJIS_SRC, ['/utf-8'])

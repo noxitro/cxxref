@@ -15,6 +15,7 @@ add_executable(ltidx ltidx.cpp codepage.cpp zstub.c)
 target_include_directories(ltidx PRIVATE ${LLVM_INCLUDE_DIRS} ${CLANG_INCLUDE_DIRS})
 target_compile_definitions(ltidx PRIVATE ${LLVM_DEFINITIONS}
   LTIDX_RESOURCE_DIR="${LLVM_LIBRARY_DIR}/clang/${LLVM_VERSION_MAJOR}")
+# /Zc:preprocessor: clang のオプション表(clang/Options/Options.inc)の __VA_ARGS__ を、MSVC の古いプリプロセッサは展開できない
 target_compile_options(ltidx PRIVATE /utf-8
-  $<$<COMPILE_LANGUAGE:CXX>:/GR- /wd4141 /wd4146 /wd4244 /wd4267 /wd4291 /wd4624 /wd4805>)
+  $<$<COMPILE_LANGUAGE:CXX>:/GR- /Zc:preprocessor /wd4141 /wd4146 /wd4244 /wd4267 /wd4291 /wd4624 /wd4805>)
 target_link_libraries(ltidx PRIVATE clangTooling clangIndex clangFrontend clangDriver clangAST clangBasic)

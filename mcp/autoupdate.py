@@ -240,9 +240,11 @@ UNSAFE_ARG = re.compile(_PREFIX + r'(?:-fplugin\b|-fpass-plugin\b|-load$|-plugin
 # -gen-cdb-fragment-path・--write-dependencies・--write-user-dependencies。/clang:-MD・-clang:-MF・-Wp,-MMD,<file> も作った。
 # 前に何も付かない -MD -MF <file>・-o <file>・-MJ <file> は作らなかった】。依存ファイルは -MT で中身の先頭を選べるので、
 # 起動時に実行されるフォルダへ .bat を置かれうる。-fcrash-diagnostics-dir は、clang が落ちたときにソースと再現用のスクリプトを書く
+# -dump-minimization-hints= と -fmodules-cache-path=(暗黙のモジュールの置き場)も、指定した場所に書く【Fable のレビューで実測】
 OUTPUT_ARG = re.compile(_PREFIX + r'(?:--serialize-diagnostics\b|-serialize-diagnostic-file\b|-header-include-file\b|'
                         r'-diagnostic-log-file\b|-dependency-dot\b|-dependency-file\b|-stats-file\b|-save-stats\b|'
-                        r'-gen-cdb-fragment-path\b|--write-(?:user-)?dependencies\b|-fcrash-diagnostics-dir\b)')
+                        r'-gen-cdb-fragment-path\b|--write-(?:user-)?dependencies\b|-fcrash-diagnostics-dir\b|'
+                        r'-dump-minimization-hints\b|-fmodules-cache-path\b)')
 PREFIXED_DEP = re.compile(r'(?:[/-]clang:|-Xclang=)-M')  # 前に付けた -M…(ltidx が落とさない形)
 PASS_ON = {'-Xclang', '-Xpreprocessor'}  # 次の語を、そのまま clang の中に渡す(-Xclang -MF は ltidx が落とさない)
 WRAPPERS = {'ccache', 'sccache', 'distcc', 'gomacc'}  # 後ろの語がコンパイラ(clang は、その隣の設定ファイルを読む)
@@ -293,7 +295,7 @@ def _win_tokens(s):
 # (大きな compile_commands.json のほとんどのコマンドは、ここで済む【実測: O3DE の 32 MB・6,168 件で、全部を語に分けると
 # 3.0 秒、絞り込むと 0.3 秒】)
 _SUSPECT = ('plugin', '-load', '--config', '@', 'serializ', 'header-include', 'diagnostic-log', 'dependenc', 'stats',
-            'cdb-fragment', 'crash-diag', 'clang:-M', 'Xclang', '-Xpreprocessor', '-Wp,')
+            'cdb-fragment', 'crash-diag', 'clang:-M', 'Xclang', '-Xpreprocessor', '-Wp,', 'minimization', 'modules-cache')
 _NO_QUOTING = str.maketrans('', '', '"\\')
 
 
