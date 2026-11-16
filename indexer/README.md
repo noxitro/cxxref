@@ -74,7 +74,8 @@ ltidx.exe -p <compile_commands.json のあるフォルダ> -root <索引に含�
   - 索引の列番号とソース行は、UTF-8 に直した後のものです。ltq も同じ変換をして突き合わせます
 - `-delayed` を付けないときは、遅延テンプレート解析を止めます。clang-cl 形式(`cl.exe`・`clang-cl`・`--driver-mode=cl`)の引数には `/Zc:twoPhase` を、gcc 形式(`g++`・`clang++` など)の引数には `-fno-delayed-template-parsing` を足します(MSVC 向けでは、gcc 形式でも既定で遅延します)。これで、一度も実体化されないテンプレート本体の非依存呼び出しも索引に載ります
 - 規格は、TU の引数(`/std:`・`-std=`)に従います。C++03 以前の書き方(`register`・`throw()`・`> >` など)も読めます。新しい規格で禁止された書き方(波かっこの中の縮小変換、C++17 での `throw(X)` など)や、今の標準ライブラリに無いもの(`std::bind1st`、C++17 での `std::auto_ptr`)はエラーに数えますが、その TU の行は索引に残ります
-  - Windows では、gcc 形式の引数でも標準ライブラリは MSVC のもの(C++14 以降が前提)を読みます。`-std=c++98` などで標準ライブラリを使う TU は失敗し、行が減ります
+  - Windows では、gcc 形式の引数でも標準ライブラリは MSVC のもの(C++14 以降が前提)を読みます。`-std=c++98`・`-std=c++03`・`-std=c++11`(`gnu++` も)・`-ansi` で標準ライブラリを使う TU は失敗し、行が減ります(同じ引数の clang でビルドしても通りません)
+- `compile_commands.json` の `directory`(コンパイルのディレクトリ)が無い TU は解析せず、その TU だけを失敗にします。他所から持ってきた `compile_commands.json` や、ビルドフォルダを消した後に起きます。`.tu.tsv` の最初のエラーが `compile directory does not exist: <フォルダ>` になり、同じ内容を `warning:` の 1 行でも出します。ほかの TU は索引になり、終了コードは 1 です。フォルダを作ってから `-update` を付けて動かすと、その TU だけを解析し直します
 - 組み込みヘッダー(`<stddef.h>` など)は、`ltidx.exe` の隣に `lib\clang\<版>\include` があればそれを、無ければビルドした LLVM の `lib\clang\<版>` を使います(`-resource-dir` で指定もできます)。配布物(`scripts\get-ltidx.bat` が取ってくるもの)は前者の形で、LLVM 無しで動きます。どちらにも無ければ、解析に進まずに止まります
   - 配布物のライセンス: ltidx.exe は LLVM と clang のライブラリを静的にリンクし、MSVC のランタイムも静的にリンクしています(`/MT`。Release の静的ライブラリは再配布できます)。zip には `LICENSE.txt`(cxxref)、`LICENSE-LLVM.txt`(LLVM のライセンス文。Apache License 2.0 with LLVM Exceptions と旧 LLVM ライセンス)、`THIRD-PARTY-NOTICES.txt`(ltidx.exe に埋め込まれた LLVM の中の別ライセンスの部品。正規表現(BSD 3 条項)・xxHash(BSD 2 条項)・Unicode のデータ。BSD はバイナリで配るときにも表示を求めます)を入れます。組み込みヘッダーは手を加えずに入れていて、各ファイルの冒頭に表示があります。`THIRD-PARTY-NOTICES.txt` は他者の著作権表示なのでリポジトリには置かず、CI が配布物を作るときに、ビルドに使った LLVM の版のタグのソースから `scripts\llvm-notices.py` で作ります(LLVM の版を上げても、取り直しは要りません。表示の場所や形が変わっていれば、CI が失敗します)
 - `-no-inst` は比較用です。テンプレートの暗黙の実体化を索引しません
@@ -100,8 +101,7 @@ rg "\tcall\tmain\t" index.tsv
 - 配布物の LLVM は zlib / zstd を同梱しないため、`zstub.c` で代替しています。`crc32` は zlib と同じ結果を返します。圧縮・展開は常に失敗を返しますが、ltidx は使いません
 - 同じ行が複数の TU から出たときは 1 行にまとめます。構成(Debug/Release など)ごとの索引は別々に作り、ltq がまとめて引きます
 - `-using` の解決は、その TU にあるクラステンプレートの実体化から引きます。実体化が無いときや、using 宣言が部分特殊化の中にあるときは、using 宣言の行だけが残ります
-- **C++11 より前のコード**: 次のことがあります。
-  - 動的例外指定・`auto_ptr`・`binary_function`・`register` などの書き方は、`/std` の無い cl 形式(古い Visual Studio のプロジェクトの形)なら通ります。clang-cl の既定は C++14 です
-  - gcc 形式で `-std=c++98`・`-std=c++03`・`-std=c++11`(`gnu++` も)・`-ansi` を付けた TU は、MSVC の STL のヘッダーで止まります。MSVC の STL は C++14 以上しか受けないためで、同じ引数の clang でビルドしても通りません。その TU は「エラーあり」になり、参照の一部が抜けます
+- **C++11 より前のコード**: 規格と標準ライブラリの扱いは、「使い方」の「規格は、TU の引数に従います」の項にあります。ほかに次のことがあります。
+  - `/std` の無い cl 形式(古い Visual Studio のプロジェクトの形)は、clang-cl の既定の C++14 で読みます。動的例外指定・`auto_ptr`・`binary_function`・`bind2nd`・`register` は、この形なら通ります
   - 2 段階の名前探索を前提にしない、古い MSVC だけが通していたテンプレートの書き方は、エラーになります。たとえば、後で宣言する関数をテンプレートの中から呼ぶ書き方です。ltidx が `/Zc:twoPhase` を足すためです。コマンドラインに `/Zc:twoPhase-` があっても、ltidx はその後ろに足すので、ltidx の `/Zc:twoPhase` が効きます。その TU は「エラーあり」になりますが、参照は載ります。`-delayed` で避けられますが、一度も実体化されないテンプレートの中が載らなくなります
   - clang-cl は、`__cplusplus` を言語の版の値(既定で `201402L`)にします。cl は `/Zc:__cplusplus` が無いと `199711L` です。`#if __cplusplus >= 201103L` で分かれるコードは cl と反対の側を読みますが、もう一方の側は差分パス(`altpass.py`)が補います

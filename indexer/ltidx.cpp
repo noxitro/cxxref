@@ -221,13 +221,23 @@ tooling::CommandLineArguments dropDriverWrites(const tooling::CommandLineArgumen
 // 外した引数を、TU ごとに 1 行で知らせる(設定ファイルを外すと、索引の結果が変わりうるので黙らない)。
 // 進み具合の行([n/m])と混ざらないよう、行ごとに書く
 std::mutex WarnM;
+void warnLine(std::string S) {
+  sanitize(S);
+  std::lock_guard<std::mutex> L(WarnM);
+  llvm::errs() << S << "\n";
+}
 void warnDropped(llvm::StringRef File, const std::vector<std::string> &Dropped) {
   if (Dropped.empty()) return;
   std::string S = "warning: " + File.str() + ": ignored arguments that write files or read clang config files:";
   for (const auto &D : Dropped) S += " " + D;
-  sanitize(S);
-  std::lock_guard<std::mutex> L(WarnM);
-  llvm::errs() << S << "\n";
+  warnLine(std::move(S));
+}
+
+// コマンドのうち、コンパイルのディレクトリが無いものの、そのディレクトリ(無ければ空)
+std::string missingDirectory(const std::vector<tooling::CompileCommand> &Cmds) {
+  for (const auto &C : Cmds)
+    if (!llvm::sys::fs::is_directory(C.Directory)) return C.Directory;
+  return {};
 }
 
 // getMainExecutable に渡す、この実行ファイルの中の関数のアドレス(main のアドレスは C++ では使えない)
@@ -1504,7 +1514,19 @@ int main(int argc, const char **argv) {
       ErrorCounter Diag;
       Tool.setDiagnosticConsumer(&Diag);
       Factory F(Roots, O);
-      int Rc = Tool.run(&F);
+      // コンパイルのディレクトリが無い TU は解析せず、その TU だけを失敗にする。ClangTool は、そこへ移れないと
+      // report_fatal_error でプロセスごと止め、ほかの TU の索引も残らない
+      // (他所から持ってきた compile_commands.json や、ビルドフォルダを消した後に起きる)
+      int Rc = 1;
+      std::string NoDir = missingDirectory(Cmds);
+      if (NoDir.empty()) {
+        Rc = Tool.run(&F);
+      } else {
+        Diag.Errors = 1;
+        Diag.First = "compile directory does not exist: " + NoDir;
+        sanitize(Diag.First);
+        warnLine("warning: " + Todo[I] + ": " + Diag.First);
+      }
       double Sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - T0).count();
       bool Good = Rc == 0 && Diag.Errors == 0;
       if (Good) ++Ok;
