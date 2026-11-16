@@ -18,6 +18,7 @@ RUNS = os.path.join(BENCH, 'runs13')
 PATH = re.compile(r'([\w.+/\\-]+\.(?:h|hpp|hxx|cpp|cxx|cc|c|inl|mm|m))\b`?')
 NUMS = re.compile(r'\s*[::]\s*(\d+(?:\s*[,、]\s*\d+)*)')
 LIST = re.compile(r'(?<![\w.])(\d+(?:\s*[,、]\s*\d+)+)')
+SAME = re.compile(r'\s*(?:\d+[.)]\s*|[-*]\s*)?(?:同|同上|same(?: file)?)\s*`?\s*[::]\s*(\d+)')
 OK = {'override': {'override'}, 'base-call': {'base-call'}, 'virtual-call': {'virtual-call'}, 'call': {'call', 'virtual-call'},
       'decl': {'decl', 'def'}, 'def': {'decl', 'def'}, 'member-call': {'virtual-call', 'call'}}
 
@@ -58,10 +59,16 @@ def locs(line):
 
 def answer_rows(text):
     rows = {}
+    last = ''
     for line in text.splitlines():
         found, end = locs(line)
+        if not found and last:  # 「同 `:115`」のように、前の行のファイルを指して行番号だけを書いた行
+            m = SAME.match(line)
+            if m:
+                found, end = [(last, int(m.group(1)))], m.end()
         if not found:
             continue
+        last = found[-1][0]
         k, s = kind_of(line[end:])
         for p, l in found:
             rows.setdefault((p.replace('\\', '/').lstrip('./'), l), (k, 'inactive' in s, 'template' in s))

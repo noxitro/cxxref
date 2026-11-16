@@ -66,7 +66,11 @@ class SkillTest(unittest.TestCase):
             self.assertIn(os.path.realpath(CLI), cmd)
             self.assertIn('"allow"', self.hook({'toolName': 'powershell', 'toolArgs': {'command': cmd + ' ns::File::Read'}}))
             # 索引のあるリポジトリでは、モデルを呼ぶたびに送られる。短く保つ(場所の長さは除く)
-            self.assertLess(len(note) - len(os.path.realpath(CLI)), 600)
+            self.assertLess(len(note) - len(os.path.realpath(CLI)), 760)
+            # 索引の構成に入らないファイル(テスト、別のプラットフォーム)の一致は、解析していないと伝える。結果の節の名前と
+            # 同じ言葉で書く(「calls が答え」とだけ書くと、モデルがその節を読み飛ばした)
+            self.assertIn('"files no indexed TU includes"', note)
+            self.assertNotIn('are the answer', note)
         finally:
             shutil.rmtree(root)
 

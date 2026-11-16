@@ -19,9 +19,10 @@ python -I "<base directory for this skill>\..\..\mcp\cxxref_cli.py" refs <name>
 - It may take a while (it rebuilds a stale index first). Run it once and wait; do not run grep for the same name meanwhile
 
 Reading the result
-- `calls`: every call, with the enclosing function `[in ...]`. This is the answer; do not grep the source again to confirm it
+- `calls`: every call clang resolved, with the enclosing function `[in ...]`. Do not grep the source again to confirm them
 - `other references`, `definitions and declarations`, `virtual dispatch` (overrides, `[dynamic]`/`[static]`/`[super]` calls), `unresolved template calls` (decide from the line)
-- `text matches ... not in the index`: text matches of the name that are not this symbol, with the reason (comment, inactive `#if`, string, other symbol). Leave the comment ones out
+- `text matches ... not in the index`: text matches of the name the index does not resolve to this symbol, with the reason (comment, inactive `#if`, string, other symbol). Leave the comment ones out
+- Matches under "files no indexed TU includes" (tests, other platforms) are not analyzed and may be uses too: judge them from the line, or view the file, and include the real ones
 - If the last line names list files, read those files (each fits in one read) instead of grepping
 - "No cxxref index": search with rg as usual. Building one takes minutes; ask the user first
 

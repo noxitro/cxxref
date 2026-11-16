@@ -1,12 +1,13 @@
 """大きなコードベース(O3DE・UE5 など)の写しで、1 問を Copilot CLI に解かせる。条件は run13.py の A・V・W と同じ形。
 
-usage: python -I run_big.py --ws <写しのフォルダ> --tasks <問題の JSON> --task O2 --cond A|V|W --rep 1 --round big1
-       [--model claude-haiku-5-5] [--provider anthropic] [--timeout 2400]
+usage: python -I run_big.py --ws <写しのフォルダ> --tasks <問題の JSON> --task O2 --cond A|V|W|R --rep 1 --round big1
+       [--skill-ref <コミット>] [--model claude-haiku-5-5] [--provider anthropic] [--timeout 2400]
 
 条件
   A: プラグインなし。空の COPILOT_HOME。索引(<写し>\\.index)は、回の間だけ写しの外に退かす
   V: MCP 版(タグ v0.5.9 のプラグインと、/cxxref-enable on が置くのと同じ使い方の指示)
   W: skill 版(このリポジトリの今のファイルから作る)
+  R: skill 版(--skill-ref のコミットのファイルから作る。直す前と後を同じ時期に比べるため)
 
 run13.py との違い
 - 索引は写しの .index をそのまま使う(数十 GB あるので写さない)。git clean はしない(.index と .cdb が消えるため)。
@@ -74,13 +75,16 @@ def main():
     ap.add_argument('--ws', required=True)
     ap.add_argument('--tasks', required=True)
     ap.add_argument('--task', required=True)
-    ap.add_argument('--cond', required=True, choices=['A', 'V', 'W'])
+    ap.add_argument('--cond', required=True, choices=['A', 'V', 'W', 'R'])
+    ap.add_argument('--skill-ref', default='', help='条件 R の skill 版を作るコミット(条件 R には必須)')
     ap.add_argument('--rep', type=int, default=1)
     ap.add_argument('--round', required=True)
     ap.add_argument('--model', default='claude-haiku-5-5')
     ap.add_argument('--provider', default='anthropic', choices=['', 'anthropic'])
     ap.add_argument('--timeout', type=int, default=2400)
     a = ap.parse_args()
+    if a.cond == 'R' and not a.skill_ref:
+        ap.error('--cond R needs --skill-ref')
 
     ws = os.path.abspath(a.ws)
     task = next(t for t in json.load(open(os.path.join(BENCH, a.tasks), encoding='utf-8')) if t['id'] == a.task)
@@ -121,6 +125,9 @@ def main():
     if a.cond == 'W':
         run13.make_plugin_r(run13.PLUGIN_W)
         run13.install_plugin_r(home, run13.PLUGIN_W)
+    if a.cond == 'R':
+        run13.make_plugin_r(ref=a.skill_ref)
+        run13.install_plugin_r(home)
 
     moved, index_parked = [], False
     code, out, d, extra = 'error', '', '', []
