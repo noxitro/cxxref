@@ -81,8 +81,10 @@ v13 は、`run.ps1` とは別の台本(`run13.py`・`batch13.py`・`score13.py`)
 - 作業フォルダは git で管理した写しで、各回の前に `git checkout`・`git clean` で元に戻し、変更は差分(`runs13\<名前>.diff`)に残します
 - 問題は `v13\tasks-stage1.json`(Python・C#・TypeScript、各 3 問)と、公開していない `local\v13-tasks-stage1-a.json`(索引の無いコードベース A の 3 問)・`local\v13-tasks-stage2-a.json`(コードベース A の 8 問)です。対象は `v13\sample.py`・`v13\sample2.py` が乱数で選びます。段階 2 の正解は、宣言と定義に引数を足した中身を VFS の overlay で差し替えて `clang-cl /Zs` にかけ、新しく出たエラーの位置から作ります(`v13\cxxcheck.py`)
 - 条件 Q は、P の rule と ltidx だけを直した版に差し替えたものです(`run13.py` の冒頭)。段階 2 の測り直し(`--round v13q`)で使いました
+- 条件 R は skill 版(今のリポジトリから、MCP の定義と拡張を除いたプラグインの写しを作る)、条件 V は MCP 版(タグ v0.5.9 のプラグインから拡張を除いた写しと、索引のあるリポジトリに `/cxxref-enable on` と同じ使い方の指示)です。どちらも同じ索引(`local\codebase-a.json` の `index_r`)と ltidx を使います。`batch13.py --rotate` は、条件の順番を回ごとに 1 つずつずらします(続けて流すと、前の回の書いたプロンプトのキャッシュを次の回が読めるので、順番が条件で偏らないように)。v15(`--round v15m`)で A・V・R を比べました(`../docs/benchmarks.md` の「6.」)
+- 条件 W・U は、skill 版の直しを、直す前と同じ時期に比べるためのものです。`--skill-ref <コミット>` を付けると、条件 R はそのコミットのファイルから作ります(付けなければ今のファイルから)。条件 W は今のファイルから作る skill 版、条件 U は今のファイルのうち `scripts/cxxref_hook.py` だけを `--skill-ref` のコミットのものにした skill 版です(skill の本文だけの効き目を分けて見る)。`batch13.py` にも同じ `--skill-ref` があります。v16(`--round v16m`)で A・V・R・U・W を比べました(`../docs/benchmarks.md` の「7.」)
 - 採点は `python -I score13.py --tasks local\v13-tasks-stage2-a.json --compile` です。`--compile` は、差分を当てた中身で同じ構文チェックをかけ、元には無いエラーが出ないかを見ます(最低の優先度・4 並列)。`batch13.py` は、終わった回を飛ばし、`runs13\STOP` があれば次の回の前に止まります
-- 入力トークンの比と信頼区間は `ratio13.py` で出します(問題ごとに平均どうしの比を取り、幾何平均と中央値にまとめ、問題と回を引き直す 2 段の bootstrap)
+- 入力トークンの比と信頼区間は `ratio13.py` で出します(問題ごとに平均どうしの比を取り、幾何平均と中央値にまとめ、問題と回を引き直す 2 段の bootstrap)。`--metric haiku_usd` は、トークンの内訳に Haiku 5.5 の単価を掛けた費用、`--metric haiku_usd_cold` は、1 回目の呼び出しがキャッシュから読んだ分(`run13.py` が記録する `first_cache_read`)を書きの単価に置き換えた費用です
 - `trace13.py <回の名前>` は、1 回の実行で使った道具を、モデルの呼び出しごとの 1 行にして出します(`../docs/benchmarks.md` の「動きの例」)
 
 ```powershell

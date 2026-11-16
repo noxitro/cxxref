@@ -8,8 +8,10 @@ description: Use before grep when the question is where a C++ function, type, va
 Run it in PowerShell from the repository, as a command of its own (nothing chained with `;`, `|` or `&&`; then it runs without asking the user):
 
 ```
-python -I "<absolute folder of this SKILL.md>\..\..\mcp\cxxref_cli.py" refs <name>
+python -I "<base directory for this skill>\..\..\mcp\cxxref_cli.py" refs <name>
 ```
+
+- Put the base directory in as it is and keep `\..\..\` as written. Do not shorten the path yourself (a wrong path is refused). If the session notes already give this command with a full path, use that one
 
 - `<name>`: qualified name or its suffix (`ns::File::Read`, `File::Read`, `Read`). A template goes without its arguments (`Vec::push`, not `Vec<int>::push`). Put a name with spaces or `( ) [ ]` in double quotes (`"Foo::operator()"`, `"operator bool"`). A name with `< > & | ^ %` (`"operator<"`, `"operator->"`) asks the user first
 - Options: `--path <folder>` (list only under it, repeatable), `--exclude <folder>`, `--limit <n>`

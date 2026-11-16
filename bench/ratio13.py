@@ -34,7 +34,7 @@ def main():
     ap.add_argument('--base', default='A')
     ap.add_argument('--tasks', help='この問題のファイル(local/v13-tasks-stage2-a.json など)の問題だけに絞る')
     ap.add_argument('--only', help='問題の id をこの文字で始まるものに絞る(例: S1-requests,S1-newtonsoft,S1-zod)')
-    ap.add_argument('--metric', default='input', help='比べる値: input(入力トークン。既定)・ai_credits(Copilot の AI credits)・haiku_usd(トークンの内訳に Haiku 5.5 の単価を掛けたドル)・sec など')
+    ap.add_argument('--metric', default='input', help='比べる値: input(入力トークン。既定)・ai_credits(Copilot の AI credits)・haiku_usd(トークンの内訳に Haiku 5.5 の単価を掛けたドル)・haiku_usd_cold(1 回目の呼び出しのキャッシュ読みを書きの単価に置き換えたもの)・sec など')
     a = ap.parse_args()
     conds = a.conds.split(',')
     only = {t['id'] for t in json.load(open(os.path.join(BENCH, a.tasks), encoding='utf-8'))} if a.tasks else None
@@ -42,6 +42,10 @@ def main():
     rs = [json.loads(l) for l in open(os.path.join(BENCH, 'runs13', 'index.jsonl'), encoding='utf-8-sig')]
     for r in rs:
         r['haiku_usd'] = haiku_usd(r)
+        # 1 回目の呼び出しがキャッシュから読んだ分(前の回が書いた共通の前置き。続けて流す計測でだけ読める)を、書きの単価に
+        # 置き換えた費用。間を空けて始めたセッションの費用に当たる(first_cache_read を記録した v15m 以降の回だけ)
+        r['haiku_usd_cold'] = (None if r['haiku_usd'] is None or r.get('first_cache_read') is None else
+                               r['haiku_usd'] + r['first_cache_read'] * (HAIKU_USD['cache_write'] - HAIKU_USD['cache_read']) / 1e6)
     rs = [r for r in rs if r['round'] == a.round and r['rep'] > 0 and r.get('exit') == 0 and r['cond'] in conds
           and r.get(a.metric) is not None
           and (only is None or r['task'] in only) and (prefixes is None or r['task'].startswith(prefixes))]
