@@ -17,6 +17,9 @@ usage: python -I run13.py --tasks v13/tasks-stage1.json --task S1-req-usage --co
      mcp.json と MCP サーバー)をインストール済みとして足す。索引のあるリポジトリには、/cxxref-enable on(既定のローカル)が
      置くのと同じ使い方の指示(.github/instructions/cxxref.instructions.md)を置く。索引・ltidx・索引の更新日時の扱いは
      R と同じ(R と同じ時期に交互に流して、形の違いだけを比べる)
+  W・U: skill 版の直しを、直す前と同じ時期に比べるための条件。--skill-ref <コミット> を付けると、R はそのコミットの
+     skill 版、W は今のファイルの skill 版、U は今のファイルのうち hook のスクリプト(scripts/cxxref_hook.py)だけを
+     そのコミットに戻したもの(skill の本文の直しだけを測る)。ほかは R と同じ
 
 作業フォルダは git で管理した写し。実行の前と後に、追跡しているファイルを戻し、増えたファイルを消す(git checkout と git clean)。
 回答の後の差分は runs13/<名前>.diff に残す。採点は score13.py。
@@ -54,6 +57,9 @@ LTIDX = os.path.join(V13, 'ltidx-0.5.1', 'ltidx.exe')
 LTIDX_NEXT = os.path.join(V13, 'ltidx-next', 'ltidx.exe')
 LTIDX_R = os.path.join(V13, 'ltidx-r', 'ltidx.exe')  # 条件 R の索引(index_r)を作った ltidx の写し(自動更新も同じものを使う)
 PLUGIN_R = os.path.join(V13, 'plugin-R')
+PLUGIN_W = os.path.join(V13, 'plugin-W')  # 条件 W(今のファイルの skill 版。--skill-ref で R を前のコミットに固定して比べる)
+PLUGIN_U = os.path.join(V13, 'plugin-U')  # 条件 U(W のうち、hook のスクリプトだけ --skill-ref のもの)
+SKILL_CONDS = ('R', 'W', 'U')
 # 条件 R のプラグインの写しに入れるもの(mcp.json と拡張 com.github.copilot/extensions は入れない。hooks は入れる)
 PLUGIN_R_PARTS = ['plugin.json', 'com.github.copilot/hooks', 'skills', 'mcp', 'query', 'scripts', 'LICENSE']
 
@@ -77,16 +83,13 @@ def install_plugin_r(home, plugin=None):
 
 def make_plugin_v():
     """タグ v0.5.9 のファイルから、条件 V のプラグインの写しを作る(タグは変わらないので、あれば作り直さない)。"""
-    import io, tarfile
     mark = os.path.join(PLUGIN_V, '.tag')
     if os.path.exists(mark) and open(mark, encoding='utf-8').read().strip() == PLUGIN_V_TAG:
         return
     if os.path.exists(PLUGIN_V):
         shutil.rmtree(PLUGIN_V)
     os.makedirs(PLUGIN_V)
-    tar = subprocess.run(['git', '-C', REPO, 'archive', '--format=tar', PLUGIN_V_TAG, '--'] + PLUGIN_V_PARTS, capture_output=True, check=True).stdout
-    with tarfile.open(fileobj=io.BytesIO(tar)) as t:
-        t.extractall(PLUGIN_V, members=[m for m in t.getmembers() if '/test/' not in '/' + m.name + '/'], filter='data')
+    extract_ref(PLUGIN_V_TAG, PLUGIN_V_PARTS, PLUGIN_V)
     with open(mark, 'w', encoding='utf-8') as f:
         f.write(PLUGIN_V_TAG)
 
@@ -102,18 +105,34 @@ def place_instructions_v(ws):
         f.write('---\napplyTo: "**"\n---\n' + mark + '\n' + body + '\n')
 
 
-def make_plugin_r():
-    """このリポジトリの今のファイルから、条件 R のプラグインの写しを作り直す(テストと __pycache__ は除く)。"""
-    if os.path.exists(PLUGIN_R):
-        shutil.rmtree(PLUGIN_R)
-    os.makedirs(PLUGIN_R)
+def extract_ref(ref, parts, dst):
+    """コミット ref の parts を dst に取り出す(テストは除く)。"""
+    import io, tarfile
+    tar = subprocess.run(['git', '-C', REPO, 'archive', '--format=tar', ref, '--'] + parts, capture_output=True, check=True).stdout
+    with tarfile.open(fileobj=io.BytesIO(tar)) as t:
+        t.extractall(dst, members=[m for m in t.getmembers() if '/test/' not in '/' + m.name + '/'], filter='data')
+
+
+def make_plugin_r(dst=None, ref=None, from_ref=()):
+    """skill 版のプラグインの写しを dst(既定は条件 R の置き場)に作り直す(テストと __pycache__ は除く)。ref が無ければ
+    このリポジトリの今のファイルから、あればそのコミットから作る。from_ref は、今のファイルから作った写しのうち、
+    ref の中身に戻すファイル(条件 U: 直しを 1 つずつ分けて測る)。"""
+    dst = dst or PLUGIN_R
+    if os.path.exists(dst):
+        shutil.rmtree(dst)
+    os.makedirs(dst)
+    if ref and not from_ref:
+        extract_ref(ref, PLUGIN_R_PARTS, dst)
+        return
     skip = shutil.ignore_patterns('__pycache__', 'test', '*.pyc')
     for part in PLUGIN_R_PARTS:
         src = os.path.join(REPO, part)
         if os.path.isdir(src):
-            shutil.copytree(src, os.path.join(PLUGIN_R, part), ignore=skip)
+            shutil.copytree(src, os.path.join(dst, part), ignore=skip)
         else:
-            shutil.copy2(src, os.path.join(PLUGIN_R, part))
+            shutil.copy2(src, os.path.join(dst, part))
+    if from_ref:
+        extract_ref(ref, list(from_ref), dst)
 # copilot は .exe を直接起動する(npm の copilot.CMD を経ると、cmd が問題文の記号を解釈しうる)
 COPILOT = os.environ.get('CRI_COPILOT') or shutil.which('copilot.exe') or os.path.join(
     os.environ.get('LOCALAPPDATA', ''), r'Microsoft\WinGet\Packages\GitHub.Copilot_Microsoft.Winget.Source_8wekyb3d8bbwe\copilot.exe')
@@ -271,7 +290,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--tasks', required=True)
     ap.add_argument('--task', required=True)
-    ap.add_argument('--cond', required=True, choices=['A', 'P', 'M', 'X', 'Q', 'R', 'V'])
+    ap.add_argument('--cond', required=True, choices=['A', 'P', 'M', 'X', 'Q', 'R', 'V', 'W', 'U'])
+    ap.add_argument('--skill-ref', default='', help='条件 R の skill 版を作るコミット(省くと今のファイル)。条件 U には必須')
     ap.add_argument('--rep', type=int, default=1)
     ap.add_argument('--round', default='v13')
     ap.add_argument('--model', default='gpt-6-luna')
@@ -288,18 +308,21 @@ def main():
     os.makedirs(RUNS, exist_ok=True)
 
     reset_ws(w)
-    src = w.get('index_r') if a.cond in ('R', 'V') else None
+    new = SKILL_CONDS + ('V',)  # 今の ltidx の索引(index_r)を使う条件
+    src = w.get('index_r') if a.cond in new else None
     touched = {}  # 条件 R・V で更新日時を今にした索引のファイル(stash_index が元に戻す)
-    if a.cond in ('R', 'V') and w.get('index') and not src:
-        raise SystemExit('conditions R and V need index_r in bench/local/codebase-a.json (an index built with the current ltidx)')
-    if a.cond in ('P', 'M', 'X', 'Q', 'R', 'V') and w.get('index'):
+    if a.cond in new and w.get('index') and not src:
+        raise SystemExit('conditions R, W, U and V need index_r in bench/local/codebase-a.json (an index built with the current ltidx)')
+    if a.cond == 'U' and not a.skill_ref:
+        raise SystemExit('condition U needs --skill-ref')
+    if a.cond in ('P', 'M', 'X', 'Q') + new and w.get('index'):
         place_index(w, src)
     if a.cond == 'V':
         make_plugin_v()
         if w.get('index'):
             place_instructions_v(ws)
-    if a.cond in ('R', 'V') and w.get('index'):
-        if a.cond == 'R':  # 利用者が index-project で作ったのと同じく、作り直しの記録を登録する(v0.5.9 にはこの登録が無い)
+    if a.cond in new and w.get('index'):
+        if a.cond in SKILL_CONDS:  # 利用者が index-project で作ったのと同じく、作り直しの記録を登録する(v0.5.9 にはこの登録が無い)
             sys.path.insert(0, os.path.join(REPO, 'mcp'))
             import autoupdate
             autoupdate.trust_recipe(os.path.join(ws, '.index', 'index.tsv'))
@@ -335,11 +358,17 @@ def main():
                                                   'args': ['-I', os.path.join(REPO, 'mcp', 'server.py')], 'tools': ['*']}}}
         cmd += ['--additional-mcp-config', json.dumps(mcp)]
     if a.cond == 'R':
-        make_plugin_r()
+        make_plugin_r(ref=a.skill_ref or None)
         install_plugin_r(home)
+    if a.cond == 'W':
+        make_plugin_r(PLUGIN_W)
+        install_plugin_r(home, PLUGIN_W)
+    if a.cond == 'U':
+        make_plugin_r(PLUGIN_U, ref=a.skill_ref, from_ref=('scripts/cxxref_hook.py',))
+        install_plugin_r(home, PLUGIN_U)
     if a.cond == 'V':
         install_plugin_r(home, PLUGIN_V)
-    env = dict(os.environ, COPILOT_HOME=home, LTIDX={'Q': LTIDX_NEXT, 'R': LTIDX_R, 'V': LTIDX_R}.get(a.cond, LTIDX))
+    env = dict(os.environ, COPILOT_HOME=home, LTIDX={'Q': LTIDX_NEXT}.get(a.cond, LTIDX_R if a.cond in new else LTIDX))
     for v in ('COPILOT_PROVIDER_TYPE', 'COPILOT_PROVIDER_BASE_URL', 'COPILOT_PROVIDER_API_KEY', 'COPILOT_PROVIDER_API_KEY_COMMAND',
               'COPILOT_MODEL', 'COPILOT_PROVIDER_MODEL_ID', 'COPILOT_PROVIDER_WIRE_MODEL'):
         env.pop(v, None)

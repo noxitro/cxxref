@@ -58,11 +58,36 @@ class SkillTest(unittest.TestCase):
             os.makedirs(os.path.join(root, '.index'))
             with open(os.path.join(root, '.index', 'index.tsv'), 'w', encoding='utf-8') as f:
                 f.write('')
-            out = json.loads(run(os.path.join(root, 'src')))
-            self.assertIn('cxxref skill', out['additionalContext'])
-            self.assertLess(len(out['additionalContext']), 300)
+            note = json.loads(run(os.path.join(root, 'src')))['additionalContext']
+            self.assertIn('cxxref skill', note)
+            # 実行するコマンドを、場所まで書いて渡す(モデルが場所を組み立て損ねると、hook が通さず断られる)。
+            # 書いてあるコマンドは、そのまま preToolUse の hook が通す形
+            cmd = re.search(r'python -I (["\']).+?\1 refs', note).group(0)
+            self.assertIn(os.path.realpath(CLI), cmd)
+            self.assertIn('"allow"', self.hook({'toolName': 'powershell', 'toolArgs': {'command': cmd + ' ns::File::Read'}}))
+            # 索引のあるリポジトリでは、モデルを呼ぶたびに送られる。短く保つ(場所の長さは除く)
+            self.assertLess(len(note) - len(os.path.realpath(CLI)), 600)
         finally:
             shutil.rmtree(root)
+
+    def test_session_note_without_a_quotable_path(self):
+        # プラグインの場所に、どちらの引用符の中にも置けない文字があれば、コマンドは書かず、skill を読ませる文に戻す
+        base = tempfile.mkdtemp()
+        try:
+            plugin = os.path.join(base, "a$b'c", 'cxxref')
+            os.makedirs(os.path.join(plugin, 'scripts'))
+            os.makedirs(os.path.join(plugin, 'mcp'))
+            shutil.copy2(HOOK, os.path.join(plugin, 'scripts'))
+            open(os.path.join(plugin, 'mcp', 'cxxref_cli.py'), 'w').close()
+            os.makedirs(os.path.join(base, 'repo', '.index'))
+            open(os.path.join(base, 'repo', '.index', 'index.tsv'), 'w').close()
+            p = subprocess.run([sys.executable, '-I', os.path.join(plugin, 'scripts', 'cxxref_hook.py'), 'session'], capture_output=True,
+                               timeout=30, input=json.dumps({'cwd': os.path.join(base, 'repo')}).encode())
+            note = json.loads(p.stdout.decode())['additionalContext']
+            self.assertIn('load the cxxref skill', note)
+            self.assertNotIn('python -I', note)
+        finally:
+            shutil.rmtree(base)
 
     def hook(self, payload):
         data = payload if isinstance(payload, bytes) else json.dumps(payload).encode('utf-8')

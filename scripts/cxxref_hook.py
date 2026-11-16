@@ -40,7 +40,8 @@ import sys
 import unicodedata
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CLI = os.path.normcase(os.path.realpath(os.path.join(HERE, '..', 'mcp', 'cxxref_cli.py')))
+CLI_PATH = os.path.realpath(os.path.join(HERE, '..', 'mcp', 'cxxref_cli.py'))
+CLI = os.path.normcase(CLI_PATH)
 SHELLS = {'powershell', 'pwsh'}
 PYTHON = re.compile(r'(?i)(?:python3?|py)(?:\.exe)?')
 _ASCII = {chr(c) for c in range(0x20, 0x7f)}
@@ -111,6 +112,24 @@ def allowed(command):
 SESSION_NOTE = ('This repository has a cxxref index (.index, built by clang over every C++ translation unit). '
                 'When the question is where a C++ symbol is used or called, or what a change to it would affect, '
                 'load the cxxref skill before grepping. When asked to make the change yourself, grep as usual.')
+# 実行するコマンドまで書いた形。skill を読む 1 往復と、モデルが CLI の場所を組み立て損ねて断られる回を省く
+# 【実測: v15m。skill 版の 33 回中 13 回、SKILL.md の「..\..」を縮め損ねた場所で最初のコマンドが断られ、やり直していた】
+SESSION_NOTE_CMD = ('This repository has a cxxref index (.index, built by clang over every C++ translation unit). '
+                    'When the question is where a C++ symbol is used or called, or what a change to it would affect, '
+                    'run this in PowerShell before grepping, exactly as written and as a command of its own (nothing chained): '
+                    '{cmd} <name> (<name>: the qualified name or its suffix). Its `calls` are the answer; do not grep the '
+                    'source again to confirm them. The cxxref skill has the options; you do not need to load it first. '
+                    'When asked to make the change yourself, grep as usual.')
+
+
+def cli_command():
+    """このプラグインの CLI を refs で呼ぶ PowerShell の 1 行(名前の手前まで)。allowed() が通す形で書けなければ None
+    (場所に、引用符の中に置けない文字がある。そのときは skill を読ませる文に戻す)。"""
+    for q in QUOTED:
+        cmd = f'python -I {q}{CLI_PATH}{q} refs'
+        if allowed(cmd + ' x'):
+            return cmd
+    return None
 
 
 def has_index(cwd):
@@ -132,10 +151,11 @@ def has_index(cwd):
 
 
 def session_start(data):
-    """sessionStart: 索引のあるリポジトリでだけ、skill を使う場面を 1 文で知らせる。索引が無ければ何も足さない
+    """sessionStart: 索引のあるリポジトリでだけ、索引を引く場面と、そのコマンドを知らせる。索引が無ければ何も足さない
     (skill の説明文だけでは、使わないモデルがいた【実測: Claude Haiku 5.5 は grep から始めた。gpt-6-luna は読んだ】)。"""
     if has_index(data.get('cwd')):
-        sys.stdout.write(json.dumps({'additionalContext': SESSION_NOTE}))
+        cmd = cli_command()
+        sys.stdout.write(json.dumps({'additionalContext': SESSION_NOTE_CMD.format(cmd=cmd) if cmd else SESSION_NOTE}))
     return 0
 
 

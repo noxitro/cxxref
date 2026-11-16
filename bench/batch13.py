@@ -17,6 +17,7 @@ ap.add_argument('--model', default='gpt-6-luna')
 ap.add_argument('--provider', default='')
 ap.add_argument('--only', default='')
 ap.add_argument('--stop-file', default=os.path.join(BENCH, 'runs13', 'STOP'))
+ap.add_argument('--skill-ref', default='', help='run13.py にそのまま渡す(条件 R の skill 版を作るコミット)')
 ap.add_argument('--rotate', action='store_true', help='条件の順番を回ごとに 1 つずつずらす(前の回のプロンプトのキャッシュを読める順番が、条件で偏らないように)')
 a = ap.parse_args()
 
@@ -45,6 +46,8 @@ for rep in range(1, a.reps + 1):
                    '--rep', str(rep), '--round', a.round, '--model', a.model]
             if a.provider:
                 cmd += ['--provider', a.provider]
+            if a.skill_ref:
+                cmd += ['--skill-ref', a.skill_ref]
             r = subprocess.run(cmd, cwd=BENCH)
             if r.returncode != 0:
                 print(f'{name}: run13 failed ({r.returncode})', flush=True)
