@@ -168,14 +168,20 @@ test("enableRoot: 引数が無ければ git のルート、リポジトリでな
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 
-test("parseProgress: いちばん進んだ TU と、解析エラーの数(前後した行・ほかの行は無視)", () => {
+test("parseProgress: 終わったものの数(行の数)と、解析エラーの数(ほかの行は無視)", () => {
+  // 並列なので n は前後する。いちばん大きい n(9)ではなく、終わった行の数(3)を使う
   const log = "[3/322] ok a.cpp\r\nwarning: something\r\n[9/322] NG b.cpp\r\n[7/322] ok c.cpp\r\n[ 10/322] ok d.cpp\r\n";
-  assert.deepEqual(parseProgress(log), { done: 9, total: 322, ng: 1 });
+  assert.deepEqual(parseProgress(log), { done: 3, total: 322, ng: 1 });
+  // 最後の TU の行が出ても、時間のかかる TU がまだ残っていれば全体に届かない
+  assert.deepEqual(parseProgress("[1/3] ok a.cpp\n[3/3] ok c.cpp\n"), { done: 2, total: 3, ng: 0 });
+  // 差分パス(altpass.py --progress)の形も同じ
+  assert.deepEqual(parseProgress("alt pass: preparing\nalt pass: 2 files to analyze\n[1/2] NG x/a.h\n"), { done: 1, total: 2, ng: 1 });
+  assert.equal(parseProgress("alt pass: preparing\n"), null);
   assert.equal(parseProgress("compile_commands.json: x\r\n"), null);
   assert.equal(parseProgress(""), null);
 });
 
-test("progressNote: 段階が変わったとき・1 割ごと(10 秒あけて)・compile_commands.json は 1 分ごとに出す", () => {
+test("progressNote: 段階が変わったとき・1 割ごと(10 秒あけて)・数の無い段階は 1 分ごとに出す", () => {
   let s = {};
   const step = (snap, now, sec) => { const r = progressNote(s, snap, now, sec); s = r.state; return r.note; };
   assert.match(step({ phase: "cdb" }, 0, 0), /compile_commands\.json を用意しています$/);
@@ -185,7 +191,24 @@ test("progressNote: 段階が変わったとき・1 割ごと(10 秒あけて)�
   assert.equal(step({ phase: "tu", done: 9, total: 100, ng: 0 }, 80000, 80), "");      // 1 割に届かない
   assert.equal(step({ phase: "tu", done: 30, total: 100, ng: 2 }, 65000, 65), "");     // 10 秒たっていない
   assert.match(step({ phase: "tu", done: 30, total: 100, ng: 2 }, 73000, 73), /30\/100\(30%、解析エラー 2、73 秒\)/);
-  assert.equal(step({ phase: "tu", done: 100, total: 100, ng: 2 }, 99000, 99), "");    // 終わりは別に出す
+  assert.equal(step({ phase: "tu", done: 100, total: 100, ng: 2 }, 99000, 99), "");    // 終わりは "finish" で出す
+  // TU の解析の後: 仕上げ → 差分パスの対象選び → 差分パスの解析。どれも黙らない
+  assert.match(step({ phase: "finish" }, 100000, 100), /TU の解析が終わりました。索引を仕上げています$/);
+  assert.equal(step({ phase: "finish" }, 130000, 130), "");
+  assert.match(step({ phase: "finish" }, 161000, 161), /索引を仕上げています\(161 秒\)/);
+  assert.match(step({ phase: "alt" }, 162000, 162), /索引の本体ができました\(もう検索に使えます\)。続けて差分パス.*対象を選んでいます$/);
+  assert.match(step({ phase: "alt" }, 223000, 223), /差分パスの対象を選んでいます\(223 秒\)/);
+  const first = step({ phase: "alt", done: 5, total: 40, ng: 0 }, 224000, 224);         // 数が出始めた(本体のことは繰り返さない)
+  assert.match(first, /差分パス.*5\/40\(12%、224 秒\)/);
+  assert.doesNotMatch(first, /本体/);
+  assert.equal(step({ phase: "alt", done: 7, total: 40, ng: 0 }, 260000, 260), "");     // 次の 1 割に届かない
+  assert.match(step({ phase: "alt", done: 8, total: 40, ng: 1 }, 270000, 270), /8\/40\(20%、解析できないもの 1、270 秒\)/);
+});
+
+test("progressNote: 差分パスへ対象選びを見ずに入ったら、本体ができたことも言う。TU が無く終わったら仕上げを出す", () => {
+  const r = progressNote({ phase: "finish", at: 0 }, { phase: "alt", done: 1, total: 10, ng: 0 }, 5000, 5);
+  assert.match(r.note, /索引の本体ができました\(もう検索に使えます\)。続けて差分パス.*1\/10\(10%、5 秒\)/);
+  assert.match(progressNote({ phase: "cdb", at: 0 }, { phase: "finish" }, 1000, 1).note, /索引を仕上げています$/);
 });
 
 test("runsUnderCli: 拡張に渡された SDK が CLI の配布物の中なら CLI、そうでなければアプリ", () => {

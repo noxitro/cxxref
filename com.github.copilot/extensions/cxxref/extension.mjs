@@ -5,7 +5,8 @@
 //                         先に scripts\get-ltidx.ps1 で取ってくる(取り直せなければ、そう言って手元のもので続ける)。
 //                         索引がすでにあれば、変わった TU だけを作り直す(-Update)。full を付けると最初から作り直す。
 //                         ltidx の出力の形式が変わった版に替わったときは、-Update でも全 TU を作り直す。裏で動かし、終わったらそう出す。
-//                         走っている間は、進み具合(compile_commands.json の用意・解析した TU の数)をときどき出す。
+//                         走っている間は、進み具合(compile_commands.json の用意・解析した TU の数・索引の仕上げ・
+//                         差分パスで解析したファイルの数)をときどき出す。
 //                         ルートを省くと、作業フォルダから親へさかのぼって .index のあるフォルダ、無ければ作業フォルダ。
 //                         compile_commands.json の作り元(.slnx など)の候補が複数あれば、ダイアログで選ばせる。
 //                         選んだものは作り方の記録に残り、次からは聞かない。
@@ -90,19 +91,36 @@ async function chooseProject(plugin, root) {
   return { project: choices.find((c) => c.label === picked).path };
 }
 
-// index-project を走らせている間、ltidx のログ(.index\index.log)を数秒おきに見て、進み具合を画面に出す。
-// 出すかどうかは progressNote が決める(段階が変わったとき・TU が 1 割進んだときなど)。止める関数を返す
-function watchProgress(ltLog, t1) {
+// t1 より後に書かれたファイルの中身。無い・前の実行のもの・読めなければ null
+function freshText(path, t1) {
+  try {
+    return statSync(path).mtimeMs >= t1 ? readFileSync(path, "utf8") : null;
+  } catch {
+    return null;
+  }
+}
+
+// index-project を走らせている間、ltidx のログ(.index\index.log)と差分パスの進み具合(.index\index.tsv.alt.progress)を
+// 数秒おきに見て、進み具合を画面に出す。前の実行のものは見ない(どちらも始まると書き直される)。
+// 出すかどうかは progressNote が決める(段階が変わったとき・1 割進んだときなど)。止める関数を返す
+function watchProgress(dir, t1) {
   let state = {};
   const tick = () => {
-    let snap = { phase: "cdb" };
-    try {
-      if (statSync(ltLog).mtimeMs >= t1) {  // 前の実行のログは見ない(ltidx が始まると書き直される)
-        const p = parseProgress(readFileSync(ltLog, "utf8"));
-        if (!p) return;  // ltidx は始まったが、まだ 1 つも終わっていない
-        snap = { phase: "tu", ...p };
+    let snap = { phase: "cdb" };  // どちらもまだ(compile_commands.json を用意している)
+    const alt = freshText(join(dir, "index.tsv.alt.progress"), t1);
+    const lt = alt === null ? freshText(join(dir, "index.log"), t1) : null;
+    if (alt !== null) {
+      snap = { phase: "alt", ...parseProgress(alt) };  // 数が無ければ、対象を選んでいる
+    } else if (lt !== null) {
+      const p = parseProgress(lt);
+      if (!p) {
+        // ltidx は始まったが、まだ 1 つも終わっていない。終わりの行があれば、解析する TU が無かった(-Update で変わったものが無い)
+        if (!/^TU \d+\/\d+ ok/m.test(lt)) return;
+        snap = { phase: "finish" };
+      } else {
+        snap = p.done >= p.total ? { phase: "finish" } : { phase: "tu", ...p };
       }
-    } catch { }  // まだ無い(compile_commands.json を用意している)
+    }
     const now = Date.now();
     const r = progressNote(state, snap, now, Math.round((now - t1) / 1000));
     state = r.state;
@@ -167,7 +185,7 @@ async function indexCommand(ctx) {
     await tell(`cxxref: 索引を${what}始めました(${root})。裏で動かすので、作業を続けてかまいません。ログ: ${log}`);
     // index-project.ps1 は、索引ができたら 0、できなければ 2 で終える(ltidx の失敗や異常終了も 2)
     const args = ["-Root", root, ...(pick.project ? ["-Project", pick.project] : []), ...(update ? ["-Update"] : [])];
-    const stop = watchProgress(join(dir, "index.log"), Date.now());
+    const stop = watchProgress(dir, Date.now());
     const r = await run(join(plugin, "scripts", "index-project.ps1"), args, log).finally(stop);
     const sec = Math.round((Date.now() - t0) / 1000);
     if (r.code === 0) {

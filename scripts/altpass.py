@@ -32,6 +32,7 @@
 
 usage: python -I altpass.py --index <root>\\.index\\index.tsv [--root DIR] [--cdb DIR] [--jobs N] [--passes N]
                             [--ltidx EXE] [--no-define] [--force] [--only REL ...] [--no-unbuilt] [--unbuilt-only] [--unbuilt-max N]
+                            [--progress FILE]
        --root / --cdb / --jobs を省くと、<索引>.recipe.json(index-project.ps1 が書く)から読む
 """
 import argparse
@@ -508,6 +509,46 @@ def parse_unbuilt(ltidx, entry, root, seen, work):
     return rows, errors, sec
 
 
+class Progress:
+    """--progress のファイルに進み具合を書く(/cxxref-index が数秒おきに読んで画面に出す)。ltidx のログと同じ
+    "[n/全体] ok|NG ファイル" の行を、ファイルを 1 つ解析し終えるたびに足す(NG は解析できなかったファイル)。
+    解析を始める前(索引を読み、対象を選んでいる間)は、頭の 1 行だけ。path が無ければ何もしない。"""
+
+    def __init__(self, path):
+        self.f, self.n, self.total = None, 0, 0
+        if path:
+            try:
+                self.f = open(path, 'w', encoding='utf-8', newline='\n')
+                self._write('alt pass: preparing\n')
+            except OSError:
+                self.f = None
+
+    def _write(self, s):
+        if not self.f:
+            return
+        try:
+            self.f.write(s)
+            self.f.flush()
+        except OSError:
+            self.f = None
+
+    def start(self, total):
+        self.total = total
+        self._write(f'alt pass: {total} files to analyze\n')
+
+    def done(self, rel, s):
+        self.n += 1
+        self._write(f'[{self.n}/{self.total}] {"NG" if s.get("failed") else "ok"} {rel}\n')
+
+    def close(self):
+        if self.f:
+            try:
+                self.f.close()
+            except OSError:
+                pass
+            self.f = None
+
+
 def run(a):
     index = os.path.abspath(a.index)
     rec = {}
@@ -534,6 +575,7 @@ def run(a):
               ' Code inside inactive #if branches is listed by text only')
         return 0
     t0 = time.time()
+    progress = Progress(a.progress)
     ranges, row_lines, comments, tus, readers, files_of, macros, seen = load_base(index, a.only or None)
     if a.unbuilt_only:  # 無効な #if の分は解析し直さず、前の結果をそのまま残す
         ranges = {}
@@ -674,22 +716,26 @@ def run(a):
         s.update(sig=sig, tu=os.path.relpath(tu, root).replace('\\', '/') if norm(tu).startswith(norm(root)) else tu)
         return rel, rows, s
 
+    progress.start(len(todo) + len(un_todo))
     try:
         with ThreadPoolExecutor(max_workers=max(1, jobs)) as ex:
             for n, (rel, rows, s) in enumerate(ex.map(one, enumerate(todo)), 1):
                 units[rel] = (rows, s)
+                progress.done(rel, s)
                 if a.verbose:
                     print(f'[{n}/{len(todo)}] {rel}: {s["covered"]}/{s["target"]} lines, {s["rows"]} rows, '
                           f'{s["runs"]} runs ({s["errors"]} with errors, {s["failed"]} failed), {s["sec"]} s'
                           + (f', -D {" ".join(s["defines"])}' if s['defines'] else ''), flush=True)
             for n, (rel, rows, s) in enumerate(ex.map(one_unbuilt, enumerate(un_todo)), 1):
                 units[rel] = (rows, s)
+                progress.done(rel, s)
                 if a.verbose:
                     print(f'[unbuilt {n}/{len(un_todo)}] {rel}: {s["rows"]} rows'
                           f'{" (with errors)" if s["errors"] else ""}{" (failed)" if s["failed"] else ""}, {s["sec"]} s,'
                           f' with the options of {s["tu"]}', flush=True)
     finally:
         shutil.rmtree(work, ignore_errors=True)
+        progress.close()
     if a.only:  # 指定外のファイルは解析していない。前の結果を残す(書き直すと消える)
         only = set(a.only)
         for rel, s in old_units.items():
@@ -757,6 +803,7 @@ def main(argv=None):
     ap.add_argument('--unbuilt-max', type=int, default=UNBUILT_MAX,
                     help=f'analyze at most this many of those sources in one run (default {UNBUILT_MAX})')
     ap.add_argument('--verbose', action='store_true', help='one line per analyzed file')
+    ap.add_argument('--progress', help='write "[n/total] ok|NG file" lines to this file as files are analyzed')
     return run(ap.parse_args(argv))
 
 

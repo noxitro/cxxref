@@ -222,7 +222,7 @@ MCP サーバーは、プラグインには入れていません。ツールの�
 - ltidx の出力の形式が変わった版に替わったときは、変わった TU だけでなく全 TU を作り直す(形式の版を TU ごとの記録に入れている)。プラグインを更新したら、`/cxxref-index` を 1 回実行すれば、新しい ltidx を取ってきて索引も新しい形式に揃う。MCP サーバーも、取ってきた ltidx が古いと分かれば、最初の結果にそう書き添える
 - `compile_commands.json` の作り元(`.slnx`・`.sln`・`CMakeLists.txt`・`.vcxproj`。探し方は `scripts\README.md`)の候補が複数あれば、CLI のダイアログで選ばせる(モデルは呼ばない)。選んだものは作り方の記録(`.index\index.tsv.recipe.json`)に残るので、次からは聞かない。選び直すときは、その記録を消してから実行する
 - 始めたとき・終わったとき(かかった秒数)・失敗したとき(ログの場所)を、セッションに出す。ログは `<ルート>\.index\cxxref-index.log`。同時に 2 つは走らせない
-- 走っている間は、進み具合をセッションに出す。`compile_commands.json` を用意している間はそう出し(1 分を超えると 1 分ごとに経過秒数も)、ltidx が始まると、解析した TU の数・割合・解析エラーの数を、およそ 1 割進むごとに出す(行が増えすぎないよう、前の行から 10 秒以上あける)。元は ltidx が TU ごとに書く `<ルート>\.index\index.log`(`[n/全体] ok|NG ファイル` の行)。ターミナルで細かく追うなら `Get-Content -Wait <ルート>\.index\index.log`
+- 走っている間は、進み具合をセッションに出す。`compile_commands.json` を用意している間はそう出し(1 分を超えると 1 分ごとに経過秒数も)、ltidx が始まると、解析し終えた TU の数・割合・解析エラーの数を、およそ 1 割進むごとに出す(行が増えすぎないよう、前の行から 10 秒以上あける)。TU の解析が終わると「索引を仕上げています」と出し、続く差分パス(無効な `#if` の中と、どの TU も読まないソースの解析)に入ると「索引の本体ができました(もう検索に使えます)」と、解析したファイルの数・割合を同じように 1 割ごとに出す。数の出ない段階(仕上げ・差分パスの対象選び)が 1 分を超えると、1 分ごとに経過秒数を出す。元は ltidx が TU ごとに書く `<ルート>\.index\index.log` と、差分パスが書く `<ルート>\.index\index.tsv.alt.progress`(どちらも `[n/全体] ok|NG ファイル` の行)。ターミナルで細かく追うなら `Get-Content -Wait <ルート>\.index\index.log`(差分パスは `index.tsv.alt.progress`)
 
 **Copilot CLI の拡張は実験的機能で、機能フラグ `EXTENSIONS` が有効なときだけ読み込まれます。** `%USERPROFILE%\.copilot\settings.json` に `"feature_flags": { "enabled": ["EXTENSIONS"] }` を足す(すでに `feature_flags` があれば、`enabled` の配列に `"EXTENSIONS"` を足す)か、環境変数 `COPILOT_CLI_ENABLED_FEATURE_FLAGS=EXTENSIONS` を設定してから起動します。拡張はセッションが始まってから読み込まれるので、入力欄に `/cx` と打って一覧に出てから実行します(一覧に出る前に送ると、ただの依頼としてモデルに送られます)。
 
