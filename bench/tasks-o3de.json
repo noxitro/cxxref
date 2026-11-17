@@ -18,7 +18,7 @@
     "id": "O2",
     "kind": "対照: 修飾名で rg でも絞れる。Windows でビルドされないファイル(Linux 用、PhysX4)や構成で無効になる #if の中を含む",
     "prompt": "このフォルダは C++ のゲームエンジン O3DE(Open 3D Engine)のソースです。`AZ::DynamicModuleHandle::Create` を呼び出している箇所をすべて挙げてください(定義・宣言は含めません)。",
-    "note": "正解は rg で `DynamicModuleHandle::Create(` を引き、テストのフォルダと定義(DynamicModuleHandle_WinAPI/UnixLike/Unimplemented.cpp)を除いて、各行がコメントでないことを読んで確かめた。Windows でビルドされないもの: Platform/Linux の LibEVDevWrapper.cpp、PhysX4 の Module.cpp(PhysX5 と片方だけ)",
+    "note": "正解は rg で `DynamicModuleHandle::Create(` を引き、テストのフォルダと定義(DynamicModuleHandle_WinAPI/UnixLike/Unimplemented.cpp)を除いて、各行がコメントでないことを読んで確かめた。Windows でビルドされないもの: Platform/Linux の LibEVDevWrapper.cpp(PhysX4 の Module.cpp は、計測に使った構成では PhysX5 と両方ビルドされる。前は「片方だけ」と書いていたが誤り)",
     "truth": [
       "Code/LauncherUnified/Launcher.cpp:571",
       "Code/Framework/AzToolsFramework/AzToolsFramework/API/PythonLoader.cpp:50",

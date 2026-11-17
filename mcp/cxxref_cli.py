@@ -8,7 +8,9 @@
 結果がクライアントの上限(18,000 バイト)を超えるなら短い形にして、並べきれなかった行を一覧のファイルに書く。
 
 MCP サーバーとの違い
-- 呼ぶたびに索引を開き直す(呼び出しをまたいで保たない)。大きな索引では 1 回が遅くなる
+- 呼ぶたびにプロセスを起こすので、メモリには何も保てない。ディスクの写し(名前の目次 <索引>.names.cache と、単語のフィルタ
+  <索引>.words.cache)は MCP サーバーと同じものを使い、無ければ・古ければ作る(その回だけ遅い)。写しを使わないと、
+  大きな索引では 1 回が数分かかる【実測: UE5(索引 12 GB)で 41〜210 秒 → 8〜21 秒、O3DE で 3.7 秒 → 1.2 秒】
 - 自動で作り直すのは、この PC で index-project(/cxxref-index)が作った索引だけ(作り直しの記録の指紋を
   %LOCALAPPDATA%\\cxxref\\trusted に登録したもの)。skill からの呼び出しは hook が許可を自動で出すため
 - 作り直しを長く待つ。古い索引で答えると、その注記を見たモデルが確かめ直しの検索を足すことがあるため。時間より、
@@ -44,7 +46,7 @@ def main(argv=None):
         wait = float(os.environ.get('CRI_AUTO_UPDATE_WAIT', WAIT))
     except ValueError:
         wait = WAIT
-    cfg = server.Config(wait=None if os.environ.get('CRI_AUTO_UPDATE') == '0' else max(0.0, wait), resident=False)
+    cfg = server.Config(wait=None if os.environ.get('CRI_AUTO_UPDATE') == '0' else max(0.0, wait), watch=False)
     # skill からの呼び出しは hook が自動で許可するので、この PC で作った索引だけを自動で作り直す(autoupdate.trusted_recipe)
     cfg.trusted_only = True
     if a.cmd == 'refs':
@@ -59,6 +61,8 @@ def main(argv=None):
         code, text = server.call_tool(cfg, a.cmd, args)
     except Exception as e:  # 索引の読み込みの失敗など。MCP サーバー(server.handle)と同じく 1 行の誤りにする
         code, text = 1, f'{type(e).__name__}: {e}\nSearch with rg as usual.\n'
+    finally:
+        cfg.close()  # 目次の写しを開いたままにしない
     out = io_utf8()
     out.write(text)
     out.flush()

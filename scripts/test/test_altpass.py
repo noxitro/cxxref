@@ -324,6 +324,35 @@ class AltPassTest(unittest.TestCase):
         self.assertIn('1 without a TU', out)
         self.assertEqual(self.rows(), [])
 
+    def test_source_no_tu_reads(self):
+        # テスト・別のプラットフォームのソースなど、どの TU も読まない .cpp は、いちばん近い TU のコマンドを借りて解析する。
+        # 行は、どの TU も読んでいないファイル(そのソースと、それだけが読むヘッダー)のものだけを差分に入れる
+        self.write('mod/lib/src/lib.h', '#pragma once\nstruct Lib { void Run(int); };\n')
+        self.write('mod/lib/src/lib.cpp', '#include "lib.h"\nvoid Lib::Run(int) {}\n', ['/DLIB=1'])
+        self.write('mod/lib/tests/fixture.h', '#pragma once\n#include "../src/lib.h"\ninline void Prep(Lib& l) { l.Run(0); }\n')
+        test = 'void Test() { Lib l; Prep(l); l.Run(LIB); }'
+        self.write('mod/lib/tests/lib_test.cpp', '#include "fixture.h"\n#include "missing.h"\n' + test + '\n')
+        self.write('other/far.cpp', 'void Far() {}\n')  # TU と共有するフォルダが浅い。コマンドを借りない
+        self.build()
+        out = self.alt()
+        self.assertIn('1 sources no TU reads (1 analyzed with the options of the nearest TU, 0 unchanged, 1 of 2 skipped)', out)
+        rows = self.rows()
+        # /DLIB=1 を借りているので l.Run(LIB) が解決できる。missing.h が無くても先へ進む
+        self.assertIn(('Lib::Run', 'call', 'Test', f'mod/lib/tests/lib_test.cpp:3:{test.index("Run(LIB)") + 1}'), rows)
+        self.assertIn(('Lib::Run', 'call', 'Prep', 'mod/lib/tests/fixture.h:3:30'), rows)
+        self.assertEqual({r[3].rsplit(':', 2)[0] for r in rows}, {'mod/lib/tests/lib_test.cpp', 'mod/lib/tests/fixture.h'})
+        u = self.state()['units']['mod/lib/tests/lib_test.cpp']
+        self.assertEqual((u['kind'], u['tu'], u['failed'], u['errors'], u['files']),
+                         ('unbuilt', 'mod/lib/src/lib.cpp', 0, 1, ['mod/lib/tests/fixture.h', 'mod/lib/tests/lib_test.cpp']))
+        # 何も変わっていなければ、解析し直さない(行は前の差分から引き継ぐ)
+        out = self.alt()
+        self.assertIn('(0 analyzed with the options of the nearest TU, 1 unchanged, 1 of 2 skipped)', out)
+        self.assertEqual(self.rows(), rows)
+        # --no-unbuilt では解析せず、前の行も残さない
+        out = self.alt('--no-unbuilt')
+        self.assertNotIn('sources no TU reads', out)
+        self.assertEqual(self.rows(), [])
+
     def test_recipe(self):
         self.write('a.cpp', 'void A();\nvoid Main() {\n#ifdef NEVER\n  A();\n#endif\n}\n', [])
         self.build()

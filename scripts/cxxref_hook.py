@@ -111,7 +111,8 @@ def allowed(command):
 
 SESSION_NOTE = ('This repository has a cxxref index (.index, built by clang over every C++ translation unit). '
                 'When the question is where a C++ symbol is used or called, or what a change to it would affect, '
-                'load the cxxref skill before grepping. When asked to make the change yourself, grep as usual.')
+                'load the cxxref skill before grepping. When asked to make the change yourself, grep as usual. '
+                'Answer in the language of the question.')
 # 実行するコマンドまで書いた形。skill を読む 1 往復と、モデルが CLI の場所を組み立て損ねて断られる回を省く
 # 【実測: v15m。skill 版の 33 回中 13 回、SKILL.md の「..\..」を縮め損ねた場所で最初のコマンドが断られ、やり直していた】
 SESSION_NOTE_CMD = ('This repository has a cxxref index (.index, built by clang over every C++ translation unit). '
@@ -121,7 +122,9 @@ SESSION_NOTE_CMD = ('This repository has a cxxref index (.index, built by clang 
                     'to confirm them. Its matches in "files no indexed TU includes" (tests, other platforms) are not '
                     'analyzed: judge them from the line, or view the file, and include the real ones. '
                     'The cxxref skill has the options; you do not need to load it first. '
-                    'When asked to make the change yourself, grep as usual.')
+                    'When asked to make the change yourself, grep as usual. Answer in the language of the question.')
+# 最後の 1 文: hook の文が英語なので、日本語の問いに英語で答える回が増えていた【実測: v16m。各 60 回で、rg だけ 10 回、
+# skill 版 23〜27 回】
 # 「`calls` が答え」とだけ書いていた前の文では、索引の構成に入らないファイル(テスト、別のプラットフォーム)の一致を、
 # モデルが答えに入れなかった【実測: big1。O3DE の 3 問 15 回で、テストの呼び出しを全部挙げたのは 3 回。MCP 版は 11 回】
 

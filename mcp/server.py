@@ -28,7 +28,7 @@ import namedir  # noqa: E402
 import srctree  # noqa: E402
 import wordfilter  # noqa: E402
 
-VERSION = '0.5.10'
+VERSION = '0.5.11'
 PROTOCOL = '2025-06-18'
 # 結果の大きさの上限の既定。Copilot CLI は 20,480 バイト(COPILOT_LARGE_OUTPUT_THRESHOLD_BYTES)を超える
 # ツールの結果をモデルに渡さず、ファイルに退かせて先頭だけを見せる【実測: 1.0.18 の app.js。1.0.105 は native に移り、
@@ -150,7 +150,8 @@ def workspace():
 
 
 class Config:
-    def __init__(self, root=None, index=None, wait=None, max_bytes=MAX_BYTES, resident=True, part_bytes=PART_BYTES):
+    def __init__(self, root=None, index=None, wait=None, max_bytes=MAX_BYTES, resident=True, part_bytes=PART_BYTES,
+                 watch=True):
         self.fixed = os.path.abspath(root) if root else None  # None なら、呼ばれるたびに索引のあるフォルダを探す
         self.index = os.path.abspath(index) if index else None
         self.wait = wait  # 自動更新で待つ秒数。None なら自動更新しない
@@ -163,6 +164,9 @@ class Config:
         self.last_lists = []  # 同じく、書いたファイルの全部
         # 呼び出しをまたいで保つもの(False なら、呼ぶたびにソースと索引を全部読む)
         self.resident = resident
+        # ソースの変更の知らせを受けるか。1 回だけ引いて終わるプロセス(cxxref_cli.py)では要らない(False なら、ソースの一覧は
+        # 呼ぶたびに走査し、印のファイルも作らない。ディスクの写し(名前の目次・単語のフィルタ)は使う)
+        self.watch = watch
         self._trees = {}  # ルート -> (srctree.SourceTree, wordfilter.WordFilter)
         self._names = {}  # 索引のパス -> namedir.NameDir
         self._no_names = set()  # 目次を作れなかった索引の版
@@ -180,7 +184,7 @@ class Config:
             words.load(idx.codec())
             other_words = wordfilter.WordFilter(paths[0] + '.words-other.cache', other=True)  # C/C++ 以外のファイル
             other_words.load(idx.codec())
-            self._trees[key] = (srctree.SourceTree(root, ltq.SRC_EXT, other=ltq.is_other), words, other_words)
+            self._trees[key] = (srctree.SourceTree(root, ltq.SRC_EXT, watch=self.watch, other=ltq.is_other), words, other_words)
         idx.tree, idx.words, idx.other_words = self._trees[key]
         for p in paths:
             k = os.path.normcase(os.path.abspath(p))
