@@ -1365,6 +1365,71 @@ def section(title, items, limit, pos, listed, skip=None):
         more_by_folder([p for p, _ in pos[limit:]], '  ')
 
 
+CONTEXT_BYTES = 9000  # --context の節の上限の既定(MCP サーバーと CLI は、結果全体が上限に収まる分だけを --context-bytes で渡す)
+# --context で前後の行を出すのは、直す先がこの数以上のファイルに散るときだけ。v14e では、16 の呼び出しが散る問題で
+# rg だけの 0.81 倍、2〜3 ファイルの問題で 1.06〜1.27 倍だった【実測】。境目の 5 は推測
+CONTEXT_MIN_FILES = 5
+CONTEXT_MAX_READ = 200  # 前後の行のために読むファイルの数の上限(数千ファイルに散る名前で、全部を読まない)
+
+
+def print_context(idx, pos, n, budget=CONTEXT_BYTES):
+    """pos((パス, 行) の集まり)の前後 n 行のソースを、ファイルごとに重なりをまとめて出す(refs --context)。呼び出し側を
+    直すときに、ファイルを開かずに、この行を元の文面として編集を書けるようにする【実測: v14e・v14f。呼び出しが多くの
+    ファイルに散る問題で、開くファイルの文字数と往復が減った】。印 > がその行。
+    - 読むのはルートの内側のファイルだけ(Index.read。索引に書かれたパスは細工されうる)
+    - 文字コードが分からず読み替えた文字(U+FFFD)のある所は出さない(元の文面として使えない)
+    - budget バイトまで。入らなかったファイルは数だけ言う(場所は上の節に並んでいる)"""
+    want = {}
+    for path, ln in pos:
+        want.setdefault(path, set()).add(ln)
+    print(f'\n== source around each line above (+-{n} lines; > marks the line). To edit a caller, use these lines as the '
+          'old text instead of opening the file')
+    used, read, left, unread = 0, 0, 0, []
+    for path in sorted(want):
+        if budget - used < 300 or read >= CONTEXT_MAX_READ:  # 残りに 1 ファイル分も入らない
+            left += 1
+            continue
+        read += 1
+        data = idx.read(path)
+        if data is None:
+            unread.append(path)
+            continue
+        ls = data.decode('utf-8', 'replace').split('\n')
+        if ls and ls[-1] == '':  # 改行で終わるファイルの、最後の改行の後ろは行ではない
+            ls.pop()
+        spans = []
+        for ln in sorted(want[path]):
+            lo, hi = max(1, ln - n), min(len(ls), ln + n)
+            if lo > hi:  # 索引の行が、今のファイルの終わりより後ろ
+                continue
+            if spans and lo <= spans[-1][1] + 1:
+                spans[-1][1] = max(spans[-1][1], hi)
+            else:
+                spans.append([lo, hi])
+        block = [f'--- {path}']
+        for i, (lo, hi) in enumerate(spans):
+            if i:
+                block.append('  ...')
+            for k in range(lo, hi + 1):
+                block.append(f'{">" if k in want[path] else " "}{k:5}| {ls[k - 1].rstrip(chr(13))}')
+        out = '\n'.join(block)
+        if not spans or '�' in out:
+            unread.append(path)
+            continue
+        size = len(out.encode('utf-8')) + 1
+        if used + size > budget:
+            left += 1
+            continue
+        used += size
+        print(out)
+    if left:
+        print(f'  ({left} more file{"s" * (left != 1)} not shown, to stay under the size limit: view the lines listed above '
+              'with a small line range)')
+    if unread:
+        more = f', ... {len(unread) - 5} more' if len(unread) > 5 else ''
+        print(f'  (not shown, because the file could not be read as it is in the index: {", ".join(unread[:5])}{more})')
+
+
 def cmd_refs(a, idx):
     name = a.name.lstrip(':')
     short = re.split(r'::', name)[-1]
@@ -1737,6 +1802,20 @@ def cmd_refs(a, idx):
                   ' listed), by folder:')
             for s in top_dirs([r[3] for r in fam_calls[cap:]], 5):
                 print('    ' + s)
+
+    if getattr(a, 'context', 0) and not remain and not a.all:
+        # 直す先: 呼び出し・マクロの展開・参照・宣言と定義に、上書きの宣言と定義・上書きへの呼び出しを足す
+        # (シグネチャを変えるなら、上書きも直す)。残りの一覧(--all)には出さない(一覧は 1 行ずつの場所だけ)
+        callers = [(r[3], r[4]) for r in calls + expands + uses + fam_calls]
+        places = callers + [(r[3], r[4]) for r in defs] + [pos for _, ps in fam for pos, _ in ps]
+        files = {p for p, _ in callers}
+        if len(files) >= CONTEXT_MIN_FILES:
+            print_context(idx, places, a.context, a.context_bytes)
+        else:
+            # 直す先が少ないときは前後の行を出さない。v14e では、呼び出しが 2〜3 ファイルの問題で前後の行(約 3,500 文字)を
+            # 出しても、モデルは定義のファイルを開き、費用は rg だけの 1.06〜1.27 倍だった【実測】
+            print(f'\n== source around each line above: not printed (the calls and references are in {len(files)} '
+                  f'file{"s" * (len(files) != 1)}). View each line above with a small line range, then edit')
 
     # dep 行: テンプレート本体では未解決。実体化で解決された位置は、その解決先を添える
     target_pos = {(r[3], r[4]) for r in target}
@@ -2136,6 +2215,12 @@ def main(argv=None, idx=None, skip=None):
     r.add_argument('--family', type=nonneg, default=None,
                    help='max overrides, and max calls resolved to the overrides, listed under "virtual dispatch" '
                         '(default: --limit, or 10 with --compact)')
+    r.add_argument('--context', type=nonneg, default=0,
+                   help='also print N source lines around each call, reference, declaration and definition (and the '
+                        'overrides), grouped by file, when they are spread over 5 or more files (for editing the callers '
+                        'without opening the files)')
+    r.add_argument('--context-bytes', type=nonneg, default=CONTEXT_BYTES,
+                   help=f'size limit of the --context section in bytes (default {CONTEXT_BYTES})')
     r.add_argument('--compact', action='count', default=0,
                    help='summarize low-value sections (comments, strings, local names, template calls resolved to '
                         'other symbols, matches resolved elsewhere) into counts per folder. Give it twice to also '

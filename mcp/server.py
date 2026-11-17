@@ -36,6 +36,12 @@ PROTOCOL = '2025-06-18'
 MAX_BYTES = 18000
 FIT_LIMITS = (60, 25, 10, 5, 2)  # 短い形でも上限を超えるときに、順に試す --limit(1 節に並べる行数)
 FIT_FAMILY = (10, 5, 2)  # 短い形でも上限を超えるときに、--limit の前に試す --family(並べる上書きの数、上書きへの呼び出しの数)
+# refs の前後の行(context。cxxref_cli.py だけが渡す)は、全文が上限に収まるときだけ、残りの大きさの分まで足す
+CONTEXT_SLACK = 800  # 残りの一覧の案内(ファイルの場所)が後から足される分の余裕
+CONTEXT_MIN_BYTES = 1500  # 残りがこれより小さければ、前後の行は出さない
+CONTEXT_LEFT = ' not shown, to stay under the size limit'  # ltq が、前後の行に入らなかったファイルがあると書く
+CONTEXT_SKIPPED = ('(source lines around the calls are not printed: with them the result would exceed the size limit. '
+                   'View the lines listed above with a small line range)\n')
 # 結果に 1 行ずつ並べきれなかったとき(上限に収めるために件数にまとめた行があるとき)は、結果に並べなかった行を 1 行ずつ並べた
 # 一覧(残りの一覧。結果と合わせると、名前を含む行がどれも 1 回ずつ出る)をファイルに書き、結果の最後の行でその場所を知らせる。
 # 名前やシグネチャを変えるときに、直す先を漏らさず、ソースを検索し直させないため
@@ -437,7 +443,7 @@ def write_lists(paths, root, args, texts, shown=None):
     return None, err
 
 
-def run_ltq(cfg, args, start=None):
+def run_ltq(cfg, args, start=None, context=0):
     idx = None
     root, note = cfg.resolve(start)
     base = ['--root', root] + (['--index', cfg.index] if cfg.index else [])
@@ -532,6 +538,12 @@ def run_ltq(cfg, args, start=None):
     if args[0] != 'refs' or code != 0 or idx is None:
         # 短い形があるのは refs だけ。ほかのコマンド(check に場所を数百渡したときなど)は、上限を超えたら末尾を切る
         return code, cut(text) if over(text) else text
+    ctx_note = ''
+    base_refs = idx.last_refs
+
+    def told(t):
+        """前後の行を出さなかったことを、上限に収まるなら最後に足す。"""
+        return t + ctx_note if ctx_note and not over(t + ctx_note) else t
     # クライアントは大きな結果をモデルに渡さない(Copilot CLI は 20,480 バイトを超えるとファイルに退かせ、先頭だけを見せる)。
     # 超えたら、短い形で出し直す。順に:
     # - 上書きの族(上書きと、上書きへの呼び出し)だけを 10 行ずつに絞る(他の節は全文のまま。大きな階層の virtual で効く)
@@ -571,12 +583,59 @@ def run_ltq(cfg, args, start=None):
     # 試した形の出力と、その実行で 1 行ずつ並べた行(残りの一覧は、結果の形の idx.last_refs から作る)
     seen = {fit_key(None, asked, fam): (code, text, idx.last_refs)}
 
+    def drop(lists):
+        """結果で知らせない一覧のファイルを消す。"""
+        for p in lists:
+            with contextlib.suppress(OSError):
+                os.remove(p)
+
     def output(form):
         key = fit_key(form, asked, fam)
         if key not in seen:
             seen[key] = run(form) + (idx.last_refs,)
         code, text, idx.last_refs = seen[key]
         return code, text
+
+    if context:
+        # 前後の行は、呼び出しの一覧を縮めない形(全文、報告しない節を件数にまとめた形、解決しなかった行を減らした形)で、
+        # 全文が上限に収まる分だけ足す。前後の行が全部入る形があればそれを、無ければいちばん多く入る形を選ぶ
+        # 【実測: v14j。全文の形に残りの分だけ足すと、索引に無い一致の節(6 千文字)が残って 8 ファイル中 3 つが入らず、
+        # モデルはその 3 つを開いた。v14f では一致の節を件数にまとめ、前後の行が全部入っていた】。
+        # どの形でも入らなければ出さず、呼び出しの一覧は縮めない(前後の行を残して一覧のほうを縮めると、答えそのものが減る
+        # 【実測: 独立レビュー。呼び出しが 90 ファイルで並ぶ行が 60、200 ファイルで 10 に減り、260 ファイル以上では途中で切れた】)。
+        # 族を絞る形と節の行数を減らす形、残りの一覧(--all)には、前後の行を付けない
+        keep = [None, ['--compact'], short] + [short + every + ['--other-limit', str(n)] for n in others]
+        best = None
+        for form in keep:
+            c0, t0 = output(form)
+            if c0 != 0 or over(t0):
+                continue
+            room = min(ltq.CONTEXT_BYTES, cfg.max_bytes - nbytes(t0) - CONTEXT_SLACK) if cfg.max_bytes else ltq.CONTEXT_BYTES
+            if room < CONTEXT_MIN_BYTES:
+                continue
+            c2, t2 = run((form or []) + ['--context', str(context), '--context-bytes', str(room)])
+            if c2 != 0:
+                continue
+            refs2 = idx.last_refs
+            if t2.endswith(ltq.ALL_HINT + '\n'):
+                t2 = with_rest(t2)
+            whole = CONTEXT_LEFT not in t2
+            if not over(t2) and (best is None or (whole, len(t2)) > best[0]):
+                if best is not None:
+                    drop(best[3])
+                best = ((whole, len(t2)), c2, t2, list(cfg.last_lists), refs2)
+            else:
+                drop(cfg.last_lists)
+            cfg.last_list, cfg.last_lists = None, []
+            if best is not None and best[0][0]:
+                break
+        if best is not None:
+            _, c2, t2, lists, idx.last_refs = best
+            cfg.last_lists = lists
+            cfg.last_list = lists[0] if lists else None
+            return c2, t2
+        idx.last_refs = base_refs
+        ctx_note = CONTEXT_SKIPPED
 
     for stage in stages:
         if not stage:
@@ -592,7 +651,7 @@ def run_ltq(cfg, args, start=None):
             if text.endswith(ltq.ALL_HINT + '\n'):
                 text = with_rest(text)
             if not over(text):
-                return code, text
+                return code, told(text)
             for p in cfg.last_lists:  # 案内を足して上限を超えた。次の形へ(この形の一覧は、結果で知らせないので消す)
                 with contextlib.suppress(OSError):
                     os.remove(p)
@@ -631,6 +690,7 @@ class UnknownTool(Exception):
 
 
 def call_tool(cfg, name, a):
+    context = 0
     if name == 'refs':
         if not a.get('name'):
             return 2, 'refs needs "name" (a qualified name or a suffix of it)'
@@ -639,6 +699,10 @@ def call_tool(cfg, name, a):
             if int(a['limit']) < 0:
                 return 2, '"limit" must be 0 or more'
             args += ['--limit', str(int(a['limit']))]
+        if a.get('context'):  # cxxref_cli.py だけが渡す(ツールの定義には載せない。定義は毎回モデルに送られるため)
+            if int(a['context']) < 0:
+                return 2, '"context" must be 0 or more'
+            context = min(10, int(a['context']))
         for x in a.get('exclude') or []:
             args += ['--exclude', str(x)]
         paths = a.get('path') or []
@@ -654,7 +718,7 @@ def call_tool(cfg, name, a):
     else:
         raise UnknownTool(name)
     root = a.get('root')
-    return run_ltq(cfg, args, str(root) if root else None)
+    return run_ltq(cfg, args, str(root) if root else None, context)
 
 
 def handle(msg, cfg):
