@@ -247,7 +247,7 @@
     "id": "S-O2",
     "kind": "対照: 修飾名で rg でも絞れる。Windows でビルドされないファイル(Linux 用、PhysX4)や構成で無効になる #if の中を含む",
     "prompt": "このフォルダは C++ のゲームエンジン O3DE(Open 3D Engine)のソースです。`AZ::DynamicModuleHandle::Create` を呼び出している箇所をすべて挙げてください(定義・宣言は含めません)。\n\n調べるときは、次の 5 つの観点を必ず確かめてください。\n- 継承関係: どのクラスがこの関数を上書きしているか(間接の派生クラスも)。派生クラスの変数越しの呼び出しが、どの関数に解決されるか\n- 基底呼び出し: `Super::関数()`・`基底クラス::関数()` のように、限定名でその実装を直接呼ぶ行\n- virtual dispatch の可能性: 基底クラスのポインタ・参照越し(またはクラスの中から限定名なし)で呼ばれ、実行時の型によって上書きが動きうる行\n- 条件コンパイル: `#if` などで今の構成(Windows 向けのビルド)ではコンパイルされないコードと、別のプラットフォーム向けのファイルにある行\n- テンプレートの実体化: テンプレートの中の呼び出しで、実体化したときにこの関数に解決されるもの\n\n答えは 1 行に 1 か所、`path:line [種類]` の形で書いてください(path はこのフォルダからの相対パス)。種類は decl(この関数の宣言)・def(この関数の定義)・override(派生クラスでの上書き。宣言も定義も)・base-call(限定名つきの呼び出し)・virtual-call(実行時の型で動く関数が決まる呼び出し)・call(それ以外の呼び出し)のどれか 1 つです。今の構成でコンパイルされない行には inactive を、テンプレートの中の行には template を足してください(例: `a/b.cpp:12 [virtual-call, inactive]`)。",
-    "note": "O2 と同じ問いに、5 つの観点の指示を足したもの。正解は rg で `DynamicModuleHandle::Create(` を引き、テストのフォルダと定義(DynamicModuleHandle_WinAPI/UnixLike/Unimplemented.cpp)を除いて、各行がコメントでないことを読んで確かめた。Windows でビルドされないもの: Platform/Linux の LibEVDevWrapper.cpp、PhysX4 の Module.cpp(PhysX5 と片方だけ)",
+    "note": "O2 と同じ問いに、5 つの観点の指示を足したもの。正解は rg で `DynamicModuleHandle::Create(` を引き、テストのフォルダと定義(DynamicModuleHandle_WinAPI/UnixLike/Unimplemented.cpp)を除いて、各行がコメントでないことを読んで確かめた。Windows でビルドされないもの: Platform/Linux の LibEVDevWrapper.cpp(PhysX4 の Module.cpp は、計測に使った構成では PhysX5 と両方ビルドされる。前は「片方だけ」と書いていたが誤り)",
     "truth": [
       {
         "path": "Code/LauncherUnified/Launcher.cpp",
@@ -276,7 +276,7 @@
         "line": 85,
         "kind": "call",
         "flags": [
-          "inactive"
+          "inactive?"
         ]
       },
       {

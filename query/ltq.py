@@ -48,10 +48,11 @@ SRC_MAX = 200  # ltidx が索引の行に残すソースの行の長さ(バイ�
 CP_CODECS = {65001: None, 51932: 'euc_jp', 20932: 'euc_jp', 28591: 'latin-1'}  # ほかは cp<番号>
 SKIP_SCAN_FILES = 64  # 範囲を引くファイルがこれより多ければ、.skip.tsv を 1 つずつ find せず、1 回通して読む
 ALT = '.alt.tsv'  # 無効な #if の中を仮に有効にして解析した行(scripts/altpass.py が書く。索引本体と同じ形)
-SIDE = ('.tu.tsv', '.skip.tsv', '.deps.tsv', ALT)  # 索引本体の隣に ltidx と altpass が書くファイル
+UNBUILT = '.alt.unbuilt.tsv'  # どの TU も読まないソースのうち、altpass が解析できたファイルの一覧(1 行に 1 つ)
+SIDE = ('.tu.tsv', '.skip.tsv', '.deps.tsv', ALT, UNBUILT)  # 索引本体の隣に ltidx と altpass が書くファイル
 # 索引のファイルの名前の、索引のパスより後ろの部分: 本体(空)・隣のファイル・写し(.seen.cache など)と、それを書いている途中の
 # ファイル(.tmp・.<プロセス番号>.tmp)。索引の隣に書くファイルを増やしたら、ここにも足す(足さないと、テキスト検索がそれを読む)
-OWN_TAIL = re.compile(r'(\.(tu|skip|deps|alt)\.tsv|\.own\.bin|\.(alt|recipe)\.json'
+OWN_TAIL = re.compile(r'(\.(tu|skip|deps|alt|alt\.unbuilt)\.tsv|\.own\.bin|\.(alt|recipe)\.json'
                       r'|\.(seen|words|words-other|names)\.cache)?(\.\d+)?(\.tmp)?\Z')
 # C/C++ のソースでないファイルも、名前の一致だけは探す(rg なら出る行を落とさない: C# の生成器・ビルドの定義・文書など)。
 # テキストかどうかは、rg と同じく中身で見分ける(other_chunks)。拡張子や大きさでは除かない: .obj には Wavefront の 3D モデルの
@@ -405,6 +406,7 @@ class Index:
         self._tus = {}
         self._memo = {}
         self._groups = {}  # path -> ソースの #if の構造(ppcond)。無効な行に、囲む条件を添えるのに使う
+        self._unbuilt = None  # altpass が解析できた、どの TU も読まないファイルの集合
         self._plain = {}  # path -> 同じ構造(コメントの範囲を引かずに読んだもの)。コンパイルされる行に、囲む条件を添えるのに使う
         self.show_conds = False  # コンパイルされる行にも、囲む #if の条件を添えるか(cmd_refs が問い合わせごとに決める)
         # 長く動くプロセス(MCP サーバー)が渡す部品。無ければ、問い合わせのたびに全部を読む
@@ -697,6 +699,33 @@ class Index:
         def cut(s):
             return s if len(s) <= COND_MAX else s[:COND_MAX - 3] + '...'
         return ' > '.join('#if ' + cut(ppcond.cond_text(br)) for br in brs[first:])
+
+    def unbuilt(self, path):
+        """どの構成のどの TU も読んでいないファイルか(テスト・別のプラットフォーム・切ってある機能のファイルなど)。
+        そのファイルの行が差分(.alt.tsv)にあれば、altpass が、いちばん近い TU のコマンドを借りて解析したもの。"""
+        return not any(path in s for s in self.seen().values())
+
+    def parsed_unbuilt(self):
+        """どの TU も読まないファイルのうち、altpass が近くの TU のコマンドを借りて解析できたものの集合
+        (差分が索引より古い構成の分は入れない)。"""
+        if self._unbuilt is None:
+            self._unbuilt = set()
+            for part in self.parts:
+                if part.alt_ok:
+                    try:
+                        with open(part.path + UNBUILT, encoding='utf-8', errors='replace') as f:
+                            self._unbuilt.update(line.rstrip('\n') for line in f)
+                    except OSError:
+                        pass
+        return self._unbuilt
+
+    def alt_tag(self, path, line, ranges):
+        """差分(.alt.tsv)の行に付ける印。どの TU も読まないファイルの行は [not built]、無効な #if の中の行は
+        [inactive: #if 条件]。"""
+        if self.unbuilt(path):
+            return '[not built]'
+        cond = self.inactive_cond(path, line, ranges)
+        return f'[inactive: {cond}]' if cond else '[inactive]'
 
     def active_cond(self, path, line):
         """コンパイルされる行を囲む条件(`#if A > #if B`。外側から)。インクルードガードと、囲む #if が無い行は ''。
@@ -1288,8 +1317,7 @@ def fmt(r, show_sym, idx, ranges=None, tag='', extra=''):
         s += f'  [{tag}]'
     s += extra
     if alt:  # その構成ではコンパイルされない #if の中。条件を仮に有効にして解析した行
-        cond = idx.inactive_cond(path, line, (ranges or {}).get(path, ()))
-        s += f'  [inactive: {cond}]' if cond else '  [inactive]'
+        s += '  ' + idx.alt_tag(path, line, (ranges or {}).get(path, ()))
     if note:
         s += f'  [{note}]'
     only = idx.partial(r)
@@ -1493,7 +1521,12 @@ def cmd_refs(a, idx):
         seen.add((r[0], r[3], r[4], r[5]))
         uniq.append(r)
     target = uniq
-    n_alt = sum(1 for r in target + deps if r[9])
+    n_unbuilt = sum(1 for r in target + deps if r[9] and idx.unbuilt(r[3]))
+    n_alt = sum(1 for r in target + deps if r[9]) - n_unbuilt
+    if n_unbuilt and not remain:
+        print('  (a line tagged [not built] is in a file the indexed configuration does not compile (tests, another platform,'
+              ' a feature that is off), parsed with the compiler options of a nearby file (best effort). Still code:'
+              ' include it when renaming or changing a signature)')
     if n_alt and not remain:
         # 行の数は書かない(UE5 で「1 lines below」とあると、モデルがその 1 行を一覧の検索で探しにいった)
         print('  (a line tagged [inactive: #if ...] is code the indexed configuration does not compile, parsed with that'
@@ -1644,7 +1677,8 @@ def cmd_refs(a, idx):
     fam_at, fam_calls = {}, []
     for r in sorted((r for r in rows if r[0] in derived), key=key):
         if r[1].startswith(DEFS):
-            fam_at.setdefault(r[0], {}).setdefault((r[3], r[4]), r[1] + (' [inactive]' if r[9] else ''))
+            fam_at.setdefault(r[0], {}).setdefault(
+                (r[3], r[4]), r[1] + ((' [not built]' if idx.unbuilt(r[3]) else ' [inactive]') if r[9] else ''))
         elif r[1].startswith('call') and (not inpath or inpath(r[3])) and fresh(r[3], r[4]):
             fam_calls.append(r)
     fam = []
@@ -1811,11 +1845,17 @@ def cmd_refs(a, idx):
         return qs[0]
 
     def classify():
-        cats = {k: [] for k in ('comment', 'inactive', 'dropped', 'local', 'unparsed', 'string', 'macro', 'directive', 'other')}
+        cats = {k: [] for k in ('comment', 'inactive', 'dropped', 'local', 'unparsed', 'nobuild', 'string', 'macro',
+                                'directive', 'other')}
+        outside = idx.parsed_unbuilt()
         for path, line, col, src, stale, hint in loose:
             readers = {n for n, s in idx.seen().items() if path in s}
             k, span = classify_ranges(ranges.get(path, []), line, col, readers)
-            if k is None:
+            if k is None and path not in parsed and path in outside:
+                # どの TU も読まないファイルだが、altpass が解析している。その行に索引の行が無いのは、コメント・文字列か、
+                # 借りたコマンドでは解決できなかったコード(コメントの範囲は差分に無いので、文面の見当で分ける)
+                k = hint if hint in ('comment', 'string', 'directive') else 'nobuild'
+            elif k is None:
                 k = (hint or 'other') if path in parsed else 'unparsed'
             elif k not in cats:  # この ltq が知らない種類(新しい ltidx が書いた範囲)。落とさずに「その他」で並べる
                 k, span = 'other', ''
@@ -1861,6 +1901,9 @@ def cmd_refs(a, idx):
         ('string', 'inside string literals -> not code', True),
         ('directive', 'in #pragma / #include / #error lines -> not code', True),
         ('unparsed', 'in files no indexed TU includes -> not analyzed; read them if they matter', False),
+        ('nobuild', 'in files outside the build that were parsed with the options of a nearby file, with no reference on'
+                    ' these lines -> probably not uses of the name (best effort: a header that was not found can hide one)',
+         False),
         ('other', 'other -> not explained by the index; read them if they matter', False),
     ]
     if remain:  # 残りの一覧は頭から読まれる。コードでありうる分類を先に、コードでない分類を後に置く
@@ -1884,7 +1927,7 @@ def cmd_refs(a, idx):
             # コードではない分類(コメント・文字列・指令・ローカルの名前)ならフォルダごとの件数に、コードでありうる分類
             # (無効な #if・マクロの定義・読まれていないファイル・その他)なら 1 段目では COMPACT_LIST 行まで並べる
             # (rg なら 1 行ずつ出る行を、件数だけにしない)。2 段目ではそれもフォルダごとの件数にする
-            low = k in ('comment', 'local', 'string', 'directive') or (a.compact > 1 and k in ('inactive', 'macro'))
+            low = k in ('comment', 'local', 'string', 'directive', 'nobuild') or (a.compact > 1 and k in ('inactive', 'macro'))
             nots = sum(1 for _, _, v, _ in items if v == 'not')
             one = [(p, s, ln) for p, s, v, ln in items if v in ('call', 'named')]
             if nots:
@@ -1951,8 +1994,7 @@ def cmd_refs(a, idx):
                 rs = at.get((p, ln), [])
                 cond = ''
                 if any(r[9] for r in rs):
-                    c = idx.inactive_cond(p, ln, ranges.get(p, ()))
-                    cond = f'  [inactive: {c}]' if c else '  [inactive]'
+                    cond = '  ' + idx.alt_tag(p, ln, ranges.get(p, ()))
                 print(f'  {p}:{ln}  {", ".join(sorted({r[0] for r in rs})) or "(not classified)"}{cond}'
                       f'  | {src_of.get((p, ln), rs[0][6] if rs else "")}')
             listed.update(left)
@@ -2013,7 +2055,9 @@ def cmd_check(a, idx):
                    else f'  [inherited by {r[2]}]' if r[1] in BASES else f'  [the receiver is a {r[2]}]' if r[1] == RECV
                    else f'  [in the instantiation {r[2]}]' if r[1] == INST else f'  [in {r[2]}]' if r[2] else '')
             off = ''
-            if r[9]:
+            if r[9] and idx.unbuilt(path):
+                off = '  [in a file no indexed TU reads, parsed with the options of a nearby file]'
+            elif r[9]:
                 cond = idx.inactive_cond(path, line, ranges.get(path, ()))
                 off = '  [inside an inactive #if, parsed with the condition forced on' + (f': {cond}]' if cond else ']')
             print(f'  indexed: {r[1]} {r[0]} at col {r[5]}' + rel + off

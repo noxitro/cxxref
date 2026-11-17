@@ -1289,6 +1289,23 @@ class LtqTest(unittest.TestCase):
         self.assertIn('  call   src/a.cpp:5  [in Main]  [under #if defined(DEBUG_ONLY)]  | Run();', out)
         self.assertNotIn('[inactive', out)
 
+    def test_rows_of_files_no_tu_reads_are_tagged_not_built(self):
+        # どの TU も読まないファイル(テスト・別のプラットフォーム)の行は、altpass が近くの TU のコマンドを借りて解析して
+        # 差分に入れる。無効な #if の行([inactive: ...])と分けて、[not built] と出す
+        self.write('src/t.cpp', 'void Run();\nvoid Test() { Run(); }\n', self.t0 - 10)
+        self.index('index', self.COMMON, [self.COMMENT, self.INACTIVE], deps={'src/a.cpp': []},
+                   alt=[self.ALT_ROW, ('Run', 'call', 'Test', 'src/t.cpp:2:15', 'void Test() { Run(); }')])
+        out = self.ltq('refs', 'Run')
+        self.assertIn('  call   src/t.cpp:2  [in Test]  [not built]  | void Test() { Run(); }', out)
+        self.assertIn('  call   src/a.cpp:5  [in Main]  [inactive: #if defined(DEBUG_ONLY)]  | Run();', out)
+        self.assertIn('  (a line tagged [not built] is in a file the indexed configuration does not compile (tests, another'
+                      ' platform, a feature that is off), parsed with the compiler options of a nearby file (best effort).', out)
+        self.assertIn('  (a line tagged [inactive: #if ...] is code the indexed configuration does not compile', out)
+        self.assertIn('== calls (resolved by clang): 3', out)
+        out = self.ltq('check', 'src/t.cpp:2')
+        self.assertIn('  indexed: call Run at col 15  [in Test]  [in a file no indexed TU reads, parsed with the options of a'
+                      ' nearby file]', out)
+
     def test_alt_row_is_dropped_when_another_config_compiles_the_line(self):
         # release では無効で差分パスが解析した行も、debug がコンパイルしていれば debug の行を使う
         self.index('index', self.COMMON + [self.ALT_ROW], [self.COMMENT])
