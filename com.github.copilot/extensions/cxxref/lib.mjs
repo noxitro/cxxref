@@ -230,36 +230,56 @@ export function targetRoot(arg, cwd) {
   return { root };
 }
 
-// ltidx の進み具合。index-project が .index\index.log に落とす "[n/全体] ok|NG ファイル" の行から、
-// { done, total, ng } を返す(並列で解析するので、行の n は前後する。いちばん大きい n を使う)。行が無ければ null
+// 進み具合。ltidx が .index\index.log に落とす(差分パスの altpass.py も --progress のファイルに同じ形で書く)
+// "[n/全体] ok|NG ファイル" の行から、{ done, total, ng } を返す。done は行の数(終わったものの数)。並列で解析するので
+// 行の n は前後し、いちばん大きい n は、時間のかかるものがまだ解析中でも全体に届くことがある。行が無ければ null
 export function parseProgress(text) {
   let done = 0, total = 0, ng = 0;
   for (const m of text.matchAll(/^\[(\d+)\/(\d+)\] (ok|NG)\b/gm)) {
-    done = Math.max(done, Number(m[1]));
+    done++;
     total = Number(m[2]);
     if (m[3] === "NG") ng++;
   }
-  return total ? { done, total, ng } : null;
+  return total ? { done: Math.min(done, total), total, ng } : null;
 }
 
-// 進み具合を画面に出すか決める。snap は { phase: "cdb" }(compile_commands.json を用意している)か
-// { phase: "tu", done, total, ng }(ltidx が TU を解析している)。prev は前に出したときの { phase, tenth, at }(初めは {})。
-// 出すのは、段階が変わったとき・TU が 1 割進んだとき・compile_commands.json に 1 分以上かかっているとき。
-// どれも前に出してから minGap ms 以上あける(行が増えすぎないように)。{ note(出さなければ ""), state(次の prev) }
+// 進み具合を画面に出すか決める。snap の phase は次のどれか:
+//   "cdb"     compile_commands.json を用意している
+//   "tu"      ltidx が TU を解析している({ done, total, ng } 付き)
+//   "finish"  TU の解析が終わり、ltidx が索引を仕上げている(行の出どころを求め、ファイルを差し替える)
+//   "alt"     索引の本体ができ、差分パス(altpass.py)が動いている。解析を始めるまでは数が無い({ done, total, ng } は省く)
+// prev は前に出したときの { phase, tenth, at }(初めは {})。出すのは、段階が変わったとき(差分パスは、数が出始めたときも)・
+// 数のある段階で 1 割進んだとき(前に出してから minGap ms 以上あける)・数の無い段階が 1 分以上続いているとき(1 分ごと)。
+// { note(出さなければ ""), state(次の prev) }
 export function progressNote(prev, snap, now, elapsedSec, minGap = 10000) {
   const quiet = { note: "", state: prev };
-  if (snap.phase === "cdb") {
-    if (prev.phase !== "cdb") return { note: "cxxref: compile_commands.json を用意しています", state: { phase: "cdb", at: now } };
-    if (now - prev.at < 60000) return quiet;
-    return { note: `cxxref: compile_commands.json を用意しています(${elapsedSec} 秒)`, state: { phase: "cdb", at: now } };
+  const counted = snap.total > 0;
+  const key = snap.phase === "alt" && !counted ? "altprep" : snap.phase;
+  const changed = prev.phase !== key;
+  const isAlt = (p) => p === "alt" || p === "altprep";
+  if (!counted || snap.phase !== "tu" && snap.phase !== "alt") {
+    if (!changed && now - prev.at < 60000) return quiet;
+    const sec = changed ? "" : `(${elapsedSec} 秒)`;
+    const note = {
+      cdb: `compile_commands.json を用意しています${sec}`,
+      finish: changed ? "TU の解析が終わりました。索引を仕上げています" : `索引を仕上げています${sec}`,
+      altprep: changed
+        ? (isAlt(prev.phase) ? "" : "索引の本体ができました(もう検索に使えます)。") +
+          "続けて差分パス(無効な #if の中と、どの TU も読まないソースの解析)の対象を選んでいます"
+        : `差分パスの対象を選んでいます${sec}`,
+    }[key];
+    if (note === undefined) return quiet;  // "tu" で数が無い(TU が 1 つも無い)
+    return { note: `cxxref: ${note}`, state: { phase: key, at: now } };
   }
   const { done, total, ng } = snap;
   const tenth = Math.floor((done * 10) / total);
-  if (done >= total) return quiet;  // 終わりは、索引ができたメッセージで知らせる
-  if (prev.phase === "tu" && (tenth <= prev.tenth || now - prev.at < minGap)) return quiet;
+  if (!changed && (tenth <= prev.tenth || now - prev.at < minGap)) return quiet;
+  if (snap.phase === "tu" && done >= total) return quiet;  // 解析が終わったことは "finish" で知らせる
   const pct = Math.floor((done * 100) / total);
-  return {
-    note: `cxxref: TU を解析しています ${done}/${total}(${pct}%${ng ? `、解析エラー ${ng}` : ""}、${elapsedSec} 秒)`,
-    state: { phase: "tu", tenth, at: now },
-  };
+  const counts = `${done}/${total}(${pct}%`;
+  const note = snap.phase === "tu"
+    ? `TU を解析しています ${counts}${ng ? `、解析エラー ${ng}` : ""}、${elapsedSec} 秒)`
+    : (isAlt(prev.phase) ? "" : "索引の本体ができました(もう検索に使えます)。続けて") +
+      `差分パス(無効な #if の中と、どの TU も読まないソースの解析)${counts}${ng ? `、解析できないもの ${ng}` : ""}、${elapsedSec} 秒)`;
+  return { note: `cxxref: ${note}`, state: { phase: key, tenth, at: now } };
 }

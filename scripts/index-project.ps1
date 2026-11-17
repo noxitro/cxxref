@@ -103,7 +103,8 @@ if (-not $NoAlt) {
         "Python が見つからないので、無効な #if の中の解析(差分パス)を飛ばしました。無効な行は、文字列の一致としてだけ出ます"
     } else {
         $t1 = Get-Date
-        & $py -I (Join-Path $PSScriptRoot 'altpass.py') --index $out --ltidx (Resolve-Path -LiteralPath $exe).Path
+        # 進み具合を <Name>.tsv.alt.progress に書かせる(/cxxref-index が読んで画面に出す)
+        & $py -I (Join-Path $PSScriptRoot 'altpass.py') --index $out --ltidx (Resolve-Path -LiteralPath $exe).Path --progress "$out.alt.progress"
         if ($LASTEXITCODE -ne 0) { "無効な #if の中の解析(差分パス)に失敗しました(終了コード $LASTEXITCODE)。索引はできています" }
         else { "差分パス {0} 秒" -f [int]((Get-Date) - $t1).TotalSeconds }
     }

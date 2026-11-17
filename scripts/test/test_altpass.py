@@ -358,9 +358,41 @@ class AltPassTest(unittest.TestCase):
         self.build()
         with open(self.index + '.recipe.json', 'w', encoding='utf-8-sig') as f:  # index-project.ps1 は BOM 付きで書く
             json.dump({'version': 1, 'root': self.root, 'cdb': self.root, 'out': self.index, 'jobs': 2}, f)
-        rc, out = run_altpass('--index', self.index, '--ltidx', LTIDX)
+        progress = self.index + '.alt.progress'
+        rc, out = run_altpass('--index', self.index, '--ltidx', LTIDX, '--progress', progress)
         self.assertEqual(rc, 0, out)
         self.assertEqual(self.rows(), [('A', 'call', 'Main', 'a.cpp:4:3')])
+        with open(progress, encoding='utf-8') as f:
+            self.assertEqual(f.read(), 'alt pass: preparing\nalt pass: 1 files to analyze\n[1/1] ok a.cpp\n')
+
+
+class ProgressTest(unittest.TestCase):
+    """--progress のファイル(/cxxref-index が読む。形は ltidx のログと同じ "[n/全体] ok|NG ファイル")。"""
+
+    def test_lines(self):
+        d = tempfile.mkdtemp()
+        try:
+            path = os.path.join(d, 'index.tsv.alt.progress')
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write('[9/9] ok old.h\n')  # 前の実行のものは書き直す
+            p = altpass.Progress(path)
+            with open(path, encoding='utf-8') as f:  # 対象を選んでいる間も、すぐ読める
+                self.assertEqual(f.read(), 'alt pass: preparing\n')
+            p.start(2)
+            p.done('x/a.h', {'failed': 1})
+            p.done('b.cpp', {'failed': 0})
+            p.close()
+            p.close()  # 2 度閉じてもよい
+            with open(path, encoding='utf-8') as f:
+                self.assertEqual(f.read(), 'alt pass: preparing\nalt pass: 2 files to analyze\n[1/2] NG x/a.h\n[2/2] ok b.cpp\n')
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_no_path(self):
+        p = altpass.Progress(None)  # 指定が無ければ何もしない
+        p.start(1)
+        p.done('a.cpp', {})
+        p.close()
 
 
 if __name__ == '__main__':
