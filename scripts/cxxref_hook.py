@@ -123,11 +123,11 @@ SESSION_NOTE_CMD = ('This repository has a cxxref index (.index, built by clang 
                     '{cmd} <name> (<name>: the qualified name or its suffix). Its `calls` are resolved by clang; do not grep '
                     'to confirm them. Its matches in "files no indexed TU includes" (tests, other platforms) are not '
                     'analyzed: judge them from the line, or view the file, and include the real ones. '
-                    'The cxxref skill has the options. To make the change yourself, grep first; with callers in 5+ '
-                    'files, add --context 3 after the name and edit from the lines shown. '
-                    'Answer in the language of the question.')
-# 直す作業: 呼び出しが多くのファイルに散るときだけ、前後の行(--context)を受け取って直すと rg だけより安い【実測: v14k。
-# 呼び出し 16 の問題で 0.72 倍。2〜3 ファイルの問題は skill を読まないのが最安】。コマンドまで渡すので、skill は読まなくてよい
+                    'The cxxref skill has the options; you do not need to load it first. '
+                    'When asked to make the change yourself, grep as usual. Answer in the language of the question.')
+# 直す作業には、コマンドの使い方(--context)を書かない。書くと、呼び出しの数を見る前に索引を引くようになり、呼び出しの
+# 少ない問題で 1 往復ぶん高くなった【実測: edit2。直す 3 問の 15 回すべてで grep より先に索引を引き、呼び出しの少ない
+# 問題で 1.36 倍。「いつもどおり grep」の文では、呼び出しの多い・少ない問題で 0/5 回】。--context は skill の本文にだけ書く
 # 最後の 1 文: hook の文が英語なので、日本語の問いに英語で答える回が増えていた【実測: v16m。各 60 回で、rg だけ 10 回、
 # skill 版 23〜27 回】
 # 「`calls` が答え」とだけ書いていた前の文では、索引の構成に入らないファイル(テスト、別のプラットフォーム)の一致を、
