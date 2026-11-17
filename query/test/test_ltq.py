@@ -1385,5 +1385,73 @@ class LtqTest(unittest.TestCase):
         self.assertIn('src/a.cpp:3  [in Main]  | Run();', out.getvalue())
 
 
+    def test_safe_path(self):
+        root = self.root
+        inside = ltq.safe_path(root, 'src/a.cpp')
+        self.assertEqual(os.path.normcase(inside), os.path.normcase(os.path.join(root, 'src', 'a.cpp')))
+        self.assertIsNotNone(ltq.safe_path(root, 'src/../src/a.cpp'))  # ルートの内側に戻る .. は通す
+        outside = os.path.join(os.path.dirname(root), 'elsewhere', 'x.h')
+        for bad in ('../elsewhere/x.h', 'src/../../elsewhere/x.h', outside, outside.replace('\\', '/'),
+                    '//host.invalid/share/x.h', '\\\\host.invalid\\share\\x.h', '\\\\?\\C:\\x.h', '\\\\.\\C:\\x.h',
+                    '', 'a\0b', None, 'src/NUL', 'CON', 'src/con.txt', 'src/COM1.h'):
+            self.assertIsNone(ltq.safe_path(root, bad), bad)
+        # 有無と更新日時だけなら、ルートの外のローカルのパスは通す(ルートの外にある TU の主ファイル)。UNC とデバイスは通さない
+        self.assertIsNotNone(ltq.safe_path(root, outside, read=False))
+        self.assertIsNotNone(ltq.safe_path(root, '../elsewhere/x.h', read=False))
+        for bad in ('//host.invalid/share/x.h', '\\\\host.invalid\\share\\x.h', '\\\\?\\C:\\x.h', '\\\\.\\C:\\x.h'):
+            self.assertIsNone(ltq.safe_path(root, bad, read=False), bad)
+
+    def test_index_paths_outside_root_are_not_touched(self):
+        # 索引は作業中のリポジトリの中にあり、細工されうる。索引の行・.alt.tsv・.skip.tsv・.tu.tsv・引数のパスが
+        # ルートの外を指しても、中身を読まない。UNC は有無も見ない(見るだけで、そのサーバーへつなぐ)
+        outside = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, outside)
+        secret = os.path.join(outside, 'secret.h')
+        with open(secret, 'w', encoding='utf-8', newline='\n') as f:
+            f.write('#if SECRET_FLAG_1234\nRun(); // FAKE_SECRET_TOKEN\n#endif\n')
+        rel_out = os.path.relpath(secret, self.root).replace('\\', '/')
+        unc = '//host.invalid/share/x.cpp'
+        self.assertTrue(rel_out.startswith('../'))
+        rows = self.COMMON + [('Run', 'call', 'X', f'{rel_out}:2:1', 'Run();'),
+                              ('Run', 'call', 'Y', f'{unc}:1:1', 'Run();')]
+        alt = [('Run', 'call', 'Z', f'{rel_out}:2:1', 'Run();')]
+        self.index('index', rows, [self.COMMENT, (rel_out, 'inactive', '2:1', '2:30'), (unc, 'comment', '1:1', '1:9')],
+                   tus=('src/a.cpp', os.path.join(outside, 'gone_tu.cpp'), unc), alt=alt)
+        self.write('src/a.cpp', A_CPP)  # 索引の後に変わった(行の付け直しと、無くなったファイルの判定を通す)
+        touched = []
+
+        def spy(kind, fn):
+            def wrapped(path, *a, **k):
+                s = os.fspath(path) if not isinstance(path, int) else ''
+                touched.append((kind, s))
+                if str(s).replace('\\', '/').startswith('//'):  # 守りが外れても、テストがネットワークに触れない
+                    if kind in ('exists', 'isfile', 'isdir'):
+                        return False
+                    raise OSError('UNC path in a test')
+                return fn(path, *a, **k)
+            return wrapped
+        saved = {n: getattr(os.path, n) for n in ('exists', 'getmtime', 'isfile', 'isdir', 'getsize')}
+        saved_open = ltq.__builtins__['open'] if isinstance(ltq.__builtins__, dict) else ltq.__builtins__.open
+        try:
+            for n, fn in saved.items():
+                setattr(os.path, n, spy(n, fn))
+            ltq.open = spy('open', saved_open)  # モジュールの名前として置く(組み込みより先に引かれる)
+            out = self.ltq('refs', 'Run') + self.ltq('refs', 'Run', '--all') + self.ltq('check', f'{rel_out}:2', f'{unc}:1')
+        finally:
+            for n, fn in saved.items():
+                setattr(os.path, n, fn)
+            del ltq.open
+        paths = [(k, str(p).replace('\\', '/')) for k, p in touched]
+        self.assertTrue(paths)
+        self.assertEqual([x for x in paths if x[1].startswith('//')], [])  # UNC には、有無も見に行かない
+        out_dir = os.path.normcase(outside).replace('\\', '/')
+        self.assertEqual([x for x in paths if x[0] == 'open' and os.path.normcase(x[1]).startswith(out_dir)], [])
+        self.assertNotIn('FAKE_SECRET_TOKEN', out)
+        self.assertNotIn('SECRET_FLAG_1234', out)
+        # ルートの外にあるローカルの TU の主ファイルは、これまでどおり「無くなった」と数える。UNC の TU は数えない
+        self.assertIn('1 indexed TU files no longer exist', out)
+        self.assertIn('[file not found]', out)
+
+
 if __name__ == '__main__':
     unittest.main()

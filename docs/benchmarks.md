@@ -406,7 +406,7 @@ I2-buildquery(影響の調査)を Q で: 4 回の呼び出し、入力 78,479、
 | A | cxxref なし(空の `COPILOT_HOME`) |
 | R | A に、MCP の定義と拡張を除いたプラグインをインストール済みとして足したもの。skill `cxxref`(説明文だけが常に送られ、本文は読まれたときだけ)、sessionStart の hook(索引のあるリポジトリでだけ 1 文を足す)、preToolUse の hook(skill が実行するコマンドの確認を通す) |
 
-- エージェント: GitHub Copilot CLI 1.0.109、`copilot -p`、毎回新しいセッション。モデル: Claude Haiku 5.5(BYOK、Anthropic API)
+- エージェント: GitHub Copilot CLI 1.0.110(最初の 1 回だけ 1.0.109。途中で CLI が自動で更新された)、`copilot -p`、毎回新しいセッション。モデル: Claude Haiku 5.5(BYOK、Anthropic API)
 - 問題: 3 の 8 問と 1 の 4 問(コードベース A)を各 5 回、4 の 9 問(C++ でないリポジトリ)を各 3 回。A と R を交互に流した
 - 1 回目の時期(round v14h)のあと、2 つ直して 2 回目の時期(v14h2)に C++ の 12 問を測り直した。C++ でないリポジトリは 1 回目だけ
   - 直す作業を skill の対象から外した(下の結果 1)
