@@ -698,11 +698,7 @@ class Index:
         """コンパイルされる行を囲む条件(`#if A > #if B`。外側から)。インクルードガードと、囲む #if が無い行は ''。
         条件は索引に持たず、今のソースから読む。索引の構成では成り立っている条件で、別の構成では無い行かもしれない。"""
         if path not in self._plain:
-            try:
-                with open(os.path.join(self.root, path), 'rb') as f:
-                    data = to_utf8(f.read(), self.codec())
-            except OSError:
-                data = b''
+            data = self.read(path) or b''  # 索引に書かれたパス。ルートの外を指すものは読まない(safe_path)
             groups = self._groups.get(path) or ppcond.parse(data)
             guards = ppcond.guards(groups, data)
             self._plain[path] = (groups, guards)
