@@ -89,6 +89,10 @@ def safe_path(root, path, read=True):
       (ルートの外にある TU の主ファイルが消えたかを見る。.tu.tsv の絶対パス)"""
     if not isinstance(path, str) or not path or '\0' in path:
         return None
+    # 書かれたパスそのものが UNC・デバイスの形なら、OS に関わらず触れない(Windows 以外では、バックスラッシュは区切りではなく、
+    # ルートとつなぐとルートの中のファイル名になる。Windows で作った索引を持ってきても、同じに断る)
+    if path.replace('\\', '/').startswith('//'):
+        return None
     full = os.path.normpath(os.path.join(root, path))
     if full.replace('\\', '/').startswith('//'):
         return None
