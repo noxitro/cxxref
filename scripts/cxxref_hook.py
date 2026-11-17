@@ -32,11 +32,13 @@ skill の cxxref は、プラグインの mcp/cxxref_cli.py を shell で呼ぶ�
 自動で許可した呼び出しでは、CLI は、この PC で index-project(/cxxref-index も同じ)が作った索引だけを自動で作り直す
 (mcp/autoupdate.py の trusted_recipe。細工したリポジトリに置かれた作り直しの記録で ltidx や make-cdb を動かさない)。
 """
+import hashlib
 import json
 import os
 import re
 import string
 import sys
+import time
 import unicodedata
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -111,8 +113,8 @@ def allowed(command):
 
 SESSION_NOTE = ('This repository has a cxxref index (.index, built by clang over every C++ translation unit). '
                 'When the question is where a C++ symbol is used or called, or what a change to it would affect, '
-                'load the cxxref skill before grepping. When asked to make the change yourself, grep as usual. '
-                'Answer in the language of the question.')
+                'load the cxxref skill before grepping. To make the change yourself, grep first; load it only if the '
+                'callers are in 5+ files. Answer in the language of the question.')
 # 実行するコマンドまで書いた形。skill を読む 1 往復と、モデルが CLI の場所を組み立て損ねて断られる回を省く
 # 【実測: v15m。skill 版の 33 回中 13 回、SKILL.md の「..\..」を縮め損ねた場所で最初のコマンドが断られ、やり直していた】
 SESSION_NOTE_CMD = ('This repository has a cxxref index (.index, built by clang over every C++ translation unit). '
@@ -121,8 +123,11 @@ SESSION_NOTE_CMD = ('This repository has a cxxref index (.index, built by clang 
                     '{cmd} <name> (<name>: the qualified name or its suffix). Its `calls` are resolved by clang; do not grep '
                     'to confirm them. Its matches in "files no indexed TU includes" (tests, other platforms) are not '
                     'analyzed: judge them from the line, or view the file, and include the real ones. '
-                    'The cxxref skill has the options; you do not need to load it first. '
-                    'When asked to make the change yourself, grep as usual. Answer in the language of the question.')
+                    'The cxxref skill has the options. To make the change yourself, grep first; with callers in 5+ '
+                    'files, add --context 3 after the name and edit from the lines shown. '
+                    'Answer in the language of the question.')
+# 直す作業: 呼び出しが多くのファイルに散るときだけ、前後の行(--context)を受け取って直すと rg だけより安い【実測: v14k。
+# 呼び出し 16 の問題で 0.72 倍。2〜3 ファイルの問題は skill を読まないのが最安】。コマンドまで渡すので、skill は読まなくてよい
 # 最後の 1 文: hook の文が英語なので、日本語の問いに英語で答える回が増えていた【実測: v16m。各 60 回で、rg だけ 10 回、
 # skill 版 23〜27 回】
 # 「`calls` が答え」とだけ書いていた前の文では、索引の構成に入らないファイル(テスト、別のプラットフォーム)の一致を、
@@ -139,28 +144,245 @@ def cli_command():
     return None
 
 
-def has_index(cwd):
-    """cwd かその親に、索引(.index の中の .tsv)があるか(ltq.find_root と同じ探し方)。"""
+def index_root(cwd):
+    """cwd かその親で、索引(.index の中の .tsv)のあるフォルダ。無ければ None(ltq.find_root と同じ探し方)。"""
     d = os.path.abspath(cwd) if isinstance(cwd, str) and cwd else None
     while d:
         idx = os.path.join(d, '.index')
         if os.path.isdir(idx):
             try:
                 if any(f.endswith('.tsv') for f in os.listdir(idx)):
-                    return True
+                    return d
             except OSError:
-                return False
+                return None
         parent = os.path.dirname(d)
         if parent == d:
-            return False
+            return None
         d = parent
-    return False
+    return None
+
+
+def has_index(cwd):
+    return index_root(cwd) is not None
+
+
+# --- grep を refs に振り向ける(試作。既定では切ってある) -------------------------------------------------------
+# 呼び出し側を直す作業では、呼び出しが多くのファイルに散るときだけ、索引を引くと rg だけより安い【実測: 呼び出し 16 の
+# 問題で、refs を使った 3 つの時期を合わせて 0.82 倍(0.75〜0.89)。2〜3 ファイルの問題は 1.06〜1.32 倍】。
+# 環境変数 CXXREF_GREP_REDIRECT=1 のときだけ、C++ の名前の grep を見て索引で呼び出しのファイル数を数え、MANY_FILES 以上
+# なら、その grep を断り、理由に refs のコマンドを書く。振り向けはセッションに 1 回だけで、編集の後はしない。
+# 既定で切ってある理由【実測: v14i と独立レビュー】: 直そうとしている記号と関係のない grep(ありふれた名前、別の作業の途中)
+# を断ることがあり、費用は振り向けだけでは減らなかった(0.95 倍)。説明文で「先に grep、多ければ skill」と案内する形を先に試す
+MANY_FILES = 5
+MAX_SYMBOLS = 3  # 同じ名前で、呼び出しの多い記号がこれより多ければ、ありふれた名前とみなして振り向けない
+MAX_ROWS = 20000  # 1 つの名前について索引から読む行の上限(超えたら、ありふれた名前とみなして振り向けない)
+SCAN_SECONDS = 2.5  # 索引を数えるのに使う時間の上限(hook の制限時間は 10 秒。超えたら振り向けない)
+SCAN_LIMIT = 100 << 20  # 目次(.names.cache)が無いとき、頭から読むのはこの大きさまで
+EDIT_TOOLS = {'edit', 'create', 'write', 'str_replace', 'str_replace_editor', 'apply_patch', 'multiedit', 'insert'}
+SIDE = ('.tu.tsv', '.skip.tsv', '.deps.tsv', '.alt.tsv')  # 索引本体の隣のファイル(ltq.SIDE と同じ)
+CXX_EXT = {'c', 'cc', 'cpp', 'cxx', 'c++', 'h', 'hh', 'hpp', 'hxx', 'h++', 'inl', 'ipp', 'tpp', 'ixx', 'cppm'}
+NAME = re.compile(r'[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*')
+SYMBOL = re.compile(r'(?:[A-Za-z_]\w*::)*[A-Za-z_]\w*')  # 理由とコマンドに書いてよい記号(英数字と _ と :: だけ)
+ESCAPES = re.compile(r'\\[bBsSwWdDnrtAZz<>]|\\.|\[[^\]]*\]|\(\?[^)]*\)')
+SKIP_WORDS = {'class', 'struct', 'enum', 'union', 'void', 'const', 'static', 'virtual', 'override', 'inline',
+              'return', 'template', 'typename', 'auto', 'int', 'bool', 'char', 'float', 'double', 'unsigned',
+              'define', 'include', 'if', 'else', 'for', 'while', 'switch', 'case', 'new', 'delete'}
+
+
+def redirect_enabled():
+    return os.environ.get('CXXREF_GREP_REDIRECT') == '1'
+
+
+def pattern_names(pattern):
+    """grep の pattern に、そのままの形で書かれた C++ の名前(`\\bWait\\s*\\(` なら Wait、`A::B|class C` なら A::B と C)。
+    名前の一部だけを書いた形(`Get\\w+`・`Get.*`・`Foo+`、`(?:A|B)::Init` の Init)は拾わない。"""
+    if not isinstance(pattern, str) or len(pattern) > 300:
+        return []
+
+    def mask(m):  # 位置を変えずに隠す。名前の続きに当たりうるもの(\w・\d・\S・文字クラス)は \x01 にする
+        t = m.group(0)
+        return ('\x01' if t in ('\\w', '\\d', '\\S') or t.startswith('[') else ' ') * len(t)
+    masked = ESCAPES.sub(mask, pattern)
+    out = []
+    for m in NAME.finditer(masked):
+        n = m.group(0)
+        before, after = masked[max(0, m.start() - 2):m.start()], masked[m.end():m.end() + 1]
+        if before.endswith(('::', '\x01', '.')) or after in ('\x01', '*', '+', '?', '{', '.'):
+            continue
+        if n not in out and n not in SKIP_WORDS and len(n.rsplit('::', 1)[-1]) >= 3:
+            out.append(n)
+    return out[:4]
+
+
+def cxx_search(args):
+    """grep の glob・type・path が、C/C++ のソースを探しているか(拡張子が書かれていて、C/C++ のものが無ければ False)。"""
+    exts = set()
+    for key in ('glob', 'type'):
+        v = args.get(key)
+        if isinstance(v, str) and v:
+            found = re.findall(r'[A-Za-z0-9+]+', v.rsplit('/', 1)[-1].rsplit('\\', 1)[-1]) if key == 'glob' else [v]
+            exts |= {x.lower() for x in found}
+            if key == 'glob' and '.' not in v:
+                exts = set()
+    path = args.get('path')
+    if isinstance(path, str) and os.path.splitext(path)[1]:
+        exts.add(os.path.splitext(path)[1][1:].lower())
+    return not exts or bool(exts & CXX_EXT)
+
+
+def index_files(root):
+    """<root>/.index の索引本体(ltq.find_indexes と同じ選び方)。"""
+    d = os.path.join(root, '.index')
+    try:
+        return [os.path.join(d, f) for f in sorted(os.listdir(d)) if f.endswith('.tsv') and not f.endswith(SIDE)]
+    except OSError:
+        return []
+
+
+def _index_lines(path, short):
+    """索引 path の、記号の最後の部分が short(bytes)である行の候補(ハッシュの衝突を含む)。多すぎる・読めないときは None。"""
+    sys.path.insert(0, os.path.join(HERE, '..', 'query'))
+    import namedir  # noqa: E402  (hook は呼ぶたびに別のプロセス。grep を見るときだけ読む)
+    nd = namedir.NameDir(path)
+    try:
+        if nd.open():
+            offs = nd.offsets(short)
+            if len(offs) > MAX_ROWS:
+                return None
+            out = []
+            with open(path, 'rb') as f:
+                for off in offs:
+                    f.seek(off)
+                    out.append(f.readline())
+            return out
+    finally:
+        nd.close()
+    if os.path.getsize(path) > SCAN_LIMIT:
+        return None
+    with open(path, 'rb') as f:
+        data = f.read()
+    out, key = [], short + b'\tcall'
+    i = data.find(key)
+    while i >= 0:
+        if len(out) >= MAX_ROWS:
+            return None
+        s0 = data.rfind(b'\n', 0, i) + 1
+        e = data.find(b'\n', i)
+        e = len(data) if e < 0 else e
+        out.append(data[s0:e])
+        i = data.find(key, e)
+    return out
+
+
+def call_files(root, name, deadline):
+    """{記号: 呼び出しのあるファイルの集合}。name は修飾名かその後ろの部分(ltq の refs と同じ合わせ方)。
+    行が多すぎる(ありふれた名前)・時間切れ・読めないときは None(振り向けない)。"""
+    short = name.rsplit('::', 1)[-1].encode()
+    tail = b'::' + name.encode()
+    out = {}
+    for path in index_files(root):
+        if time.monotonic() > deadline:
+            return None
+        lines = _index_lines(path, short)
+        if lines is None:
+            return None
+        for line in lines:
+            cols = line.rstrip(b'\r\n').split(b'\t')
+            if len(cols) < 4 or not cols[1].startswith(b'call'):
+                continue
+            sym = cols[0]
+            if sym != name.encode() and not sym.endswith(tail):
+                continue
+            if sym.startswith((b'std::', b'::std::', b'__')) or b'::__' in sym:
+                continue  # 標準ライブラリとコンパイラの名前(直す先はこのリポジトリに無い)
+            parts = sym.split(b'::')
+            if '::' not in name and len(parts) >= 2 and parts[-1] == parts[-2]:
+                continue  # 型の名前(`class Foo` の Foo)で、コンストラクタ Foo::Foo の呼び出しを数えない
+            out.setdefault(sym.decode('utf-8', 'replace'), set()).add(cols[3].rsplit(b':', 2)[0])
+    return out
+
+
+# セッションの間の記録は、印のファイル 2 つ(told: もう振り向けた。edited: 編集が始まった)。作るのは排他(O_EXCL)なので、
+# 並列に走る hook のうち 1 つだけが振り向ける【実測: 独立レビュー。読んでから書く形では、並列の grep 6 件が全部断られた】。
+# 鍵は索引のあるフォルダ。同じフォルダで 2 つのセッションを同時に使うと、記録は混ざる(振り向けが 1 回増えるか減るだけ)
+def _mark_path(root, kind):
+    base = os.environ.get('LOCALAPPDATA') or os.environ.get('TEMP') or HERE
+    key = hashlib.sha1(os.path.normcase(os.path.abspath(root)).encode('utf-8')).hexdigest()[:16]
+    return os.path.join(base, 'cxxref', 'hook-state', f'{key}.{kind}')
+
+
+def _marked(root, kind):
+    return os.path.exists(_mark_path(root, kind))
+
+
+def _mark(root, kind):
+    """印を付ける。いま付けたなら True、もう付いていた・付けられなかったなら False。"""
+    p = _mark_path(root, kind)
+    try:
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        os.close(os.open(p, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+        return True
+    except OSError:
+        return False
+
+
+def _unmark(root):
+    for kind in ('told', 'edited'):
+        try:
+            os.remove(_mark_path(root, kind))
+        except OSError:
+            pass
+
+
+def redirect_grep(data):
+    """grep の pattern の名前が、索引で MANY_FILES 以上のファイルから呼ばれていれば、断る理由(refs の案内)。"""
+    root = index_root(data.get('cwd'))
+    args = data.get('toolArgs')
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except ValueError:
+            return None
+    if root is None or not isinstance(args, dict) or not cxx_search(args):
+        return None
+    names = pattern_names(args.get('pattern'))
+    # 振り向けはセッションに 1 回だけ。編集の後もしない(索引が古くなり、refs は作り直しを待つ。確かめの grep を塞がない)
+    # 【実測: 試しの 1 回で、編集の後の確かめの grep に std::forward_like(37 ファイル)を案内していた】
+    if not names or _marked(root, 'told') or _marked(root, 'edited'):
+        return None
+    deadline = time.monotonic() + SCAN_SECONDS
+    hits = []
+    for n in names:
+        found = call_files(root, n, deadline)
+        if found is None:
+            return None
+        # 索引は作業中のリポジトリの中にあり、細工されうる。理由とコマンドに書くのは、英数字と _ と :: だけの記号に限る
+        # (ほかの文字を含む記号は、モデルへの指示やコマンドの引数として読まれうる【実測: 独立レビュー】)
+        hits = sorted(((len(fs), sym) for sym, fs in found.items()
+                       if len(fs) >= MANY_FILES and len(sym) <= 200 and SYMBOL.fullmatch(sym)), reverse=True)
+        if hits:
+            break  # pattern に先に書かれた名前を使う
+    if not hits or len(hits) > MAX_SYMBOLS or not _mark(root, 'told'):
+        return None  # 同じ名前の記号が多い(Get・size など)なら、どれを直すのか決められない
+    cli = os.path.join(os.path.dirname(HERE), 'mcp', 'cxxref_cli.py')
+    said = '; '.join(f'{sym} is called from {k} files' for k, sym in hits)
+    other = ' (or with another name listed above, if that is the one you are changing)' if len(hits) > 1 else ''
+    return (f'cxxref (clang index of every translation unit): {said}. If you are changing its signature and fixing the '
+            'callers, run this once in PowerShell, as a command of its own, instead of this grep' + other + ':\n'
+            f'python -I "{cli}" refs {hits[0][1]} --context 3\n'
+            'It lists the calls, references, declarations and definitions, with the source lines around them when the '
+            'result is small enough; write the edits from those lines and view only small line ranges. For anything '
+            'else, or for the text matches, run the same grep again (this note is shown once per session).')
 
 
 def session_start(data):
     """sessionStart: 索引のあるリポジトリでだけ、索引を引く場面と、そのコマンドを知らせる。索引が無ければ何も足さない
-    (skill の説明文だけでは、使わないモデルがいた【実測: Claude Haiku 5.5 は grep から始めた。gpt-6-luna は読んだ】)。"""
-    if has_index(data.get('cwd')):
+    (skill の説明文だけでは、使わないモデルがいた【実測: Claude Haiku 5.5 は grep から始めた。gpt-6-luna は読んだ】)。
+    grep の振り向けを入れているときは、その記録もここで消す(続きから再開したセッションでは消さない)。"""
+    root = index_root(data.get('cwd'))
+    if root is not None:
+        if redirect_enabled() and data.get('source') != 'resume':
+            _unmark(root)
         cmd = cli_command()
         sys.stdout.write(json.dumps({'additionalContext': SESSION_NOTE_CMD.format(cmd=cmd) if cmd else SESSION_NOTE}))
     return 0
@@ -176,7 +398,21 @@ def main(argv=None):
         return 0
     if argv[:1] == ['session']:
         return session_start(data)
-    if str(data.get('toolName', '')).lower() not in SHELLS:
+    tool = str(data.get('toolName', '')).lower()
+    if redirect_enabled() and tool == 'grep':
+        try:
+            reason = redirect_grep(data)
+        except Exception:  # 振り向けは補助。何があっても grep は止めない
+            reason = None
+        if reason:
+            sys.stdout.write(json.dumps({'permissionDecision': 'deny', 'permissionDecisionReason': reason}))
+        return 0
+    if redirect_enabled() and tool in EDIT_TOOLS:  # 編集が始まったら、振り向けをやめる(許可には何も返さない)
+        root = index_root(data.get('cwd'))
+        if root is not None:
+            _mark(root, 'edited')
+        return 0
+    if tool not in SHELLS:
         return 0
     args = data.get('toolArgs')
     if isinstance(args, str):
