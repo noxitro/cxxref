@@ -119,6 +119,33 @@ def directive_lines(groups):
     return s
 
 
+GUARD = re.compile(rb'^[ \t]*#[ \t]*define[ \t]+(\w+)')
+
+
+def guards(groups, data):
+    """インクルードガードのグループの集合。いちばん外側の `#ifndef X`(か `#if !defined(X)`)で、分岐が 1 つだけで、
+    本体の最初の指令が `#define X` のもの。"""
+    out = set()
+    lines = None
+    for g in groups:
+        if g.depth or len(g.branches) != 1:
+            continue
+        br = g.branches[0]
+        m = re.fullmatch(r'!\s*defined\s*\(?\s*(\w+)\s*\)?', br.cond) if br.kind == 'if' else None
+        name = br.cond.strip() if br.kind == 'ifndef' else m.group(1) if m else None
+        if not name:
+            continue
+        if lines is None:
+            lines = data.split(b'\n')
+        for raw in lines[br.line_end:br.line_end + 4]:  # #ifndef の次の、空でない行
+            if raw.strip():
+                d = GUARD.match(raw)
+                if d and d.group(1).decode('ascii', 'replace') == name:
+                    out.add(g)
+                break
+    return out
+
+
 def enclosing(groups, line):
     """その行を囲む分岐を、外側から。"""
     out = [br for g in groups for br in g.branches if br.line_end < line < (br.body_end or 0)]

@@ -31,6 +31,19 @@ OVERRIDE = 'override'  # 3 列目は呼び出し元ではなく、上書きさ�
 # 役割の接尾辞(ltidx 0.5.5 から)。-dynamic は限定名の無い仮想関数の呼び出しで、実行時に受け手の動的な型の上書きが動く。
 # -static はそれ以外の仮想関数の呼び出し(Base::f()・Super::f()。その関数そのもの)。どちらも無い行は前の ltidx の行
 DYNAMIC, STATIC = '-dynamic', '-static'
+# -exact(ltidx 0.5.11 から)は、限定名の無い仮想関数の呼び出しのうち、受け手の式から動く関数が 1 つに決まるもの
+# (値の変数、final のクラスやメソッド)。解決先の関数そのものが動く
+EXACT = '-exact'
+FORMS = (DYNAMIC, STATIC, EXACT)
+# 呼び出しや参照ではない、関係の行(ltidx 0.5.11 から。3 列目は呼び出し元ではない)
+# - base・base-indirect: 記号の列のクラスを、3 列目のクラスが直接・間接に継承している(位置は、派生クラスの基底の指定)
+# - recv: その位置の仮想関数の呼び出しの、受け手のクラス(解決先の関数のクラスと違うときだけある。上書きしていない派生クラス)
+# - inst: その位置の呼び出しが、3 列目の実体化(テンプレート引数つきの名前)の中で、記号の列の関数に解決された
+BASES = ('base', 'base-indirect')
+RECV, INST = 'recv', 'inst'
+RELATIONS = BASES + (RECV, INST)
+INST_MAX = 100  # 実体化の名前を結果に出すときの長さ(これ以上は切る)
+RECV_LOOKUPS = 8  # 受け手のクラスの下のクラスを引く回数の上限(1 回の問い合わせで)
 SRC_MAX = 200  # ltidx が索引の行に残すソースの行の長さ(バイト。これ以上は切ってある)
 CP_CODECS = {65001: None, 51932: 'euc_jp', 20932: 'euc_jp', 28591: 'latin-1'}  # ほかは cp<番号>
 SKIP_SCAN_FILES = 64  # 範囲を引くファイルがこれより多ければ、.skip.tsv を 1 つずつ find せず、1 回通して読む
@@ -359,6 +372,8 @@ class Index:
         self._tus = {}
         self._memo = {}
         self._groups = {}  # path -> ソースの #if の構造(ppcond)。無効な行に、囲む条件を添えるのに使う
+        self._plain = {}  # path -> 同じ構造(コメントの範囲を引かずに読んだもの)。コンパイルされる行に、囲む条件を添えるのに使う
+        self.show_conds = False  # コンパイルされる行にも、囲む #if の条件を添えるか(cmd_refs が問い合わせごとに決める)
         # 長く動くプロセス(MCP サーバー)が渡す部品。無ければ、問い合わせのたびに全部を読む
         self.tree = None  # srctree.SourceTree: ソースの一覧(C/C++ 以外のファイルも)を変更の知らせで保つ
         self.words = None  # wordfilter.WordFilter: テキスト検索で読むファイルを絞る
@@ -376,6 +391,7 @@ class Index:
         self._maps = {}
         self._memo = {}
         self._groups = {}
+        self._plain = {}
 
     def cached(self, key, make):
         """同じ Index で同じ問い合わせを繰り返すとき(MCP サーバーが結果を短い形で出し直すとき)に、
@@ -635,6 +651,27 @@ class Index:
         def cut(s):
             return s if len(s) <= COND_MAX else s[:COND_MAX - 3] + '...'
         return ' > '.join('#if ' + cut(ppcond.cond_text(br)) for br in brs[first:])
+
+    def active_cond(self, path, line):
+        """コンパイルされる行を囲む条件(`#if A > #if B`。外側から)。インクルードガードと、囲む #if が無い行は ''。
+        条件は索引に持たず、今のソースから読む。索引の構成では成り立っている条件で、別の構成では無い行かもしれない。"""
+        if path not in self._plain:
+            try:
+                with open(os.path.join(self.root, path), 'rb') as f:
+                    data = to_utf8(f.read(), self.codec())
+            except OSError:
+                data = b''
+            groups = self._groups.get(path) or ppcond.parse(data)
+            guards = ppcond.guards(groups, data)
+            self._plain[path] = (groups, guards)
+        groups, guards = self._plain[path]
+        brs = [br for br in ppcond.enclosing(groups, line) if br.group not in guards]
+        if not brs:
+            return ''
+
+        def cut(s):
+            return s if len(s) <= COND_MAX else s[:COND_MAX - 3] + '...'
+        return ' > '.join('#if ' + cut(ppcond.cond_text(br)) for br in brs)
 
     def _tu(self, part):
         """(TU 数, [(エラーのあった TU, 最初のエラー)], TU の主ファイルの集合, {コードページ: TU 数})"""
@@ -1155,6 +1192,8 @@ def call_kind(r, line=None):
         return 'dynamic'
     if STATIC in r[1]:
         return 'static'
+    if EXACT in r[1]:
+        return 'exact'
     pat = re.compile(rb'(?<![\w$])' + re.escape(r[0].rsplit('::', 1)[-1].encode('utf-8'))
                      + rb'(?![\w$])\s*(?:<[^;()]*>\s*)?\(')
 
@@ -1177,16 +1216,26 @@ def unform(rows):
     """同じ呼び出し(記号・呼び出し元・位置が同じ)が、形の印の有無だけ違う行で 2 つあれば、印のある方だけを残す。
     ltidx を上げた後に -update で作り直した索引では、変わらなかった TU の行(印なし)と、作り直した TU の行(印つき)が
     同じヘッダーの位置に並ぶ。"""
-    marked = {(r[0], r[2], r[3], r[4], r[5], r[1].replace(DYNAMIC, '').replace(STATIC, ''))
-              for r in rows if DYNAMIC in r[1] or STATIC in r[1]}
+    marked = {(r[0], r[2], r[3], r[4], r[5], plain_role(r[1])) for r in rows if has_form(r[1])}
     if not marked:
         return rows
-    return [r for r in rows if DYNAMIC in r[1] or STATIC in r[1] or (r[0], r[2], r[3], r[4], r[5], r[1]) not in marked]
+    return [r for r in rows if has_form(r[1]) or (r[0], r[2], r[3], r[4], r[5], r[1]) not in marked]
 
 
-def fmt(r, show_sym, idx, ranges=None, tag=''):
+def has_form(role):
+    return any(f in role for f in FORMS)
+
+
+def plain_role(role):
+    """呼び出しの形の接尾辞(-dynamic・-static・-exact)を除いた役割。"""
+    for f in FORMS:
+        role = role.replace(f, '')
+    return role
+
+
+def fmt(r, show_sym, idx, ranges=None, tag='', extra=''):
     sym, role, caller, path, line, col, src, note, _, alt = r
-    role = role.replace(DYNAMIC, '').replace(STATIC, '')  # 呼び出しの形は tag で言う(前の ltidx の索引の行と同じに見せる)
+    role = plain_role(role)  # 呼び出しの形は tag で言う(前の ltidx の索引の行と同じに見せる)
     s = f'{role:<6} {path}:{line}'
     if show_sym:
         s += f'  {sym}'
@@ -1196,6 +1245,7 @@ def fmt(r, show_sym, idx, ranges=None, tag=''):
         s += f'  [in {caller}]'
     if tag:
         s += f'  [{tag}]'
+    s += extra
     if alt:  # その構成ではコンパイルされない #if の中。条件を仮に有効にして解析した行
         cond = idx.inactive_cond(path, line, (ranges or {}).get(path, ()))
         s += f'  [inactive: {cond}]' if cond else '  [inactive]'
@@ -1204,6 +1254,10 @@ def fmt(r, show_sym, idx, ranges=None, tag=''):
     only = idx.partial(r)
     if only:
         s += f'  [only in {only}]'
+    if idx.show_conds and not alt:  # コンパイルされる行を囲む条件(索引の構成では成り立っている。別の構成では無いかもしれない行)
+        cond = idx.active_cond(path, line)
+        if cond:
+            s += f'  [under {cond}]'
     return s + f'  | {src}'
 
 
@@ -1252,6 +1306,8 @@ def cmd_refs(a, idx):
     remain = skip is not None
     if a.all or remain:  # 1 行も件数にまとめない(名前やシグネチャを変えるときに、直す先を漏らさないための一覧)
         a.all, a.limit, a.compact = True, sys.maxsize, 0
+    # コンパイルされる行を囲む #if の条件は、ふつうの結果にだけ添える(1 行も省かない一覧は、行が多く、ファイルごとに読むと遅い)
+    idx.show_conds = not a.all
     # 索引が問い合わせに解決しなかった行(解決先の決まらないテンプレートの呼び出し、索引に無い一致、C/C++ でないファイル)の
     # 節ごとの行数。既定は --limit。MCP サーバーは、解決済みの呼び出しを減らす前にこちらを減らす(一覧では効かせない)
     olimit = a.limit if a.all or getattr(a, 'other_limit', None) is None else min(a.limit, a.other_limit)
@@ -1281,7 +1337,17 @@ def cmd_refs(a, idx):
             up.setdefault(r[0], set()).add(r[2])
             down.setdefault(r[2], set()).add(r[0])
             ov_at.setdefault(r[0], (r[3], r[4]))
-    rows = unform([r for r in rows if r[1] != OVERRIDE])
+    # 関係の行(ltidx 0.5.11 から): 受け手のクラス・実体化の名前は (記号, パス, 行) で引けるようにし、派生の関係は別に取っておく。
+    # どれも参照ではないので、下の節には混ぜない
+    recv_at, inst_at, hier = {}, {}, []
+    for r in rows:
+        if r[1] == RECV:
+            recv_at.setdefault((r[0], r[3], r[4]), set()).add(r[2])
+        elif r[1] == INST:
+            inst_at.setdefault((r[0], r[3], r[4]), set()).add(r[2])
+        elif r[1] in BASES:
+            hier.append(r)
+    rows = unform([r for r in rows if r[1] != OVERRIDE and r[1] not in RELATIONS])
     parts = [p for p in name.split('::') if p]
     # 名前を置き換えるマクロ(windows.h の GetMessage -> GetMessageW など)。マクロ short の展開の位置にある、別の名前の行を引く。
     # 修飾名で問われてその記号が無ければ、同じ修飾の置き換え後の名前の記号を答えにする(Mail::GetMessage -> Mail::GetMessageW)
@@ -1294,6 +1360,7 @@ def cmd_refs(a, idx):
         b = s.encode('utf-8')
         got = idx.cached(('rows', s), lambda: [r for r in idx.rows([b + b'\t'], lambda raw: True, name=b)
                                                if r[0].rsplit('::', 1)[-1] == s])
+        got = [r for r in got if r[1] not in RELATIONS]
         aliased += [r for r in got if (r[3], r[4], r[5]) in exp_pos and r[1] not in MACRO_ROLES + (OVERRIDE,)]
         if len(parts) > 1 and not any(match(r[0]) for r in rows if r[1] not in MACRO_ROLES):
             scope = '::'.join(parts[:-1])
@@ -1416,7 +1483,8 @@ def cmd_refs(a, idx):
 
     def vtag(r):
         c = r[0]
-        if not (DYNAMIC in r[1] or c in up or c in down):  # 仮想関数と分かる記号だけ(上書きの関係か、索引の印がある)
+        # 仮想関数と分かる記号だけ(上書きの関係か、索引の印がある)
+        if not (DYNAMIC in r[1] or EXACT in r[1] or c in up or c in down):
             return ''
         k = call_kind(r, line)
         if k == 'static':
@@ -1426,15 +1494,61 @@ def cmd_refs(a, idx):
                 return 'super'
         return k
 
-    def show(r, with_sym):
-        return fmt(r, with_sym, idx, ranges, vtag(r) if r[1].startswith('call') else '')
+    # 受け手のクラスの下のクラス(派生の関係の行を、クラスの名前で引く)。問い合わせのクラスがその下に無ければ、
+    # その呼び出しは問い合わせに届かない
+    q_classes = {s.rsplit('::', 1)[0] for s in syms if '::' in s}
+    below_cls = {}
+
+    def under(cls):
+        """問い合わせのクラスが、cls 自身か、cls を継承するクラスか。分からなければ True(届きうるとして扱う)。"""
+        if cls in q_classes or not q_classes:
+            return True
+        if cls not in below_cls:
+            if len(below_cls) >= RECV_LOOKUPS:
+                return True
+            s = cls.rsplit('::', 1)[-1]
+            b = s.encode('utf-8')
+            got = idx.cached(('rows', s), lambda: [r for r in idx.rows([b + b'\t'], lambda raw: True, name=b)
+                                                   if r[0].rsplit('::', 1)[-1] == s])
+            below_cls[cls] = {r[2] for r in got if r[1] in BASES and r[0] == cls}
+        return bool(below_cls[cls] & q_classes)
+
+    def vlabel(r, via):
+        """呼び出しの行に付ける形。受け手のクラスが分かる行(上書きしていない派生クラスの変数越し)には、それを添える。
+        via(問い合わせが上書きしている基底のメソッドへの呼び出し)では、問い合わせに届かない行にそう書く。"""
+        k = vtag(r)
+        if k == 'dynamic':
+            rc = recv_at.get((r[0], r[3], r[4]))
+            if rc:
+                c = min(rc)
+                k += f' via {c}'
+                if via and not all(under(x) for x in rc):
+                    k += ': not the query'
+        elif k == 'exact' and via:
+            k += ': not the query'
+        return k
+
+    def extras(r):
+        """呼び出しの行の後ろに添えるもの。テンプレートの中の呼び出しなら、その解決先になった実体化の名前を 1 つ。"""
+        ins = inst_at.get((r[0], r[3], r[4]))
+        if not ins:
+            return ''
+        one = min(ins)
+        return (f'  [instantiated in {one if len(one) <= INST_MAX else one[:INST_MAX - 3] + "..."}'
+                + (f', +{len(ins) - 1} more' if len(ins) > 1 else '') + ']')
+
+    def show(r, with_sym, via=False):
+        call = r[1].startswith('call')
+        return fmt(r, with_sym, idx, ranges, vlabel(r, via) if call else '', extras(r) if call else '')
+
+    VKINDS = ('dynamic', 'static', 'super', 'exact')
 
     def kinds_of(rs):
-        """呼び出しの行の形ごとの数。(dynamic, static, super, 決まらない)。仮想関数でなければ None。"""
+        """呼び出しの行の形ごとの数。(dynamic, static, super, exact, 決まらない)。仮想関数でなければ None。"""
         tags = [vtag(r) for r in rs]
         if not any(tags):
             return None
-        n = [tags.count(k) for k in ('dynamic', 'static', 'super')]
+        n = [tags.count(k) for k in VKINDS]
         return (*n, len(tags) - sum(n))
 
     calls = [r for r in target if r[1].startswith('call')]
@@ -1446,12 +1560,14 @@ def cmd_refs(a, idx):
     if calls and not remain and not ck:
         print('  (exact: clang resolved each call from the declared type of its receiver, whatever the variable is named)')
     if ck and not remain:  # 仮想関数では、上の注記の代わりに形ごとの数(短い形で上限に収まるよう、1 行に)
-        d, q, up_q, u = ck
+        d, q, up_q, ex, u = ck
         n_ov = len(closure(syms, down))
         said = ([f'{d} [dynamic]: no qualifier; the override for the receiver\'s runtime type runs'
                  + (f' (the query or one of its {n_ov} overrides)' if n_ov else '')] if d else []) \
             + ([f'{q} [static]: Base::f(), the query itself runs'] if q else []) \
             + ([f'{up_q} [super]: Super::f() or Base::f() inside an override, calling up to the query'] if up_q else []) \
+            + ([f'{ex} [exact]: no qualifier, but the receiver is a value or a final class, so the query itself runs']
+               if ex else []) \
             + ([f'{u} not told apart'] if u else [])
         print('  (virtual calls, resolved by clang: ' + '; '.join(said) + ')')
     if any(r[1].endswith('-using') for r in target) and not remain:
@@ -1462,6 +1578,23 @@ def cmd_refs(a, idx):
     section('other references (address taken, template arguments, writes, #ifdef, ...)',
             [show(r, show_sym) for r in uses], a.limit, [(r[3], r[4]) for r in uses], listed, skip)
     section('definitions and declarations', [show(r, show_sym) for r in defs], a.limit, [(r[3], r[4]) for r in defs], listed, skip)
+
+    # クラスを問われたとき: そのクラスを直接・間接に継承するクラス(派生の関係の行。位置は派生クラスの基底の指定)。
+    # 間接の派生クラスの行には問い合わせの名前が無いので、名前を含む行の数(coverage)には入れない
+    kids = {}
+    for r in hier:
+        if (match(r[0]) or r[0] in renamed) and (not inpath or inpath(r[3])):
+            k = kids.setdefault((r[2], r[0]), [False, r[3], r[4]])
+            k[0] = k[0] or r[1] == 'base'
+    if kids and not remain:
+        ks = sorted(kids.items(), key=lambda kv: (not kv[1][0], kv[0]))
+        cap = sys.maxsize if a.all else a.limit if not a.compact else min(a.limit, 60)
+        print(f'\n== derived classes (every class that inherits the query, from the base specifiers clang saw;'
+              f' [direct] names the query as its base): {len(ks)} ({sum(1 for _, v in ks if v[0])} direct)')
+        for (kid, base), (direct, p, ln) in ks[:cap]:
+            print(f'  {kid}  {p}:{ln}' + ('  [direct]' if direct else '') + (f'  (of {base})' if show_sym else ''))
+        if len(ks) > cap:
+            print(f'  ... {len(ks) - cap} more derived classes (not listed; refs <a derived class> lists the classes under it)')
 
     # 基底のポインタや参照越しの呼び出しは、clang が基底のメソッドに解決する。実行時に上書きへ届くかは型次第
     bases, derived = closure(syms, up), closure(syms, down)
@@ -1491,15 +1624,18 @@ def cmd_refs(a, idx):
         k = kinds_of(rs)
         if not k:
             return ''
-        said = [f'{n} [{t}]' for n, t in zip(k, ('dynamic', 'static', 'super')) if n] \
-            + ([f'{k[3]} not told apart'] if k[3] else [])
+        said = [f'{n} [{t}]' for n, t in zip(k, VKINDS) if n] + ([f'{k[4]} not told apart'] if k[4] else [])
         return ' (' + '; '.join(said) + ')'
 
     if bases and (via or not remain):
         print(f'  the query overrides {", ".join(sorted(bases))}. [dynamic] calls to those may run the query at runtime,'
               ' depending on the dynamic type of the receiver; [static] and [super] ones (Base::f()) run that class\'s function,'
               f' not the query; they are not counted above: {len(via)}' + split(via))
-        for s in [show(r, True) for r in via][:a.limit]:
+        via_lines = [show(r, True, True) for r in via][:a.limit]
+        if any(': not the query]' in s for s in via_lines):
+            print('    (marked "not the query": an [exact] call runs that base function itself, and a [dynamic via C] one'
+                  ' can only run overrides in C and the classes derived from C, which the query\'s class is not)')
+        for s in via_lines:
             print('    ' + s)
         listed.update((r[3], r[4]) for r in via[:a.limit])
         if len(via) > a.limit:
@@ -1552,7 +1688,11 @@ def cmd_refs(a, idx):
             dep_far.add((r[3], r[4]))
             continue
         if resolved:
-            mark = '  (instantiations resolve it to ' + ', '.join(resolved) + ' -> probably not the query)'
+            def where(s):  # その解決先になった実体化の名前を 1 つ(ltidx 0.5.11 からの inst の行があれば)
+                ins = inst_at.get((s, r[3], r[4]))
+                one = min(ins) if ins else ''
+                return s + (f' (in {one if len(one) <= INST_MAX else one[:INST_MAX - 3] + "..."})' if one else '')
+            mark = '  (instantiations resolve it to ' + ', '.join(map(where, resolved)) + ' -> probably not the query)'
         else:
             mark = '  (never instantiated; unknown target' + (', same file as the definition)' if r[3] in def_files else ')')
         dep_lines.append(show(r, False) + mark)
@@ -1832,7 +1972,8 @@ def cmd_check(a, idx):
         for r in sorted(here, key=lambda r: r[5]):
             only = idx.partial(r)
             rel = (f'  [overrides {r[2]}]' if r[1] == OVERRIDE else f'  [-> {r[2]}]' if r[2] and r[1] in ('expand', 'macro')
-                   else f'  [in {r[2]}]' if r[2] else '')
+                   else f'  [inherited by {r[2]}]' if r[1] in BASES else f'  [the receiver is a {r[2]}]' if r[1] == RECV
+                   else f'  [in the instantiation {r[2]}]' if r[1] == INST else f'  [in {r[2]}]' if r[2] else '')
             off = ''
             if r[9]:
                 cond = idx.inactive_cond(path, line, ranges.get(path, ()))

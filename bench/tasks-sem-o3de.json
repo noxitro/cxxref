@@ -1,0 +1,476 @@
+[
+  {
+    "id": "S-OV1",
+    "kind": "純粋仮想関数の引数を変える影響範囲。同じ名前の別の仮想関数の系統(Allocator)と、仮想でない同名の関数がある。上書きは 22 行(Metal の 3 行は Windows でビルドされない)、呼び出しは基底のクラスの中の 1 行",
+    "prompt": "このフォルダは C++ のゲームエンジン O3DE(Open 3D Engine)のソースです。`AZ::RHI::DeviceResourcePool::ComputeFragmentation() const`(`Gems/Atom/RHI/Code/Include/Atom/RHI/DeviceResourcePool.h` で宣言)は純粋仮想関数です。この関数に引数を 1 つ追加したいと考えています。変更の影響範囲を調査して、直す必要のある箇所(宣言と定義、派生クラスでの上書き、呼び出し元)をすべて教えてください。同じ名前の別の関数(`AZ::RHI::Allocator::ComputeFragmentation` など)は含めません。これは調査だけで、コードは変更しないでください。\n\n調べるときは、次の 5 つの観点を必ず確かめてください。\n- 継承関係: どのクラスがこの関数を上書きしているか(間接の派生クラスも)。派生クラスの変数越しの呼び出しが、どの関数に解決されるか\n- 基底呼び出し: `Super::関数()`・`基底クラス::関数()` のように、限定名でその実装を直接呼ぶ行\n- virtual dispatch の可能性: 基底クラスのポインタ・参照越し(またはクラスの中から限定名なし)で呼ばれ、実行時の型によって上書きが動きうる行\n- 条件コンパイル: `#if` などで今の構成(Windows 向けのビルド)ではコンパイルされないコードと、別のプラットフォーム向けのファイルにある行\n- テンプレートの実体化: テンプレートの中の呼び出しで、実体化したときにこの関数に解決されるもの\n\n答えは 1 行に 1 か所、`path:line [種類]` の形で書いてください(path はこのフォルダからの相対パス)。種類は decl(この関数の宣言)・def(この関数の定義)・override(派生クラスでの上書き。宣言も定義も)・base-call(限定名つきの呼び出し)・virtual-call(実行時の型で動く関数が決まる呼び出し)・call(それ以外の呼び出し)のどれか 1 つです。今の構成でコンパイルされない行には inactive を、テンプレートの中の行には template を足してください(例: `a/b.cpp:12 [virtual-call, inactive]`)。",
+    "note": "正解は rg -w ComputeFragmentation の 47 行を読んで作った(索引は使っていない)。各クラスの継承の宣言を読み、DeviceResourcePool の派生(直接・間接)の上書きだけを取った。含めないもの: Allocator の系統(Allocator.h・FreeListAllocator・AllocatorTests.cpp・AliasedHeap.cpp:102)、テンプレート MemorySubAllocator と各バックエンドの BufferMemoryAllocator・BufferD3D12MemoryAllocator の同名の関数(仮想でない)とその呼び出し",
+    "truth": [
+      {
+        "path": "Gems/Atom/RHI/Code/Include/Atom/RHI/DeviceResourcePool.h",
+        "line": 110,
+        "kind": "decl",
+        "flags": []
+      },
+      {
+        "path": "Gems/Atom/RHI/Code/Source/RHI/DeviceResourcePool.cpp",
+        "line": 251,
+        "kind": "virtual-call",
+        "flags": []
+      },
+      {
+        "path": "Gems/Atom/RHI/Code/Include/Atom/RHI/AliasedHeap.h",
+        "line": 119,
+        "kind": "override",
+        "flags": []
+      },
+      {
+        "path": "Gems/Atom/RHI/Code/Source/RHI/AliasedHeap.cpp",
+        "line": 100,
+        "kind": "override",
+        "flags": []
+      },
+      {
+        "path": "Gems/Atom/RHI/Code/Include/Atom/RHI/DeviceImagePool.h",
+        "line": 88,
+        "kind": "override",
+        "flags": []
+      },
+      {
+        "path": "Gems/Atom/RHI/Code/Source/RHI/DeviceImagePool.cpp",
+        "line": 84,
+        "kind": "override",
+        "flags": []
+      },
+      {
+        "path": "Gems/Atom/RHI/Code/Include/Atom/RHI/DeviceQueryPool.h",
+        "line": 108,
+        "kind": "override",
+        "flags": []
+      },
+      {
+        "path": "Gems/Atom/RHI/Code/Include/Atom/RHI/DeviceShaderResourceGroupPool.h",
+        "line": 86,
+        "kind": "override",
+        "flags": []
+      },
+      {
+        "path": "Gems/Atom/RHI/Code/Include/Atom/RHI/DeviceSwapChain.h",
+        "line": 105,
+        "kind": "override",
+        "flags": []
+      },
+      {
+        "path": "Gems/Atom/RHI/Code/Tests/Buffer.h",
+        "line": 78,
+        "kind": "override",
+        "flags": [
+          "inactive?"
+        ]
+      },
+      {
+        "path": "Gems/Atom/RHI/DX12/Code/Source/RHI/BufferPool.h",
+        "line": 57,
+        "kind": "override",
+        "flags": []
+      },
+      {
+        "path": "Gems/Atom/RHI/DX12/Code/Source/RHI/BufferPool.cpp",
+        "line": 446,
+        "kind": "override",
+        "flags": []
+      },
+      {
+        "path": "Gems/Atom/RHI/DX12/Code/Source/RHI/StreamingImagePool.h",
+        "line": 57,
+        "kind": "override",
+        "flags": []
+      },
+      {
+        "path": "Gems/Atom/RHI/Null/Code/Source/RHI/BufferPool.h",
+        "line": 47,
+        "kind": "override",
+        "flags": []
+      },
+      {
+        "path": "Gems/Atom/RHI/Null/Code/Source/RHI/StreamingImagePool.h",
+        "line": 42,
+        "kind": "override",
+        "flags": []
+      },
+      {
+        "path": "Gems/Atom/RHI/Vulkan/Code/Source/RHI/BufferPool.h",
+        "line": 50,
+        "kind": "override",
+        "flags": []
+      },
+      {
+        "path": "Gems/Atom/RHI/Vulkan/Code/Source/RHI/BufferPool.cpp",
+        "line": 244,
+        "kind": "override",
+        "flags": []
+      },
+      {
+        "path": "Gems/Atom/RHI/Vulkan/Code/Source/RHI/StreamingImagePool.h",
+        "line": 62,
+        "kind": "override",
+        "flags": []
+      },
+      {
+        "path": "Gems/Atom/RHI/Vulkan/Code/Source/RHI/StreamingImagePool.cpp",
+        "line": 228,
+        "kind": "override",
+        "flags": []
+      },
+      {
+        "path": "Gems/Atom/RPI/Code/Tests/Common/RHI/Stubs.h",
+        "line": 206,
+        "kind": "override",
+        "flags": [
+          "inactive?"
+        ]
+      },
+      {
+        "path": "Gems/Atom/RPI/Code/Tests/Common/RHI/Stubs.h",
+        "line": 232,
+        "kind": "override",
+        "flags": [
+          "inactive?"
+        ]
+      },
+      {
+        "path": "Gems/Atom/RHI/Metal/Code/Source/RHI/BufferPool.h",
+        "line": 52,
+        "kind": "override",
+        "flags": [
+          "inactive"
+        ]
+      },
+      {
+        "path": "Gems/Atom/RHI/Metal/Code/Source/RHI/BufferPool.cpp",
+        "line": 196,
+        "kind": "override",
+        "flags": [
+          "inactive"
+        ]
+      },
+      {
+        "path": "Gems/Atom/RHI/Metal/Code/Source/RHI/StreamingImagePool.h",
+        "line": 48,
+        "kind": "override",
+        "flags": [
+          "inactive"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "S-OV2",
+    "kind": "仮想関数の引数を変える影響範囲。上書きは 1 クラス、呼び出しは値の変数越し 6 行とテンプレートの中の 1 行。同じ名前の別の系統(DeviceResourcePool、22 の上書き)がある",
+    "prompt": "このフォルダは C++ のゲームエンジン O3DE(Open 3D Engine)のソースです。`AZ::RHI::Allocator::ComputeFragmentation() const`(`Gems/Atom/RHI/Code/Include/Atom/RHI/Allocator.h` で宣言)は virtual 関数です。この関数に引数を 1 つ追加したいと考えています。変更の影響範囲を調査して、直す必要のある箇所(宣言と定義、派生クラスでの上書き、呼び出し元)をすべて教えてください。同じ名前の別の関数(`AZ::RHI::DeviceResourcePool::ComputeFragmentation` など)は含めません。これは調査だけで、コードは変更しないでください。\n\n調べるときは、次の 5 つの観点を必ず確かめてください。\n- 継承関係: どのクラスがこの関数を上書きしているか(間接の派生クラスも)。派生クラスの変数越しの呼び出しが、どの関数に解決されるか\n- 基底呼び出し: `Super::関数()`・`基底クラス::関数()` のように、限定名でその実装を直接呼ぶ行\n- virtual dispatch の可能性: 基底クラスのポインタ・参照越し(またはクラスの中から限定名なし)で呼ばれ、実行時の型によって上書きが動きうる行\n- 条件コンパイル: `#if` などで今の構成(Windows 向けのビルド)ではコンパイルされないコードと、別のプラットフォーム向けのファイルにある行\n- テンプレートの実体化: テンプレートの中の呼び出しで、実体化したときにこの関数に解決されるもの\n\n答えは 1 行に 1 か所、`path:line [種類]` の形で書いてください(path はこのフォルダからの相対パス)。種類は decl(この関数の宣言)・def(この関数の定義)・override(派生クラスでの上書き。宣言も定義も)・base-call(限定名つきの呼び出し)・virtual-call(実行時の型で動く関数が決まる呼び出し)・call(それ以外の呼び出し)のどれか 1 つです。今の構成でコンパイルされない行には inactive を、テンプレートの中の行には template を足してください(例: `a/b.cpp:12 [virtual-call, inactive]`)。",
+    "note": "正解は rg -w ComputeFragmentation の 47 行を読んで作った(索引は使っていない)。呼び出しの受け手の型は宣言を読んで確かめた(AllocatorTests.cpp と AliasedHeap.cpp は FreeListAllocator の値)。MemorySubAllocator.h:218 はテンプレートの中の呼び出しで、受け手は Traits の allocator_type(FreeListAllocator か PoolAllocator で実体化される)。含めないもの: DeviceResourcePool の系統、MemorySubAllocator・BufferMemoryAllocator・BufferD3D12MemoryAllocator の同名の関数とその呼び出し",
+    "truth": [
+      {
+        "path": "Gems/Atom/RHI/Code/Include/Atom/RHI/Allocator.h",
+        "line": 114,
+        "kind": "decl",
+        "flags": []
+      },
+      {
+        "path": "Gems/Atom/RHI/Code/Include/Atom/RHI/FreeListAllocator.h",
+        "line": 56,
+        "kind": "override",
+        "flags": []
+      },
+      {
+        "path": "Gems/Atom/RHI/Code/Source/RHI/FreeListAllocator.cpp",
+        "line": 351,
+        "kind": "override",
+        "flags": []
+      },
+      {
+        "path": "Gems/Atom/RHI/Code/Source/RHI/AliasedHeap.cpp",
+        "line": 102,
+        "kind": "call",
+        "flags": []
+      },
+      {
+        "path": "Gems/Atom/RHI/Code/Include/Atom/RHI/MemorySubAllocator.h",
+        "line": 218,
+        "kind": "call",
+        "flags": [
+          "template"
+        ]
+      },
+      {
+        "path": "Gems/Atom/RHI/Code/Tests/AllocatorTests.cpp",
+        "line": 294,
+        "kind": "call",
+        "flags": [
+          "inactive?"
+        ]
+      },
+      {
+        "path": "Gems/Atom/RHI/Code/Tests/AllocatorTests.cpp",
+        "line": 299,
+        "kind": "call",
+        "flags": [
+          "inactive?"
+        ]
+      },
+      {
+        "path": "Gems/Atom/RHI/Code/Tests/AllocatorTests.cpp",
+        "line": 303,
+        "kind": "call",
+        "flags": [
+          "inactive?"
+        ]
+      },
+      {
+        "path": "Gems/Atom/RHI/Code/Tests/AllocatorTests.cpp",
+        "line": 310,
+        "kind": "call",
+        "flags": [
+          "inactive?"
+        ]
+      },
+      {
+        "path": "Gems/Atom/RHI/Code/Tests/AllocatorTests.cpp",
+        "line": 315,
+        "kind": "call",
+        "flags": [
+          "inactive?"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "S-O2",
+    "kind": "対照: 修飾名で rg でも絞れる。Windows でビルドされないファイル(Linux 用、PhysX4)や構成で無効になる #if の中を含む",
+    "prompt": "このフォルダは C++ のゲームエンジン O3DE(Open 3D Engine)のソースです。`AZ::DynamicModuleHandle::Create` を呼び出している箇所をすべて挙げてください(定義・宣言は含めません)。\n\n調べるときは、次の 5 つの観点を必ず確かめてください。\n- 継承関係: どのクラスがこの関数を上書きしているか(間接の派生クラスも)。派生クラスの変数越しの呼び出しが、どの関数に解決されるか\n- 基底呼び出し: `Super::関数()`・`基底クラス::関数()` のように、限定名でその実装を直接呼ぶ行\n- virtual dispatch の可能性: 基底クラスのポインタ・参照越し(またはクラスの中から限定名なし)で呼ばれ、実行時の型によって上書きが動きうる行\n- 条件コンパイル: `#if` などで今の構成(Windows 向けのビルド)ではコンパイルされないコードと、別のプラットフォーム向けのファイルにある行\n- テンプレートの実体化: テンプレートの中の呼び出しで、実体化したときにこの関数に解決されるもの\n\n答えは 1 行に 1 か所、`path:line [種類]` の形で書いてください(path はこのフォルダからの相対パス)。種類は decl(この関数の宣言)・def(この関数の定義)・override(派生クラスでの上書き。宣言も定義も)・base-call(限定名つきの呼び出し)・virtual-call(実行時の型で動く関数が決まる呼び出し)・call(それ以外の呼び出し)のどれか 1 つです。今の構成でコンパイルされない行には inactive を、テンプレートの中の行には template を足してください(例: `a/b.cpp:12 [virtual-call, inactive]`)。",
+    "note": "O2 と同じ問いに、5 つの観点の指示を足したもの。正解は rg で `DynamicModuleHandle::Create(` を引き、テストのフォルダと定義(DynamicModuleHandle_WinAPI/UnixLike/Unimplemented.cpp)を除いて、各行がコメントでないことを読んで確かめた。Windows でビルドされないもの: Platform/Linux の LibEVDevWrapper.cpp、PhysX4 の Module.cpp(PhysX5 と片方だけ)",
+    "truth": [
+      {
+        "path": "Code/LauncherUnified/Launcher.cpp",
+        "line": 571,
+        "kind": "call",
+        "flags": []
+      },
+      {
+        "path": "Code/Framework/AzToolsFramework/AzToolsFramework/API/PythonLoader.cpp",
+        "line": 50,
+        "kind": "call",
+        "flags": [
+          "inactive"
+        ]
+      },
+      {
+        "path": "Gems/PhysX/Core/PhysX5/Source/Module.cpp",
+        "line": 86,
+        "kind": "call",
+        "flags": [
+          "inactive?"
+        ]
+      },
+      {
+        "path": "Gems/PhysX/Core/PhysX4/Source/Module.cpp",
+        "line": 85,
+        "kind": "call",
+        "flags": [
+          "inactive"
+        ]
+      },
+      {
+        "path": "Code/Framework/AzFramework/Platform/Windows/AzFramework/Windowing/NativeWindow_Windows.cpp",
+        "line": 33,
+        "kind": "call",
+        "flags": []
+      },
+      {
+        "path": "Gems/ImGui/Code/Source/ImGuiManager.cpp",
+        "line": 135,
+        "kind": "call",
+        "flags": [
+          "inactive"
+        ]
+      },
+      {
+        "path": "Code/Framework/AzFramework/Platform/Windows/AzFramework/Input/Devices/Gamepad/InputDeviceGamepad_Windows.cpp",
+        "line": 118,
+        "kind": "call",
+        "flags": []
+      },
+      {
+        "path": "Code/Framework/AzFramework/Platform/Linux/AzFramework/Input/LibEVDevWrapper.cpp",
+        "line": 16,
+        "kind": "call",
+        "flags": [
+          "inactive"
+        ]
+      },
+      {
+        "path": "Gems/SceneProcessing/Code/Source/SceneProcessingModule.cpp",
+        "line": 97,
+        "kind": "call",
+        "flags": []
+      },
+      {
+        "path": "Gems/SceneLoggingExample/Code/SceneLoggingExampleModule.cpp",
+        "line": 35,
+        "kind": "call",
+        "flags": []
+      },
+      {
+        "path": "Code/Framework/AzCore/AzCore/Module/ModuleManager.cpp",
+        "line": 405,
+        "kind": "call",
+        "flags": []
+      },
+      {
+        "path": "Code/Editor/GameEngine.cpp",
+        "line": 329,
+        "kind": "call",
+        "flags": []
+      },
+      {
+        "path": "Gems/Atom/RHI/Code/Source/RHI.Profiler/RenderDoc/RenderDocSystemComponent.cpp",
+        "line": 41,
+        "kind": "call",
+        "flags": [
+          "inactive?"
+        ]
+      },
+      {
+        "path": "Gems/Atom/RHI/Code/Source/RHI.Profiler/PIX/PIXSystemComponent.cpp",
+        "line": 84,
+        "kind": "call",
+        "flags": [
+          "inactive?"
+        ]
+      },
+      {
+        "path": "Code/Editor/main.cpp",
+        "line": 24,
+        "kind": "call",
+        "flags": []
+      },
+      {
+        "path": "Code/Framework/AzCore/Platform/Common/WinAPI/AzCore/Process/ProcessInfo_WinAPI.cpp",
+        "line": 22,
+        "kind": "call",
+        "flags": []
+      },
+      {
+        "path": "Code/Editor/Plugins/EditorAssetImporter/AssetImporterPlugin.cpp",
+        "line": 71,
+        "kind": "call",
+        "flags": []
+      }
+    ]
+  },
+  {
+    "id": "S-O3",
+    "kind": "派生クラス(各バックエンドの BufferPool)の変数越しに呼ぶ基底のメンバー関数。Windows でビルドされない Metal のファイルを含む",
+    "prompt": "このフォルダは C++ のゲームエンジン O3DE(Open 3D Engine)のソースです。`AZ::RHI::DeviceBufferPool::Init(Device&, const BufferPoolDescriptor&)` を呼び出している箇所をすべて挙げてください。`DeviceBufferPool` を継承したクラス(各 RHI バックエンドの `BufferPool` など)の変数越しに呼んでいるものも、呼び出し先がこの関数なら含めます。`AZ::RHI::BufferPool::Init` など他の関数の呼び出しと、定義・宣言は含めません。\n\n調べるときは、次の 5 つの観点を必ず確かめてください。\n- 継承関係: どのクラスがこの関数を上書きしているか(間接の派生クラスも)。派生クラスの変数越しの呼び出しが、どの関数に解決されるか\n- 基底呼び出し: `Super::関数()`・`基底クラス::関数()` のように、限定名でその実装を直接呼ぶ行\n- virtual dispatch の可能性: 基底クラスのポインタ・参照越し(またはクラスの中から限定名なし)で呼ばれ、実行時の型によって上書きが動きうる行\n- 条件コンパイル: `#if` などで今の構成(Windows 向けのビルド)ではコンパイルされないコードと、別のプラットフォーム向けのファイルにある行\n- テンプレートの実体化: テンプレートの中の呼び出しで、実体化したときにこの関数に解決されるもの\n\n答えは 1 行に 1 か所、`path:line [種類]` の形で書いてください(path はこのフォルダからの相対パス)。種類は decl(この関数の宣言)・def(この関数の定義)・override(派生クラスでの上書き。宣言も定義も)・base-call(限定名つきの呼び出し)・virtual-call(実行時の型で動く関数が決まる呼び出し)・call(それ以外の呼び出し)のどれか 1 つです。今の構成でコンパイルされない行には inactive を、テンプレートの中の行には template を足してください(例: `a/b.cpp:12 [virtual-call, inactive]`)。",
+    "note": "O3 と同じ問いに、5 つの観点の指示を足したもの。正解は rg と読解で作った(索引は使っていない)。BufferPool 型の変数名で Init を呼ぶ行と、Init(*device/this/device, ...Desc) の形の呼び出しを Gems/Atom 全体から集め、受け手の型を宣言で確かめた。Vulkan と Metal の BufferPool は RHI::DeviceBufferPool を継承し、自前の Init を持たない。Metal の Device.cpp:439 は Windows ではビルドされない。Vulkan の Device.h:295 のテンプレート(objectPtr->Init(args...))は BufferPool で実体化されていない。後で索引の 15 件(Metal を除く)と突き合わせ、一致した",
+    "truth": [
+      {
+        "path": "Gems/Atom/RHI/Code/Source/RHI/BufferPool.cpp",
+        "line": 128,
+        "kind": "call",
+        "flags": []
+      },
+      {
+        "path": "Gems/Atom/RHI/Code/Source/RHI/DeviceRayTracingBufferPools.cpp",
+        "line": 103,
+        "kind": "call",
+        "flags": []
+      },
+      {
+        "path": "Gems/Atom/RHI/Code/Source/RHI/DeviceRayTracingBufferPools.cpp",
+        "line": 115,
+        "kind": "call",
+        "flags": []
+      },
+      {
+        "path": "Gems/Atom/RHI/Code/Source/RHI/DeviceRayTracingBufferPools.cpp",
+        "line": 127,
+        "kind": "call",
+        "flags": []
+      },
+      {
+        "path": "Gems/Atom/RHI/Code/Source/RHI/DeviceRayTracingBufferPools.cpp",
+        "line": 139,
+        "kind": "call",
+        "flags": []
+      },
+      {
+        "path": "Gems/Atom/RHI/Code/Source/RHI/DeviceRayTracingBufferPools.cpp",
+        "line": 151,
+        "kind": "call",
+        "flags": []
+      },
+      {
+        "path": "Gems/Atom/RHI/Code/Source/RHI/DeviceRayTracingBufferPools.cpp",
+        "line": 163,
+        "kind": "call",
+        "flags": []
+      },
+      {
+        "path": "Gems/Atom/RHI/Code/Source/RHI/DeviceRayTracingBufferPools.cpp",
+        "line": 175,
+        "kind": "call",
+        "flags": []
+      },
+      {
+        "path": "Gems/Atom/RHI/Code/Source/RHI/DeviceRayTracingBufferPools.cpp",
+        "line": 187,
+        "kind": "call",
+        "flags": []
+      },
+      {
+        "path": "Gems/Atom/RHI/Code/Source/RHI/DeviceRayTracingBufferPools.cpp",
+        "line": 199,
+        "kind": "call",
+        "flags": []
+      },
+      {
+        "path": "Gems/Atom/RHI/Code/Source/RHI/DeviceRayTracingBufferPools.cpp",
+        "line": 211,
+        "kind": "call",
+        "flags": []
+      },
+      {
+        "path": "Gems/Atom/RHI/Code/Source/RHI/DeviceRayTracingBufferPools.cpp",
+        "line": 223,
+        "kind": "call",
+        "flags": []
+      },
+      {
+        "path": "Gems/Atom/RHI/Vulkan/Code/Source/RHI/Device.cpp",
+        "line": 672,
+        "kind": "call",
+        "flags": []
+      },
+      {
+        "path": "Gems/Atom/RHI/Vulkan/Code/Source/RHI/Device.cpp",
+        "line": 683,
+        "kind": "call",
+        "flags": []
+      },
+      {
+        "path": "Gems/Atom/RHI/Vulkan/Code/Source/RHI/NullDescriptorManager.cpp",
+        "line": 323,
+        "kind": "call",
+        "flags": []
+      },
+      {
+        "path": "Gems/Atom/RHI/Metal/Code/Source/RHI/Device.cpp",
+        "line": 439,
+        "kind": "call",
+        "flags": [
+          "inactive"
+        ]
+      }
+    ]
+  }
+]

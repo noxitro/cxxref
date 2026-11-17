@@ -117,9 +117,13 @@ SESSION_NOTE = ('This repository has a cxxref index (.index, built by clang over
 SESSION_NOTE_CMD = ('This repository has a cxxref index (.index, built by clang over every C++ translation unit). '
                     'When the question is where a C++ symbol is used or called, or what a change to it would affect, '
                     'run this in PowerShell before grepping, exactly as written and as a command of its own (nothing chained): '
-                    '{cmd} <name> (<name>: the qualified name or its suffix). Its `calls` are the answer; do not grep the '
-                    'source again to confirm them. The cxxref skill has the options; you do not need to load it first. '
+                    '{cmd} <name> (<name>: the qualified name or its suffix). Its `calls` are resolved by clang; do not grep '
+                    'to confirm them. Its matches in "files no indexed TU includes" (tests, other platforms) are not '
+                    'analyzed: judge them from the line, or view the file, and include the real ones. '
+                    'The cxxref skill has the options; you do not need to load it first. '
                     'When asked to make the change yourself, grep as usual.')
+# 「`calls` が答え」とだけ書いていた前の文では、索引の構成に入らないファイル(テスト、別のプラットフォーム)の一致を、
+# モデルが答えに入れなかった【実測: big1。O3DE の 3 問 15 回で、テストの呼び出しを全部挙げたのは 3 回。MCP 版は 11 回】
 
 
 def cli_command():
