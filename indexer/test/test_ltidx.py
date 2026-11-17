@@ -332,8 +332,65 @@ class LtidxTest(unittest.TestCase):
         self.assertTrue(self.has('Mid::Tick', 'call-static', 'a.cpp:3:75', caller='Leaf::Tick'))
         self.assertTrue(self.has('Leaf::Tick', 'call-dynamic', 'a.cpp:3:84', caller='Leaf::Tick'))
         self.assertTrue(self.has('Base::Tick', 'call-dynamic', 'a.cpp:4:31'))
-        self.assertTrue(self.has('Leaf::Tick', 'call-dynamic', 'a.cpp:4:42'))  # 値でも、限定名が無ければ付く(clang の決まり)
+        # 値の変数越しは、限定名が無くても動く関数が 1 つに決まる(clang の Dynamic の印は付くが、-exact にする)
+        self.assertTrue(self.has('Leaf::Tick', 'call-exact', 'a.cpp:4:42'))
+        self.assertFalse(self.has('Leaf::Tick', 'call-dynamic', 'a.cpp:4:42'))
         self.assertTrue(self.has('Base::Tick', 'call-static', 'a.cpp:4:59'))
+
+    HIER = ('struct Alloc { virtual float Frag() const { return 0; } virtual ~Alloc() {} };\n'
+            'struct FreeList final : Alloc { float Frag() const override { return 1; } };\n'
+            'struct Pool : Alloc {};\n'
+            'struct Mid : Alloc {};\n'
+            'struct Leaf : Mid { float Frag() const override { return Mid::Frag() + 2; } };\n'
+            'template <class T> struct Sub { T a; float Frag() const { return a.Frag(); } };\n'
+            'float f1(const Alloc &r) { return r.Frag(); }\n'
+            'float f3() { FreeList x; return x.Frag(); }\n'
+            'float f4() { Pool x; return x.Frag(); }\n'
+            'float f5(FreeList &r) { return r.Frag(); }\n'
+            'float f6(Mid &r) { return r.Frag(); }\n'
+            'float g() { Sub<FreeList> s; Sub<Pool> t; return s.Frag() + t.Frag(); }\n'
+            'using Root = Alloc;\n'
+            'struct Aliased : Root {};\n')
+
+    def test_exact_calls_and_receiver_class(self):
+        # 受け手から動く関数が 1 つに決まる呼び出し(値の変数、final のクラスの参照)は -exact。上書きしていない派生クラスの
+        # 参照越しは -dynamic で、受け手のクラスを recv の行に出す(解決先の関数のクラスと同じなら出さない)
+        self.write('a.cpp', self.HIER, [])
+        rc, err = self.run_ltidx()
+        self.assertEqual(rc, 0, err)
+        self.assertTrue(self.has('Alloc::Frag', 'call-dynamic', 'a.cpp:7:37', caller='f1'))
+        self.assertTrue(self.has('FreeList::Frag', 'call-exact', 'a.cpp:8:35', caller='f3'))
+        self.assertTrue(self.has('Alloc::Frag', 'call-exact', 'a.cpp:9:31', caller='f4'))  # 上書きの無いクラスの値
+        self.assertTrue(self.has('FreeList::Frag', 'call-exact', 'a.cpp:10:34', caller='f5'))  # final のクラスの参照
+        self.assertTrue(self.has('Alloc::Frag', 'call-dynamic', 'a.cpp:11:29', caller='f6'))
+        self.assertTrue(self.has('Alloc::Frag', 'recv', 'a.cpp:11:29', caller='Mid'))
+        self.assertEqual([r for r in self.rows() if r[1] == 'recv' and not r[3].startswith('a.cpp:11:')], [])
+        self.assertEqual({r[4] for r in self.rows() if r[1] == 'recv'}, {''})  # 文面は、同じ位置の呼び出しの行にある
+
+    def test_base_rows(self):
+        # クラスの派生の関係: 直接の基底は base、間接の基底は base-indirect(記号の列が基底、3 列目が派生)。
+        # 別名で書いた基底も、クラスそのものの名前にする
+        self.write('a.cpp', self.HIER, [])
+        rc, err = self.run_ltidx()
+        self.assertEqual(rc, 0, err)
+        rel = sorted((r[0], r[1], r[2], r[3].rsplit(':', 1)[0]) for r in self.rows() if r[1].startswith('base'))
+        self.assertEqual(rel, [('Alloc', 'base', 'Aliased', 'a.cpp:14'), ('Alloc', 'base', 'FreeList', 'a.cpp:2'),
+                               ('Alloc', 'base', 'Mid', 'a.cpp:4'), ('Alloc', 'base', 'Pool', 'a.cpp:3'),
+                               ('Alloc', 'base-indirect', 'Leaf', 'a.cpp:5'), ('Mid', 'base', 'Leaf', 'a.cpp:5')])
+
+    def test_instantiation_rows(self):
+        # テンプレートの中の呼び出しが実体化で解決されたら、(位置, 解決先)ごとに、その実体化の名前を inst の行に出す。
+        # テンプレートの本体で解決先が決まらなかった位置(dep の行のある位置)だけ
+        self.write('a.cpp', self.HIER, [])
+        rc, err = self.run_ltidx()
+        self.assertEqual(rc, 0, err)
+        self.assertTrue(self.has('?::Frag', 'dep', 'a.cpp:6:68', caller='Sub::Frag'))
+        self.assertTrue(self.has('FreeList::Frag', 'inst', 'a.cpp:6:68', caller='Sub<FreeList>::Frag'))
+        self.assertTrue(self.has('Alloc::Frag', 'inst', 'a.cpp:6:68', caller='Sub<Pool>::Frag'))
+        self.assertEqual(len([r for r in self.rows() if r[1] == 'inst']), 2)  # テンプレートの外の呼び出しには出さない
+        rc, err = self.run_ltidx('-no-dep')
+        self.assertEqual(rc, 0, err)
+        self.assertEqual([r for r in self.rows() if r[1] == 'inst'], [])
 
     def test_virtual_call_in_a_template(self):
         # テンプレートの中の依存した呼び出し(gtest の impl_->Advance() など)。clang は Dynamic の印を付けないが、限定名が

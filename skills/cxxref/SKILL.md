@@ -21,6 +21,8 @@ python -I "<base directory for this skill>\..\..\mcp\cxxref_cli.py" refs <name>
 Reading the result
 - `calls`: every call clang resolved, with the enclosing function `[in ...]`. Do not grep the source again to confirm them
 - `other references`, `definitions and declarations`, `virtual dispatch` (overrides, `[dynamic]`/`[static]`/`[super]` calls), `unresolved template calls` (decide from the line)
+- Marks on a call: `[exact]` the receiver is a value or a final class, so no other override can run; `[dynamic via C]` only overrides in C and the classes derived from C can run; `[instantiated in X]` the template instantiation in which the call resolves to this function; `[under #if COND]` compiled only where COND holds
+- For a class name, `derived classes` lists every class that inherits it, directly or not
 - `text matches ... not in the index`: text matches of the name the index does not resolve to this symbol, with the reason (comment, inactive `#if`, string, other symbol). Leave the comment ones out
 - Matches under "files no indexed TU includes" (tests, other platforms) are not analyzed and may be uses too: judge them from the line, or view the file, and include the real ones
 - If the last line names list files, read those files (each fits in one read) instead of grepping

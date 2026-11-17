@@ -1,7 +1,8 @@
 """大きなコードベース(O3DE・UE5 など)の写しで、1 問を Copilot CLI に解かせる。条件は run13.py の A・V・W と同じ形。
 
 usage: python -I run_big.py --ws <写しのフォルダ> --tasks <問題の JSON> --task O2 --cond A|V|W|R --rep 1 --round big1
-       [--skill-ref <コミット>] [--model claude-haiku-5-5] [--provider anthropic] [--timeout 2400]
+       [--skill-ref <コミット>] [--index-dir <索引のフォルダ>] [--model claude-haiku-5-5] [--provider anthropic]
+       [--timeout 2400]
 
 条件
   A: プラグインなし。空の COPILOT_HOME。索引(<写し>\\.index)は、回の間だけ写しの外に退かす
@@ -12,6 +13,8 @@ usage: python -I run_big.py --ws <写しのフォルダ> --tasks <問題の JSON
 run13.py との違い
 - 索引は写しの .index をそのまま使う(数十 GB あるので写さない)。git clean はしない(.index と .cdb が消えるため)。
   回の前の `git status` を基準に、増えた変更だけを戻す
+- --index-dir を付けると、その回の間だけ、写しの .index を退かして、指定のフォルダを .index に置く(前の索引と新しい索引を
+  交互に比べる。同じドライブのフォルダの名前を付け替えるだけ)。条件 A では使わない
 - 写しに残っている前の計測の設定(.mcp.json・.github の指示)は、回の間だけ退かして戻す
 - 記録は run13.py と同じ runs13/index.jsonl(ratio13.py でそのまま比を出せる)。失敗したツール呼び出しの数(failed)と、
   索引を引くコマンドの時間(cli_sec)も入れる
@@ -77,6 +80,7 @@ def main():
     ap.add_argument('--task', required=True)
     ap.add_argument('--cond', required=True, choices=['A', 'V', 'W', 'R'])
     ap.add_argument('--skill-ref', default='', help='条件 R の skill 版を作るコミット(条件 R には必須)')
+    ap.add_argument('--index-dir', default='', help='この回の間だけ、写しの .index の代わりに置く索引のフォルダ(同じドライブ)')
     ap.add_argument('--rep', type=int, default=1)
     ap.add_argument('--round', required=True)
     ap.add_argument('--model', default='claude-haiku-5-5')
@@ -97,6 +101,11 @@ def main():
 
     index, park_index = os.path.join(ws, '.index'), ws.rstrip('\\/') + '.index-parked'
     park = os.path.join(run13.V13, 'park-big', os.path.basename(ws))
+    other = os.path.abspath(a.index_dir) if a.index_dir and a.cond != 'A' else ''
+    held = ws.rstrip('\\/') + '.index-held'  # --index-dir の間、写しの元の .index を置く場所
+    if other and os.path.isdir(held) and not os.path.isdir(other):  # 前の回が途中で止まっていたら戻す
+        rename_retry(index, other)
+        rename_retry(held, index)
     if os.path.isdir(park_index) and not os.path.isdir(index):
         rename_retry(park_index, index)  # 前の回が途中で止まっていたら戻す
     if any(files for _, _, files in os.walk(park)):  # 空のフォルダだけなら、前の回が戻し終えている
@@ -129,7 +138,7 @@ def main():
         run13.make_plugin_r(ref=a.skill_ref)
         run13.install_plugin_r(home)
 
-    moved, index_parked = [], False
+    moved, index_parked, swapped = [], False, False
     code, out, d, extra = 'error', '', '', []
     t0 = time.time()
     start = datetime.now(timezone.utc).isoformat(timespec='seconds')
@@ -144,6 +153,10 @@ def main():
         if a.cond == 'A':
             rename_retry(index, park_index)
             index_parked = True
+        if other:
+            rename_retry(index, held)
+            rename_retry(other, index)
+            swapped = True
         if a.cond == 'V':
             run13.place_instructions_v(ws)
         base = status(ws)  # 条件の設定を置いた後の状態(ここから増えた分が、回の変更)
@@ -176,6 +189,9 @@ def main():
                 os.rmdir(os.path.dirname(f))
         if index_parked:
             rename_retry(park_index, index)
+        if swapped:
+            rename_retry(index, other)
+            rename_retry(held, index)
         for src, dst in reversed(moved):
             if os.path.isdir(src) and not os.listdir(src):
                 os.rmdir(src)
@@ -187,7 +203,7 @@ def main():
         with open(os.path.join(run13.RUNS, name + '.diff'), 'w', encoding='utf-8', newline='\n') as f:
             f.write(d)
     rec = {'name': name, 'round': a.round, 'task': a.task, 'cond': a.cond, 'rep': a.rep, 'model': a.model, 'provider': a.provider,
-           'ws': os.path.basename(ws), 'exit': code, 'sec': sec, 'at': start, 'diff_lines': d.count('\n'), 'new_files': extra}
+           'ws': os.path.basename(ws), 'index': os.path.basename(other), 'exit': code, 'sec': sec, 'at': start, 'diff_lines': d.count('\n'), 'new_files': extra}
     rec.update(run13.collect(home, usage_file))
     rec['failed'], rec['cli_sec'] = tool_times(home)
     with open(os.path.join(run13.RUNS, 'index.jsonl'), 'a', encoding='utf-8') as f:

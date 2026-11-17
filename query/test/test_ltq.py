@@ -115,7 +115,8 @@ class LtqTest(unittest.TestCase):
         out = self.ltq('refs', 'Run')
         self.assertIn('index: 2 configurations, merged', out)
         self.assertIn('src/a.cpp:3  [in Main]  | Run();', out)  # 両方にある行は印なし
-        self.assertIn('src/a.cpp:5  [in Main]  [only in index]  | Run();', out)
+        # コンパイルされる行を囲む条件も添える(その構成では成り立っている)
+        self.assertIn('src/a.cpp:5  [in Main]  [only in index]  [under #if defined(DEBUG_ONLY)]  | Run();', out)
         self.assertIn('== calls (resolved by clang): 2', out)
         self.assertIn('inside comments', out)
 
@@ -345,6 +346,131 @@ class LtqTest(unittest.TestCase):
         # 上書きの側から問うと、基底への呼び出しも形で分ける(Base::Tick(n) は問い合わせを呼ばない)
         out = self.ltq('refs', 'Mid::Tick')
         self.assertIn('they are not counted above: 5 (2 [dynamic]; 1 [static]; 1 [super]; 1 not told apart)\n', out)
+
+    HIER = ['struct Alloc { virtual float Frag() const { return 0; } };',
+            'struct FreeList final : Alloc { float Frag() const override { return 1; } };',
+            'struct Pool : Alloc {};',
+            'struct Mid : Alloc {};',
+            'struct Leaf : Mid { float Frag() const override { return Mid::Frag() + 2; } };',
+            'template <class T> struct Sub { T a; float Frag() const { return a.Frag(); } };',
+            'float f1(const Alloc &r) { return r.Frag(); }',
+            'float f3() { FreeList x; return x.Frag(); }',
+            'float f4() { Pool x; return x.Frag(); }',
+            'float f6(Mid &r) { return r.Frag(); }',
+            'float f8(Pool &r) { return r.Frag(); }',
+            '#ifndef HIER_GUARD',  # 12 行目。ガードではない(次の行が #define でない)
+            'float f9(Alloc &r) { return r.Frag(); }',
+            '#endif']
+
+    def hier(self):
+        """ltidx 0.5.11 からの行のある索引: 派生の関係(base・base-indirect)、動く関数が 1 つに決まる呼び出し(call-exact)、
+        受け手のクラス(recv)、実体化の名前(inst)。"""
+        L = self.HIER
+        self.write('src/h.cpp', '\n'.join(L) + '\n', self.t0 - 10)
+        self.index('index', [
+            ('Alloc', 'def', '', 'src/h.cpp:1:8', L[0]),
+            ('Alloc::Frag', 'def', '', 'src/h.cpp:1:30', L[0]),
+            ('Alloc', 'ref', 'FreeList', 'src/h.cpp:2:25', L[1]),
+            ('Alloc', 'base', 'FreeList', 'src/h.cpp:2:25', L[1]),
+            ('FreeList::Frag', 'def', '', 'src/h.cpp:2:39', L[1]),
+            ('FreeList::Frag', 'override', 'Alloc::Frag', 'src/h.cpp:2:39', L[1]),
+            ('Alloc', 'ref', 'Pool', 'src/h.cpp:3:15', L[2]),
+            ('Alloc', 'base', 'Pool', 'src/h.cpp:3:15', L[2]),
+            ('Alloc', 'ref', 'Mid', 'src/h.cpp:4:14', L[3]),
+            ('Alloc', 'base', 'Mid', 'src/h.cpp:4:14', L[3]),
+            ('Mid', 'base', 'Leaf', 'src/h.cpp:5:15', L[4]),
+            ('Alloc', 'base-indirect', 'Leaf', 'src/h.cpp:5:15', L[4]),
+            ('Leaf::Frag', 'def', '', 'src/h.cpp:5:27', L[4]),
+            ('Leaf::Frag', 'override', 'Alloc::Frag', 'src/h.cpp:5:27', L[4]),
+            ('Alloc::Frag', 'call-static', 'Leaf::Frag', 'src/h.cpp:5:63', L[4]),
+            ('?::Frag', 'dep', 'Sub::Frag', 'src/h.cpp:6:68', L[5]),
+            ('FreeList::Frag', 'call-exact', 'Sub::Frag', 'src/h.cpp:6:68', L[5]),
+            ('Alloc::Frag', 'call-exact', 'Sub::Frag', 'src/h.cpp:6:68', L[5]),
+            ('FreeList::Frag', 'inst', 'Sub<FreeList>::Frag', 'src/h.cpp:6:68', ''),
+            ('Alloc::Frag', 'inst', 'Sub<Pool>::Frag', 'src/h.cpp:6:68', ''),
+            ('Alloc::Frag', 'inst', 'Sub<Other>::Frag', 'src/h.cpp:6:68', ''),
+            ('Alloc::Frag', 'call-dynamic', 'f1', 'src/h.cpp:7:37', L[6]),
+            ('FreeList::Frag', 'call-exact', 'f3', 'src/h.cpp:8:35', L[7]),
+            ('Alloc::Frag', 'call-exact', 'f4', 'src/h.cpp:9:31', L[8]),
+            ('Alloc::Frag', 'call-dynamic', 'f6', 'src/h.cpp:10:29', L[9]),
+            ('Alloc::Frag', 'recv', 'Mid', 'src/h.cpp:10:29', ''),
+            ('Alloc::Frag', 'call-dynamic', 'f8', 'src/h.cpp:11:30', L[10]),
+            ('Alloc::Frag', 'recv', 'Pool', 'src/h.cpp:11:30', ''),
+            ('Alloc::Frag', 'call-dynamic', 'f9', 'src/h.cpp:13:31', L[12]),
+        ], [], tus=('src/h.cpp',))
+
+    def test_exact_calls_and_receiver_classes(self):
+        # 限定名の無い仮想関数の呼び出しでも、受け手が値の変数や final のクラスなら、動く関数は 1 つに決まる([exact])。
+        # 上書きしていない派生クラスの変数越しの呼び出しには、受け手のクラスを添える([dynamic via Mid])
+        self.hier()
+        out = self.ltq('refs', 'Alloc::Frag')
+        self.assertIn('  call   src/h.cpp:9  [in f4]  [exact]  | float f4', out)
+        self.assertIn('  call   src/h.cpp:10  [in f6]  [dynamic via Mid]  | float f6', out)
+        self.assertIn('  call   src/h.cpp:7  [in f1]  [dynamic]  | float f1', out)
+        self.assertIn('2 [exact]: no qualifier, but the receiver is a value or a final class, so the query itself runs', out)
+        self.assertNotIn('not the query]', out)  # 問い合わせそのものへの呼び出しには書かない
+        # 関係の行(recv・inst・base)は、参照として並べない
+        self.assertNotIn('recv ', out)
+        self.assertNotIn('inst  ', out)
+        self.assertIn('== other references (address taken, template arguments, writes, #ifdef, ...): 0', out)
+        # 上書きの側から問うと、基底への呼び出しのうち、問い合わせに届かないものにそう書く:
+        # [exact] は基底の関数そのもの、[dynamic via C] は C より下の上書きだけが動く
+        out = self.ltq('refs', 'Leaf::Frag')
+        self.assertIn('    (marked "not the query": an [exact] call runs that base function itself', out)
+        self.assertIn('    call   src/h.cpp:9  Alloc::Frag  [in f4]  [exact: not the query]  | float f4', out)
+        self.assertIn('    call   src/h.cpp:10  Alloc::Frag  [in f6]  [dynamic via Mid]  | float f6', out)  # Leaf は Mid の下
+        self.assertIn('    call   src/h.cpp:11  Alloc::Frag  [in f8]  [dynamic via Pool: not the query]  | float f8', out)
+        self.assertIn('    call   src/h.cpp:7  Alloc::Frag  [in f1]  [dynamic]  | float f1', out)
+        out = self.ltq('refs', 'FreeList::Frag')
+        self.assertIn('    call   src/h.cpp:10  Alloc::Frag  [in f6]  [dynamic via Mid: not the query]  | float f6', out)
+        self.assertIn('  call   src/h.cpp:8  [in f3]  [exact]  | float f3', out)
+
+    def test_instantiation_names(self):
+        # テンプレートの中の呼び出しには、その解決先になった実体化の名前を 1 つ添える(名前の順で最初のものと、残りの数)
+        self.hier()
+        out = self.ltq('refs', 'Alloc::Frag')
+        self.assertIn('  call   src/h.cpp:6  [in Sub::Frag]  [exact]  [instantiated in Sub<Other>::Frag, +1 more]  | template', out)
+        out = self.ltq('refs', 'FreeList::Frag')
+        self.assertIn('  call   src/h.cpp:6  [in Sub::Frag]  [exact]  [instantiated in Sub<FreeList>::Frag]  | template', out)
+        # 解決先の決まらない呼び出しの行には、実体化ごとの解決先を添える
+        out = self.ltq('refs', 'Other::Frag')
+        self.assertIn('(instantiations resolve it to Alloc::Frag (in Sub<Other>::Frag), FreeList::Frag (in Sub<FreeList>::Frag)'
+                      ' -> probably not the query)', out)
+
+    def test_derived_classes(self):
+        # クラスを問うと、それを直接・間接に継承するクラスを 1 行ずつ出す(直接のものが先)。間接の派生クラスの行には
+        # 問い合わせの名前が無いので、名前を含む行の数には入れない
+        self.hier()
+        out = self.ltq('refs', 'Alloc')
+        self.assertIn('== derived classes (every class that inherits the query, from the base specifiers clang saw;'
+                      ' [direct] names the query as its base): 4 (3 direct)\n'
+                      '  FreeList  src/h.cpp:2  [direct]\n  Mid  src/h.cpp:4  [direct]\n  Pool  src/h.cpp:3  [direct]\n'
+                      '  Leaf  src/h.cpp:5\n', out)
+        self.assertIn('  ref    src/h.cpp:2  [in FreeList]  | struct FreeList', out)  # 基底の指定の参照は、これまでどおり
+        self.assertNotIn('base ', out.split('== derived classes')[0])
+        self.assertRegex(out, r'== coverage: all \d+ lines that contain the word "Alloc" are listed above')
+        out = self.ltq('refs', 'Mid')
+        self.assertIn('): 1 (1 direct)\n  Leaf  src/h.cpp:5  [direct]\n', out)
+        self.assertNotIn('== derived classes', self.ltq('refs', 'Leaf'))
+        # check では、関係の行をそれと分かる形で出す
+        out = self.ltq('check', 'src/h.cpp:5', 'src/h.cpp:10')
+        self.assertIn('  indexed: base-indirect Alloc at col 15  [inherited by Leaf]', out)
+        self.assertIn('  indexed: recv Alloc::Frag at col 29  [the receiver is a Mid]', out)
+
+    def test_active_condition_is_named(self):
+        # コンパイルされる行でも、#if の中なら条件を添える(別の構成では無いかもしれない行)。インクルードガードは添えない。
+        # 1 行も省かない一覧(--all)では添えない
+        self.hier()
+        out = self.ltq('refs', 'Alloc::Frag')
+        self.assertIn('  call   src/h.cpp:13  [in f9]  [dynamic]  [under #if !defined(HIER_GUARD)]  | float f9', out)
+        self.assertNotIn('src/h.cpp:7  [in f1]  [dynamic]  [under', out)
+        self.assertNotIn('[under ', self.ltq('refs', 'Alloc::Frag', '--all'))
+        self.write('src/g.h', '#ifndef G_H\n#define G_H\nvoid Guarded();\n#if defined(EXTRA)\nvoid Extra();\n#endif\n#endif\n',
+                   self.t0 - 10)
+        self.index('index', [('Guarded', 'decl', '', 'src/g.h:3:6', 'void Guarded();'),
+                             ('Extra', 'decl', '', 'src/g.h:5:6', 'void Extra();')], [], tus=('src/a.cpp',))
+        self.assertIn('  decl   src/g.h:3  | void Guarded();', self.ltq('refs', 'Guarded'))
+        self.assertIn('  decl   src/g.h:5  [under #if defined(EXTRA)]  | void Extra();', self.ltq('refs', 'Extra'))
 
     def family(self, n=12, far=0):
         """Base::Tick と、それを上書きする D00..::Tick(宣言は src/d.h、定義と Base::Tick の呼び出しは src/d.cpp)。
@@ -1160,7 +1286,7 @@ class LtqTest(unittest.TestCase):
         self.index('index', self.COMMON + [self.ALT_ROW], [self.COMMENT], alt=[self.ALT_ROW])
         out = self.ltq('refs', 'Run')
         self.assertIn('== calls (resolved by clang): 2', out)
-        self.assertIn('  call   src/a.cpp:5  [in Main]  | Run();', out)
+        self.assertIn('  call   src/a.cpp:5  [in Main]  [under #if defined(DEBUG_ONLY)]  | Run();', out)
         self.assertNotIn('[inactive', out)
 
     def test_alt_row_is_dropped_when_another_config_compiles_the_line(self):
@@ -1168,7 +1294,7 @@ class LtqTest(unittest.TestCase):
         self.index('index', self.COMMON + [self.ALT_ROW], [self.COMMENT])
         self.index('release', self.COMMON, [self.COMMENT, self.INACTIVE], alt=[self.ALT_ROW])
         out = self.ltq('refs', 'Run')
-        self.assertIn('  call   src/a.cpp:5  [in Main]  [only in index]  | Run();', out)
+        self.assertIn('  call   src/a.cpp:5  [in Main]  [only in index]  [under #if defined(DEBUG_ONLY)]  | Run();', out)
         self.assertNotIn('[inactive', out)
         # debug がその行で別の記号に解決しているなら、差分の行(条件を無理に有効にした推定)は出さない
         self.index('index', self.COMMON + [('Other::Run', 'call', 'Main', 'src/a.cpp:5:3', 'Run();')], [self.COMMENT])

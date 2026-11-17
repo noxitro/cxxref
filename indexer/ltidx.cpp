@@ -271,6 +271,44 @@ bool underRoot(const std::string &Abs, const std::vector<std::string> &Roots, st
   return true;
 }
 
+// 実体化の引数つきの名前(Sub<FreeList>::Frag)。D がテンプレートの実体化(関数テンプレートの実体化か、クラステンプレートの
+// 実体化のメンバー)でなければ空。行が長くなりすぎないよう 200 バイトで切る
+std::string instName(const Decl *D) {
+  const auto *ND = dyn_cast_or_null<NamedDecl>(D);
+  if (!ND) return "";
+  bool Inst = false;
+  if (const auto *F = dyn_cast<FunctionDecl>(ND)) Inst = F->getTemplateSpecializationArgs() != nullptr;
+  for (const DeclContext *C = ND->getDeclContext(); C && !Inst; C = C->getParent())
+    Inst = isa<ClassTemplateSpecializationDecl>(C);
+  if (!Inst) return "";
+  std::string S;
+  llvm::raw_string_ostream OS(S);
+  PrintingPolicy P(ND->getASTContext().getLangOpts());
+  P.SuppressTagKeyword = true;
+  ND->getNameForDiagnostic(OS, P, /*Qualified=*/true);
+  OS.flush();
+  if (S.size() > 200) {
+    S.resize(197);
+    S += "...";
+  }
+  return S;
+}
+
+// inst の行を出す解決先か。テンプレートでない、ふつうの関数・メンバー関数だけ。テンプレートの中からの呼び出しの解決先は、
+// 大半が別のテンプレートのメンバー(vector<T>::push_back -> vector<T>::emplace_back)か、引数の型のコンストラクタ・デストラクタ・
+// 演算子で、どの実体化かを書いても情報が増えない(O3DE の全体で、絞らないと索引が 15.7% 大きくなった【実測】)
+bool plainCallee(const Decl *D) {
+  const auto *F = dyn_cast_or_null<FunctionDecl>(D);
+  if (!F || isa<CXXConstructorDecl>(F) || isa<CXXDestructorDecl>(F) || isa<CXXConversionDecl>(F) || F->isOverloadedOperator())
+    return false;
+  if (F->getTemplatedKind() != FunctionDecl::TK_NonTemplate) return false;
+  for (const DeclContext *C = F->getDeclContext(); C; C = C->getParent()) {
+    if (isa<ClassTemplateSpecializationDecl>(C)) return false;
+    if (const auto *R = dyn_cast<CXXRecordDecl>(C); R && R->getDescribedClassTemplate()) return false;
+  }
+  return true;
+}
+
 std::string roleOf(index::SymbolRoleSet R) {
   using index::SymbolRole;
   std::string S = (R & (unsigned)SymbolRole::Definition)    ? "def"
@@ -284,6 +322,8 @@ std::string roleOf(index::SymbolRoleSet R) {
 
 // 仮想関数の呼び出しの形(役割の接尾辞)。-dynamic は限定名の無い呼び出し(p->f()・r.f()・クラスの中の f()。実行時に、
 // 受け手の動的な型の上書きが動く)、-static は限定名つき(Base::f()・Super::f()。上書きを経ずに、その関数そのものを呼ぶ)。
+// -exact は限定名の無い呼び出しのうち、受け手の式から動く関数が 1 つに決まるもの(値の変数、final のクラスやメソッド。
+// clang が仮想呼び出しを直接の呼び出しに直せると判断するもの)で、解決先の関数そのものが動く。
 // 呼び出しの式で決める。clang の Dynamic の印は MemberExpr にしか付かず、テンプレートの中の依存した式
 // (impl_->Advance() など。CXXDependentScopeMemberExpr を推測で解決したもの、オーバーロードの組)には付かない
 // (コードベース A の gtest で 17 行)。
@@ -306,7 +346,14 @@ std::string callForm(const Decl *D, index::SymbolRoleSet R, const Expr *E) {
     return OE->getQualifier() ? "-static" : "-dynamic";
   }
   if (!isVirtual(D)) return "";
-  if (const auto *ME = dyn_cast_or_null<MemberExpr>(E)) return ME->hasQualifier() ? "-static" : "-dynamic";
+  if (const auto *ME = dyn_cast_or_null<MemberExpr>(E)) {
+    if (ME->hasQualifier()) return "-static";
+    // 決まった先が解決先と違うとき(派生から基底へのキャスト越しなど)は、行の記号と動く関数が合わないので -dynamic のまま
+    if (auto *MD = dyn_cast<CXXMethodDecl>(const_cast<ValueDecl *>(ME->getMemberDecl())))
+      if (const CXXMethodDecl *Dev = MD->getDevirtualizedMethod(ME->getBase(), false))
+        if (Dev->getCanonicalDecl() == MD->getCanonicalDecl()) return "-exact";
+    return "-dynamic";
+  }
   if (const auto *DE = dyn_cast_or_null<CXXDependentScopeMemberExpr>(E)) return DE->getQualifier() ? "-static" : "-dynamic";
   return (R & (unsigned)SymbolRole::Dynamic) ? "-dynamic" : "";
 }
@@ -508,8 +555,9 @@ public:
   RowWriter(const std::vector<std::string> &R, std::vector<std::string> &Rows, std::vector<std::string> &Skips)
       : Roots(R), Rows(Rows), Skips(Skips) {}
 
+  // WithSrc が偽なら、ソースの行を空にする(同じ位置の呼び出しの行に文面がある recv・inst の行)
   void add(const SourceManager &SM, SourceLocation Loc, std::string Sym, const std::string &Role,
-           std::string Caller) {
+           std::string Caller, bool WithSrc = true) {
     SourceLocation FL = SM.getFileLoc(Loc);
     FileID FID = SM.getFileID(FL);
     const std::string &Path = relPath(SM, FID);
@@ -523,6 +571,7 @@ public:
     size_t E = Buf.find('\n', Off);
     std::string Src = Buf.slice(B, E == llvm::StringRef::npos ? Buf.size() : E).trim().str();
     if (Src.size() > 200) Src.resize(200);
+    if (!WithSrc) Src.clear();
 
     sanitize(Sym);
     sanitize(Caller);
@@ -839,6 +888,35 @@ public:
     for (const auto &Rel : Rels)
       if (Rel.Roles & (unsigned)index::SymbolRole::RelationOverrideOf)
         W.add(Ctx->getSourceManager(), Loc, qname(D), "override", qname(Rel.RelatedSymbol));
+    // クラスの派生の関係。基底クラスの指定の位置に、直接の基底(base)と間接の基底(base-indirect)を 1 行ずつ出す
+    // (記号の列が基底、3 列目が派生。基底の名前で引くと、その下のクラスが 1 回で分かる)
+    for (const auto &Rel : Rels)
+      if (Rel.Roles & (unsigned)index::SymbolRole::RelationBaseOf) addBases(Rel.RelatedSymbol, Loc);
+    if (Roles & (unsigned)index::SymbolRole::Call) {
+      // 仮想関数の、限定名の無い呼び出しの受け手のクラス。解決先の関数のクラスと違うときだけ出す(上書きしていない
+      // 派生クラスの変数越し。動きうるのは、そのクラスより下の上書きだけになる)
+      if (const auto *ME = dyn_cast_or_null<MemberExpr>(Info.OrigE);
+          ME && !ME->hasQualifier() && llvm::StringRef(Role).ends_with("-dynamic"))
+        if (const auto *MD = dyn_cast<CXXMethodDecl>(ME->getMemberDecl()))
+          if (const CXXRecordDecl *RC = ME->getBase()->getBestDynamicClassType();
+              RC && RC->getCanonicalDecl() != MD->getParent()->getCanonicalDecl())
+            W.add(Ctx->getSourceManager(), Loc, qname(D), "recv", qname(RC), false);
+      // 実体化の中の呼び出し: 呼び出し元の実体化の引数つきの名前。TU の終わりに、テンプレートの本体で解決先が決まらなかった
+      // 位置(dep の行のある位置)の分だけを、(位置, 解決先)ごとに 1 つ出す。解決先は、テンプレートでないふつうの関数だけ
+      for (const auto &Rel : Rels)
+        if ((Rel.Roles & (unsigned)index::SymbolRole::RelationCalledBy) && plainCallee(D)) {
+          auto It = InstNames.find(Rel.RelatedSymbol);
+          if (It == InstNames.end()) It = InstNames.try_emplace(Rel.RelatedSymbol, instName(Rel.RelatedSymbol)).first;
+          if (!It->second.empty()) {
+            SourceLocation FL = Ctx->getSourceManager().getFileLoc(Loc);
+            auto [P, New] = Insts.try_emplace({FL.getRawEncoding(), qname(D)}, It->second);
+            // TU の中で、名前がいちばん短いもの(同じ長さなら名前の順)。TU ごとに見える実体化は違うが、短い名前は揃いやすい
+            if (!New && std::make_pair(It->second.size(), It->second) < std::make_pair(P->second.size(), P->second))
+              P->second = It->second;
+          }
+          break;
+        }
+    }
     // テンプレート内の `using Base::f;` 越しの参照は、宣言の先が実体化でしか分からないので TU の終わりに引く
     if (const auto *U = dyn_cast<UnresolvedUsingValueDecl>(D); U && !(Roles & (unsigned)index::SymbolRole::Declaration))
       Pending.push_back({U, Loc, Role, Caller});
@@ -854,6 +932,30 @@ public:
     }
     return R ? qname(R) : std::string();
   }
+
+  // 派生クラス DR の、直接と間接の基底の行。DR ごとに 1 回だけ(基底が複数あっても、最初の指定の位置に出す)。
+  // 基底の名前は、別名(using Base = ...)ではなく、クラスそのものの名前にする
+  void addBases(const Decl *Derived, SourceLocation Loc) {
+    const auto *DR = dyn_cast_or_null<CXXRecordDecl>(Derived);
+    if (!DR || !DR->hasDefinition()) return;
+    DR = DR->getDefinition();
+    if (!BasesDone.insert(DR->getCanonicalDecl()).second) return;
+    std::set<std::string> Direct, All;
+    for (const CXXBaseSpecifier &B : DR->bases())
+      if (const CXXRecordDecl *R = B.getType()->getAsCXXRecordDecl()) Direct.insert(qname(R));
+    DR->forallBases([&](const CXXRecordDecl *B) {
+      All.insert(qname(B));
+      return true;
+    });
+    const std::string Name = qname(DR);
+    for (const auto &N : Direct) W.add(Ctx->getSourceManager(), Loc, N, "base", Name);
+    for (const auto &N : All)
+      if (!Direct.count(N)) W.add(Ctx->getSourceManager(), Loc, N, "base-indirect", Name);
+  }
+
+  llvm::DenseSet<const Decl *> BasesDone;
+  llvm::DenseMap<const Decl *, std::string> InstNames;
+  std::map<std::pair<unsigned, std::string>, std::string> Insts;  // (位置, 解決先の記号) -> 実体化の名前
 
   struct Using {
     const UnresolvedUsingValueDecl *U;
@@ -910,6 +1012,7 @@ private:
 class DepVisitor : public RecursiveASTVisitor<DepVisitor> {
 public:
   DepVisitor(ASTContext &C, RowWriter &W) : SM(C.getSourceManager()), W(W) {}
+  llvm::DenseSet<unsigned> Locs;  // dep の行を出した位置
 
   bool TraverseFunctionDecl(FunctionDecl *F) { return withCaller(F, [&] { return RecursiveASTVisitor::TraverseFunctionDecl(F); }); }
   bool TraverseCXXMethodDecl(CXXMethodDecl *F) { return withCaller(F, [&] { return RecursiveASTVisitor::TraverseCXXMethodDecl(F); }); }
@@ -932,6 +1035,7 @@ private:
   bool emit(SourceLocation Loc, DeclarationName N) {
     if (Loc.isInvalid() || SM.isInSystemHeader(Loc) || N.isEmpty()) return true;
     W.add(SM, Loc, "?::" + N.getAsString(), "dep", Caller);
+    Locs.insert(SM.getFileLoc(Loc).getRawEncoding());
     return true;
   }
 
@@ -942,10 +1046,17 @@ private:
 
 class DepConsumer : public ASTConsumer {
 public:
-  explicit DepConsumer(RowWriter &W) : W(W) {}
-  void HandleTranslationUnit(ASTContext &C) override { DepVisitor(C, W).TraverseDecl(C.getTranslationUnitDecl()); }
+  DepConsumer(std::shared_ptr<Consumer> C, RowWriter &W) : C(std::move(C)), W(W) {}
+  void HandleTranslationUnit(ASTContext &Ctx) override {
+    DepVisitor V(Ctx, W);
+    V.TraverseDecl(Ctx.getTranslationUnitDecl());
+    for (const auto &[K, Name] : C->Insts)
+      if (V.Locs.count(K.first))
+        W.add(Ctx.getSourceManager(), SourceLocation::getFromRawEncoding(K.first), K.second, "inst", Name, false);
+  }
 
 private:
+  std::shared_ptr<Consumer> C;
   RowWriter &W;
 };
 
@@ -999,7 +1110,7 @@ public:
     auto C = std::make_shared<Consumer>(W);
     Cs.push_back(index::createIndexingASTConsumer(C, O, CI.getPreprocessorPtr()));
     Cs.push_back(std::make_unique<UsingResolver>(C, W));  // 索引の後に走る(MultiplexConsumer は順に呼ぶ)
-    if (!NoDep) Cs.push_back(std::make_unique<DepConsumer>(W));
+    if (!NoDep) Cs.push_back(std::make_unique<DepConsumer>(C, W));
     return std::make_unique<MultiplexConsumer>(std::move(Cs));
   }
 
