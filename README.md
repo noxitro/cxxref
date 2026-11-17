@@ -166,9 +166,9 @@ MCP サーバーは、プラグインには入れていません。ツールの�
 ```json
 {
   "name": "cxxref",
-  "source": { "source": "github", "repo": "noxitro/cxxref", "ref": "v0.5.10" },
+  "source": { "source": "github", "repo": "noxitro/cxxref", "ref": "v0.5.11" },
   "description": "C++ reference index (clang libtooling) as a Copilot skill",
-  "version": "0.5.10"
+  "version": "0.5.11"
 }
 ```
 
