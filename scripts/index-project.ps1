@@ -110,7 +110,7 @@ if (-not $NoAlt) {
     }
 } else {
     # 前に作った差分は、今の索引と行番号が合わないことがあるので消す(残すと古い行が [inactive] として混ざる)
-    foreach ($f in @("$out.alt.tsv", "$out.alt.json")) {
+    foreach ($f in @("$out.alt.tsv", "$out.alt.json", "$out.alt.unbuilt.tsv", "$out.alt.progress")) {
         if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force }
     }
 }

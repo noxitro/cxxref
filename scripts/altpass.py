@@ -462,9 +462,13 @@ def borrow(entry, tu, target, includes=()):
         e['arguments'] = args + ['-I' + d for d in includes]
     else:
         cmd, done = e.get('command', ''), False
-        for w in {entry.get('file', ''), tu, tu.replace('\\', '/'), tu.replace('/', '\\')}:
-            if w and re.search(re.escape(w), cmd, re.I):
-                cmd, done = re.sub(re.escape(w), lambda m: target, cmd, flags=re.I), True
+        # 長いもの(絶対パス)から順に、語として出てくる所(前後が空白・" か端)だけを替える。相対の file('src/a.cpp')を
+        # 先に試すと、絶対パスの途中だけが替わる。集合の順は実行ごとに変わるので、並べて決める
+        words = {entry.get('file', ''), tu, tu.replace('\\', '/'), tu.replace('/', '\\')}
+        for w in sorted((w for w in words if isinstance(w, str) and w), key=lambda w: (-len(w), w)):
+            pat = r'(?<![^\s"])' + re.escape(w) + r'(?![^\s"])'
+            if re.search(pat, cmd, re.I):
+                cmd, done = re.sub(pat, lambda m: target, cmd, flags=re.I), True
                 break
         if not done:
             return None
@@ -754,8 +758,10 @@ def run(a):
     replace(tmp, alt)
     # どの TU も読まないソースのうち、解析できたファイルの一覧(そのソースと、それだけが読むヘッダー)。ltq が、その中の
     # 「参照の無い行」を、解析していないファイルの行と分けるのに使う
+    # ソースそのものは、行が取れたか、エラーなく終わったときだけ入れる(見つからないヘッダーで止まって行が 0 のソースを
+    # 入れると、ltq がその中の一致を「解析したが参照の無い行」として件数にまとめ、読むべき行が一覧から消える)
     done = sorted({f for rel, (_, s) in units.items() if s.get('kind') == 'unbuilt' and not s.get('failed')
-                   for f in list(s.get('files', ())) + [rel]})
+                   for f in list(s.get('files', ())) + ([rel] if rel in s.get('files', ()) or not s.get('errors') else [])})
     tmp = index + '.alt.unbuilt.tsv.tmp'
     with open(tmp, 'w', encoding='utf-8', newline='\n') as f:
         f.write(''.join(d + '\n' for d in done))
