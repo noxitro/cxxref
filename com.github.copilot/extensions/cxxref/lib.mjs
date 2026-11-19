@@ -283,3 +283,28 @@ export function progressNote(prev, snap, now, elapsedSec, minGap = 10000) {
       `差分パス(無効な #if の中と、どの TU も読まないソースの解析)${counts}${ng ? `、解析できないもの ${ng}` : ""}、${elapsedSec} 秒)`;
   return { note: `cxxref: ${note}`, state: { phase: key, tenth, at: now } };
 }
+
+// 拡張の SDK の名前。ホストが、この名前の import を自分の同梱の SDK に向ける。Copilot CLI 1.0.112 まで と GitHub Copilot app の
+// ランタイム(1.0.106-8)は @github/copilot-sdk だけ、1.0.113 は @microsoft/copilot-sdk だけ、1.0.114 は両方に向ける
+// (各版の preloads\extension_sdk_resolver.mjs で確かめた)。決め打ちにせず、新しい名前から順に試す
+export const SDK_NAMES = ["@microsoft/copilot-sdk/extension", "@github/copilot-sdk/extension"];
+
+// SDK_NAMES の順に読み込み、最初に読めたものを返す。load は名前を受け取り import する関数(拡張の import(n))。
+// その名前のパッケージが見つからないときだけ次を試す(SDK の中の誤りは、そのまま投げる)
+export async function loadSdk(load, names = SDK_NAMES) {
+  const missing = [];
+  for (const name of names) {
+    try {
+      return await load(name);
+    } catch (err) {
+      const pkg = name.split("/").slice(0, 2).join("/");
+      if (err?.code !== "ERR_MODULE_NOT_FOUND" || !String(err?.message ?? "").includes(pkg)) throw err;
+      missing.push(name);
+    }
+  }
+  throw new Error(`Copilot の拡張の SDK が見つかりません(${missing.join("、")})。Copilot CLI の新しい版で起動してください`);
+}
+
+// joinSession に渡す設定。スラッシュコマンドの置き場も SDK の版で違う: @microsoft/copilot-sdk は interaction.commands、
+// @github/copilot-sdk は commands。どちらの SDK も、知らない方の置き場は読まないので、両方に同じものを置く
+export const joinOptions = (commands) => ({ commands, interaction: { commands } });

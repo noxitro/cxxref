@@ -5,7 +5,47 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { test } from "node:test";
-import { ENABLE_ON_GONE, enableRoot, escapeMarkdown, findLtidx, gitTop, indexRoot, lastCwd, makeNotifier, parseEnableArgs, parseIndexArgs, parseProgress, pathKey, pluginRoot, progressNote, projectChoices, savedProject, runsUnderCli, statusHint, targetRoot, wantDialog } from "./lib.mjs";
+import { ENABLE_ON_GONE, enableRoot, escapeMarkdown, findLtidx, gitTop, indexRoot, joinOptions, lastCwd, loadSdk, makeNotifier, parseEnableArgs, parseIndexArgs, parseProgress, pathKey, pluginRoot, progressNote, projectChoices, savedProject, runsUnderCli, SDK_NAMES, statusHint, targetRoot, wantDialog } from "./lib.mjs";
+
+const notFound = (name) => Object.assign(new Error(`Cannot find package '${name.split("/").slice(0, 2).join("/")}' imported from x`),
+  { code: "ERR_MODULE_NOT_FOUND" });
+
+test("loadSdk: 新しい名前(@microsoft)を先に試す", async () => {
+  const tried = [];
+  const m = await loadSdk(async (n) => { tried.push(n); return { which: n }; });
+  assert.deepEqual(m, { which: "@microsoft/copilot-sdk/extension" });
+  assert.deepEqual(tried, ["@microsoft/copilot-sdk/extension"]);
+  assert.deepEqual(SDK_NAMES, ["@microsoft/copilot-sdk/extension", "@github/copilot-sdk/extension"]);
+});
+
+test("loadSdk: 新しい名前が無ければ、古い名前(@github)を読む", async () => {
+  const m = await loadSdk(async (n) => {
+    if (n.startsWith("@microsoft/")) throw notFound(n);
+    return { which: n };
+  });
+  assert.deepEqual(m, { which: "@github/copilot-sdk/extension" });
+});
+
+test("loadSdk: どちらも無ければ、名前を挙げて止まる", async () => {
+  await assert.rejects(loadSdk(async (n) => { throw notFound(n); }),
+    /SDK が見つかりません.@microsoft\/copilot-sdk\/extension、@github\/copilot-sdk\/extension./);
+});
+
+test("loadSdk: SDK の中の誤り(ほかのパッケージが無いなど)は、次を試さずに投げる", async () => {
+  const tried = [];
+  const inner = Object.assign(new Error("Cannot find package 'vscode-jsonrpc' imported from sdk"), { code: "ERR_MODULE_NOT_FOUND" });
+  await assert.rejects(loadSdk(async (n) => { tried.push(n); throw inner; }), (e) => e === inner);
+  assert.deepEqual(tried, ["@microsoft/copilot-sdk/extension"]);
+  const syntax = new SyntaxError("Unexpected token");
+  await assert.rejects(loadSdk(async () => { throw syntax; }), (e) => e === syntax);
+});
+
+test("joinOptions: コマンドを、新しい SDK の interaction.commands と古い SDK の commands の両方に置く", () => {
+  const commands = [{ name: "cxxref-index", handler: () => { } }];
+  const o = joinOptions(commands);
+  assert.equal(o.commands, commands);
+  assert.equal(o.interaction.commands, commands);
+});
 
 test("projectChoices: フルパスの行を、ルートからの相対パスの選択肢にする", () => {
   const root = join(tmpdir(), "cxxref-lib-test");
