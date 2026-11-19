@@ -155,7 +155,7 @@ MCP サーバーは、プラグインには入れていません。ツールの�
 | 誰が | いつ | すること |
 |---|---|---|
 | チームのマーケットプレイスの管理者 | 1 回(版を上げるときも) | マーケットプレイスに cxxref を載せる |
-| 各メンバー | PC で 1 回 | プラグインを入れる(手で入れるか、リポジトリの設定で自動で入れる)。`/cxxref-index` を使うなら、機能フラグ `EXTENSIONS` を有効にする |
+| 各メンバー | PC で 1 回 | プラグインを入れる(手で入れるか、リポジトリの設定で自動で入れる)。`/cxxref-index` を使うなら、実験的機能を有効にする(`/settings experimental on`) |
 | 各メンバー | リポジトリ(手元の作業フォルダ)ごとに 1 回 | セッションで `/cxxref-index` を実行して索引を作る(ltidx が無ければ先に取ってくる。モデルは呼ばない)。拡張を使わないなら `get-ltidx.bat` と `index-project.bat`。索引は git に入れないので各自が作る。規模によって数分 |
 
 使い方の指示を入れる手順はありません。索引ができていれば、次のセッションから hook が索引を引く場面とコマンドを知らせます。コードを変えても、索引を引くときに変わった TU だけを作り直すので、手で作り直す必要はありません。
@@ -224,7 +224,9 @@ MCP サーバーは、プラグインには入れていません。ツールの�
 - 始めたとき・終わったとき(かかった秒数)・失敗したとき(ログの場所)を、セッションに出す。ログは `<ルート>\.index\cxxref-index.log`。同時に 2 つは走らせない
 - 走っている間は、進み具合をセッションに出す。`compile_commands.json` を用意している間はそう出し(1 分を超えると 1 分ごとに経過秒数も)、ltidx が始まると、解析し終えた TU の数・割合・解析エラーの数を、およそ 1 割進むごとに出す(行が増えすぎないよう、前の行から 10 秒以上あける)。TU の解析が終わると「索引を仕上げています」と出し、続く差分パス(無効な `#if` の中と、どの TU も読まないソースの解析)に入ると「索引の本体ができました(もう検索に使えます)」と、解析したファイルの数・割合を同じように 1 割ごとに出す。数の出ない段階(仕上げ・差分パスの対象選び)が 1 分を超えると、1 分ごとに経過秒数を出す。元は ltidx が TU ごとに書く `<ルート>\.index\index.log` と、差分パスが書く `<ルート>\.index\index.tsv.alt.progress`(どちらも `[n/全体] ok|NG ファイル` の行)。ターミナルで細かく追うなら `Get-Content -Wait <ルート>\.index\index.log`(差分パスは `index.tsv.alt.progress`)
 
-**Copilot CLI の拡張は実験的機能で、機能フラグ `EXTENSIONS` が有効なときだけ読み込まれます。** `%USERPROFILE%\.copilot\settings.json` に `"feature_flags": { "enabled": ["EXTENSIONS"] }` を足す(すでに `feature_flags` があれば、`enabled` の配列に `"EXTENSIONS"` を足す)か、環境変数 `COPILOT_CLI_ENABLED_FEATURE_FLAGS=EXTENSIONS` を設定してから起動します。拡張はセッションが始まってから読み込まれるので、入力欄に `/cx` と打って一覧に出てから実行します(一覧に出る前に送ると、ただの依頼としてモデルに送られます)。
+**Copilot CLI の拡張は実験的機能で、実験的機能を有効にしたときだけ読み込まれます。** セッションで `/settings experimental on` と打つ(設定に残り、次のセッションからも有効)か、`copilot --experimental` で起動します。Copilot CLI 1.0.114 では、これだけで一覧に `/cxxref-index` と `/cxxref-enable` が出ました【実測】。機能フラグ `EXTENSIONS` でも読み込まれます: `%USERPROFILE%\.copilot\settings.json` に `"feature_flags": { "enabled": ["EXTENSIONS"] }` を足す(すでに `feature_flags` があれば、`enabled` の配列に `"EXTENSIONS"` を足す)か、環境変数 `COPILOT_CLI_ENABLED_FEATURE_FLAGS=EXTENSIONS` を設定してから起動します。拡張はセッションが始まってから読み込まれるので、入力欄に `/cx` と打って一覧に出てから実行します(一覧に出る前に送ると、ただの依頼としてモデルに送られます)。
+
+拡張が CLI から受け取る SDK の名前は、CLI の版で違います(1.0.112 までと GitHub Copilot app は `@github/copilot-sdk`、1.0.113 は `@microsoft/copilot-sdk` だけ、1.0.114 は両方)。拡張は新しい名前から順に試すので、どの版でも読み込まれます。それより前の拡張(古い名前を決め打ちしていたもの)は、1.0.113 では読み込まれず、`/cxxref-index` が「Unknown command」になりました【実測】。
 
 **GitHub Copilot app(デスクトップ アプリ)で使うとき**は、次の点が CLI と違います。
 

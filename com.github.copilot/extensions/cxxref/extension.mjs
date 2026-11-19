@@ -16,14 +16,17 @@
 //                         on は断る(指示は MCP サーバーのツールを呼ばせるもので、0.5.10 からのプラグインには MCP サーバーが無い。
 //                         手で MCP サーバーを登録した人は scripts\setup-instructions.bat で足す)。
 //
-// 拡張は Copilot CLI の実験的機能で、機能フラグ EXTENSIONS が有効なときだけ読み込まれる。
-import { joinSession } from "@github/copilot-sdk/extension";
+// 拡張は Copilot CLI の実験的機能で、実験的機能(/settings experimental on か --experimental)か、機能フラグ
+// EXTENSIONS が有効なときだけ読み込まれる。
+// SDK は、ホストの版で名前が違う(lib.mjs の SDK_NAMES)ので、静的な import にせず、名前を順に試して読む。
 import { spawn } from "node:child_process";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ENABLE_ON_GONE, enableRoot, findLtidx, lastCwd, makeNotifier, parseEnableArgs, parseIndexArgs, parseProgress, pluginRoot, progressNote, projectChoices, savedProject, statusHint, targetRoot } from "./lib.mjs";
+import { ENABLE_ON_GONE, enableRoot, findLtidx, joinOptions, lastCwd, loadSdk, makeNotifier, parseEnableArgs, parseIndexArgs, parseProgress, pluginRoot, progressNote, projectChoices, savedProject, statusHint, targetRoot } from "./lib.mjs";
+
+const { joinSession } = await loadSdk((name) => import(name));
 
 function run(script, args, log) {
   return new Promise((done) => {
@@ -229,8 +232,7 @@ async function enableCommand(ctx) {
   await tell(`cxxref: ${out}${note}`);
 }
 
-const session = await joinSession({
-  commands: [
+const session = await joinSession(joinOptions([
     {
       // 拡張のコマンドには引数のヒントを付けられないので、説明文の先頭に引数を書く
       name: "cxxref-index",
@@ -246,5 +248,4 @@ const session = await joinSession({
         enableCommand(ctx).catch((err) => tell(`cxxref: ${err?.message ?? err}`, "error"));
       },
     },
-  ],
-});
+]));
