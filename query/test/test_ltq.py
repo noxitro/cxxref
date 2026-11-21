@@ -1410,13 +1410,44 @@ class LtqTest(unittest.TestCase):
         outside = os.path.join(os.path.dirname(root), 'elsewhere', 'x.h')
         for bad in ('../elsewhere/x.h', 'src/../../elsewhere/x.h', outside, outside.replace('\\', '/'),
                     '//host.invalid/share/x.h', '\\\\host.invalid\\share\\x.h', '\\\\?\\C:\\x.h', '\\\\.\\C:\\x.h',
-                    '', 'a\0b', None, 'src/NUL', 'CON', 'src/con.txt', 'src/COM1.h'):
+                    '', 'a\0b', None) + (('src/NUL', 'CON', 'src/con.txt', 'src/COM1.h') if os.name == 'nt' else ()):
             self.assertIsNone(ltq.safe_path(root, bad), bad)
+        if os.name != 'nt':  # 予約名は Windows でだけ特別
+            self.assertIsNotNone(ltq.safe_path(root, 'src/aux.c'))
         # 有無と更新日時だけなら、ルートの外のローカルのパスは通す(ルートの外にある TU の主ファイル)。UNC とデバイスは通さない
         self.assertIsNotNone(ltq.safe_path(root, outside, read=False))
         self.assertIsNotNone(ltq.safe_path(root, '../elsewhere/x.h', read=False))
         for bad in ('//host.invalid/share/x.h', '\\\\host.invalid\\share\\x.h', '\\\\?\\C:\\x.h', '\\\\.\\C:\\x.h'):
             self.assertIsNone(ltq.safe_path(root, bad, read=False), bad)
+
+    def test_links_out_of_the_root_are_not_read(self):
+        # リポジトリに置いたリンク(ジャンクション・シンボリックリンク)越しに、ルートの外のファイルを読まない。
+        # 内側を指すリンクは読む
+        outside = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, outside, True)
+        with open(os.path.join(outside, 'secret.h'), 'w') as f:
+            f.write('SECRET\n')
+
+        def link(src, dst):
+            if os.name == 'nt':
+                import _winapi
+                _winapi.CreateJunction(src, dst)
+            else:
+                os.symlink(src, dst)
+        try:
+            link(outside, os.path.join(self.root, 'out'))
+            link(os.path.join(self.root, 'src'), os.path.join(self.root, 'in'))
+        except (OSError, AttributeError) as e:
+            self.skipTest(f'cannot create a link: {e}')
+        self.assertIsNone(ltq.safe_path(self.root, 'out/secret.h'))
+        self.assertIsNone(ltq.safe_path(self.root, 'in/../out/secret.h'))
+        self.assertIsNotNone(ltq.safe_path(self.root, 'in/a.cpp'))
+        self.assertIsNotNone(ltq.safe_path(self.root, 'out/secret.h', read=False))  # 有無を見るだけなら通す
+
+    def test_progress_file_is_part_of_the_index(self):
+        # 差分パスの進み具合のファイルも、索引のファイルとしてテキスト検索から外す
+        self.assertTrue(ltq.OWN_TAIL.match('.alt.progress'))
+        self.assertTrue(ltq.OWN_TAIL.match('.alt.unbuilt.tsv.tmp'))
 
     def test_index_paths_outside_root_are_not_touched(self):
         # 索引は作業中のリポジトリの中にあり、細工されうる。索引の行・.alt.tsv・.skip.tsv・.tu.tsv・引数のパスが

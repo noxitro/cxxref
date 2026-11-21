@@ -130,6 +130,20 @@ class DefineTest(unittest.TestCase):
         src = {'file': 'a.cpp', 'command': 'cl /c a.cpp'}
         self.assertEqual(altpass.add_defines(src, []), src)
 
+    def test_borrow_replaces_the_whole_source_path(self):
+        # file が相対('src/a.cpp')で command が絶対パスのとき、絶対パスの途中だけを替えない(どの順で試しても同じ結果)
+        tu = os.path.join(os.sep, 'r', 'src', 'a.cpp')
+        target = os.path.join(os.sep, 'r', 'tests', 'a_test.cpp')
+        entry = {'directory': os.path.join(os.sep, 'r'), 'file': 'src/a.cpp',
+                 'command': f'clang++ -Isrc -o src/a.cpp.o -c {tu.replace(os.sep, "/")}'}
+        e = altpass.borrow(entry, tu, target)
+        self.assertEqual(e['command'], f'clang++ -Isrc -o src/a.cpp.o -c {target}')
+        self.assertEqual(e['file'], target)
+        # 語の途中(foo_a.cpp)には当てない
+        e = altpass.borrow({'directory': '', 'file': 'a.cpp', 'command': 'cl /c foo_a.cpp "a.cpp"'}, 'a.cpp', target)
+        self.assertEqual(e['command'], f'cl /c foo_a.cpp "{target}"')
+        self.assertIsNone(altpass.borrow({'directory': '', 'file': 'a.cpp', 'command': 'cl /c b.cpp'}, 'a.cpp', target))
+
 
 def run_altpass(*args):
     buf = io.StringIO()
@@ -323,6 +337,20 @@ class AltPassTest(unittest.TestCase):
         out = self.alt()
         self.assertIn('1 without a TU', out)
         self.assertEqual(self.rows(), [])
+
+    def test_source_that_could_not_be_parsed_is_not_listed(self):
+        # 借りたコマンドではエラーになり、行が 1 つも取れなかったソースは、解析できたファイルの一覧(.alt.unbuilt.tsv)に
+        # 入れない(入れると、ltq がその中の一致を「解析したが参照の無い行」として件数にまとめてしまう)
+        self.write('mod/lib/src/lib.cpp', 'void Run() {}\n', [])
+        self.write('mod/lib/tests/ok_test.cpp', 'void Run();\nvoid Test() { Run(); }\n')
+        self.write('mod/lib/tests/broken_test.cpp', '#include "missing.h"\n@@@ Run();\n')
+        self.build()
+        self.alt()
+        units = self.state()['units']
+        self.assertEqual((units['mod/lib/tests/broken_test.cpp']['rows'], units['mod/lib/tests/broken_test.cpp']['errors']),
+                         (0, 1))
+        with open(self.index + '.alt.unbuilt.tsv', encoding='utf-8') as f:
+            self.assertEqual(f.read().split(), ['mod/lib/tests/ok_test.cpp'])
 
     def test_source_no_tu_reads(self):
         # テスト・別のプラットフォームのソースなど、どの TU も読まない .cpp は、いちばん近い TU のコマンドを借りて解析する。

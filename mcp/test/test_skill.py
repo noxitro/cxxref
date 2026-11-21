@@ -265,7 +265,15 @@ class GrepRedirectTest(unittest.TestCase):
         reason = out['permissionDecisionReason']
         self.assertIn('ns::Job::Wait is called from 5 files', reason)
         self.assertNotIn('ns::Lock::Wait', reason)  # 1 ファイルだけの同名の記号は挙げない
-        self.assertIn(f'python -I "{os.path.join(ROOT, "mcp", "cxxref_cli.py")}" refs ns::Job::Wait --context 3', reason)
+        # セッションの始めの案内と同じ形(実体のパス)。hook が自動で許可する形でなければならない
+        cmd = f'python -I "{os.path.realpath(CLI)}" refs ns::Job::Wait --context 3'
+        self.assertIn(cmd, reason)
+        sys.path.insert(0, os.path.join(ROOT, 'scripts'))
+        try:
+            import cxxref_hook
+            self.assertTrue(cxxref_hook.allowed(cmd))
+        finally:
+            sys.path.pop(0)
         self.assertIn('once per session', reason)
         self.assertEqual(self.grep(r'\bWait\s*\('), {})  # 2 回目は通す
         self.add(self.calls('ns::Other::Stop', 6))
@@ -363,6 +371,17 @@ class GrepRedirectTest(unittest.TestCase):
         self.session()
         out = self.run_hook({'cwd': self.root, 'toolName': 'grep', 'toolArgs': json.dumps({'pattern': 'Job::Wait'})})
         self.assertIn('ns::Job::Wait is called from 5 files', out['permissionDecisionReason'])
+
+    def test_side_files_match_ltq(self):
+        # hook が索引の本体として読むファイルは、ltq と同じ選び方(隣のファイルを増やしたら、両方に足す)
+        sys.path.insert(0, os.path.join(ROOT, 'scripts'))
+        sys.path.insert(0, os.path.join(ROOT, 'query'))
+        try:
+            import cxxref_hook
+            import ltq
+        finally:
+            del sys.path[:2]
+        self.assertEqual(set(cxxref_hook.SIDE), set(ltq.SIDE))
 
     def test_pattern_names(self):
         sys.path.insert(0, os.path.join(ROOT, 'scripts'))

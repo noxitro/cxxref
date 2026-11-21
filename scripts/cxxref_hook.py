@@ -179,7 +179,7 @@ MAX_ROWS = 20000  # 1 つの名前について索引から読む行の上限(超
 SCAN_SECONDS = 2.5  # 索引を数えるのに使う時間の上限(hook の制限時間は 10 秒。超えたら振り向けない)
 SCAN_LIMIT = 100 << 20  # 目次(.names.cache)が無いとき、頭から読むのはこの大きさまで
 EDIT_TOOLS = {'edit', 'create', 'write', 'str_replace', 'str_replace_editor', 'apply_patch', 'multiedit', 'insert'}
-SIDE = ('.tu.tsv', '.skip.tsv', '.deps.tsv', '.alt.tsv')  # 索引本体の隣のファイル(ltq.SIDE と同じ)
+SIDE = ('.tu.tsv', '.skip.tsv', '.deps.tsv', '.alt.tsv', '.alt.unbuilt.tsv')  # 索引本体の隣のファイル(ltq.SIDE と同じ)
 CXX_EXT = {'c', 'cc', 'cpp', 'cxx', 'c++', 'h', 'hh', 'hpp', 'hxx', 'h++', 'inl', 'ipp', 'tpp', 'ixx', 'cppm'}
 NAME = re.compile(r'[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*')
 SYMBOL = re.compile(r'(?:[A-Za-z_]\w*::)*[A-Za-z_]\w*')  # 理由とコマンドに書いてよい記号(英数字と _ と :: だけ)
@@ -241,7 +241,9 @@ def index_files(root):
 
 def _index_lines(path, short):
     """索引 path の、記号の最後の部分が short(bytes)である行の候補(ハッシュの衝突を含む)。多すぎる・読めないときは None。"""
-    sys.path.insert(0, os.path.join(HERE, '..', 'query'))
+    query = os.path.join(HERE, '..', 'query')
+    if query not in sys.path:
+        sys.path.insert(0, query)
     import namedir  # noqa: E402  (hook は呼ぶたびに別のプロセス。grep を見るときだけ読む)
     nd = namedir.NameDir(path)
     try:
@@ -362,14 +364,15 @@ def redirect_grep(data):
                        if len(fs) >= MANY_FILES and len(sym) <= 200 and SYMBOL.fullmatch(sym)), reverse=True)
         if hits:
             break  # pattern に先に書かれた名前を使う
-    if not hits or len(hits) > MAX_SYMBOLS or not _mark(root, 'told'):
+    # コマンドは、セッションの始めの案内と同じ形(allowed() が自動で許可する形。書けなければ振り向けない)
+    cmd = cli_command()
+    if not cmd or not hits or len(hits) > MAX_SYMBOLS or not _mark(root, 'told'):
         return None  # 同じ名前の記号が多い(Get・size など)なら、どれを直すのか決められない
-    cli = os.path.join(os.path.dirname(HERE), 'mcp', 'cxxref_cli.py')
     said = '; '.join(f'{sym} is called from {k} files' for k, sym in hits)
     other = ' (or with another name listed above, if that is the one you are changing)' if len(hits) > 1 else ''
     return (f'cxxref (clang index of every translation unit): {said}. If you are changing its signature and fixing the '
             'callers, run this once in PowerShell, as a command of its own, instead of this grep' + other + ':\n'
-            f'python -I "{cli}" refs {hits[0][1]} --context 3\n'
+            f'{cmd} {hits[0][1]} --context 3\n'
             'It lists the calls, references, declarations and definitions, with the source lines around them when the '
             'result is small enough; write the edits from those lines and view only small line ranges. For anything '
             'else, or for the text matches, run the same grep again (this note is shown once per session).')

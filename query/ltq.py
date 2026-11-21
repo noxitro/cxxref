@@ -13,6 +13,7 @@ import contextlib
 import mmap
 import os
 import re
+import stat
 import sys
 import time
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
@@ -52,7 +53,7 @@ UNBUILT = '.alt.unbuilt.tsv'  # どの TU も読まないソースのうち、al
 SIDE = ('.tu.tsv', '.skip.tsv', '.deps.tsv', ALT, UNBUILT)  # 索引本体の隣に ltidx と altpass が書くファイル
 # 索引のファイルの名前の、索引のパスより後ろの部分: 本体(空)・隣のファイル・写し(.seen.cache など)と、それを書いている途中の
 # ファイル(.tmp・.<プロセス番号>.tmp)。索引の隣に書くファイルを増やしたら、ここにも足す(足さないと、テキスト検索がそれを読む)
-OWN_TAIL = re.compile(r'(\.(tu|skip|deps|alt|alt\.unbuilt)\.tsv|\.own\.bin|\.(alt|recipe)\.json'
+OWN_TAIL = re.compile(r'(\.(tu|skip|deps|alt|alt\.unbuilt)\.tsv|\.own\.bin|\.(alt|recipe)\.json|\.alt\.progress'
                       r'|\.(seen|words|words-other|names)\.cache)?(\.\d+)?(\.tmp)?\Z')
 # C/C++ のソースでないファイルも、名前の一致だけは探す(rg なら出る行を落とさない: C# の生成器・ビルドの定義・文書など)。
 # テキストかどうかは、rg と同じく中身で見分ける(other_chunks)。拡張子や大きさでは除かない: .obj には Wavefront の 3D モデルの
@@ -85,7 +86,8 @@ def safe_path(root, path, read=True):
     - UNC(\\\\host\\share・//host/share)とデバイス(\\\\.\\ \\\\?\\)には、どの操作でも触れない
       (Windows は、UNC のパスの有無を見るだけでそのサーバーへつなぎ、資格情報を送りうる)
     - read(中身を読む)のときは、ルートの内側だけ。.. や絶対パスでルートの外へ出るものと、Windows の予約名
-      (CON・NUL など。開くと端末の入力を待つ)は読まない。ltidx はルートの外のファイルの行を書かない
+      (CON・NUL など。開くと端末の入力を待つ)は読まない。途中のリンクがルートの外を指すものも読まない(links_inside)。
+      ltidx はルートの外のファイルの行を書かない
     - 有無と更新日時だけを見るとき(read=False)は、ルートの外のローカルのパスも許す
       (ルートの外にある TU の主ファイルが消えたかを見る。.tu.tsv の絶対パス)"""
     if not isinstance(path, str) or not path or '\0' in path:
@@ -104,9 +106,70 @@ def safe_path(root, path, read=True):
         except ValueError:  # 別のドライブ
             return None
         parts = rel.replace('\\', '/').split('/')
-        if parts[0] == '..' or os.path.isabs(rel) or any(p.split('.')[0].rstrip(' ').upper() in RESERVED for p in parts):
+        if parts[0] == '..' or os.path.isabs(rel):
+            return None
+        # 予約名は Windows でだけ特別(ほかの OS の aux.c・con.h は、ふつうのファイル)
+        if os.name == 'nt' and any(p.split('.')[0].rstrip(' ').upper() in RESERVED for p in parts):
+            return None
+        if not links_inside(base, parts):
             return None
     return full
+
+
+LINK_HOPS = 40  # たどるリンクの数の上限(循環したリンク)
+_LINK_TAGS = {getattr(stat, 'IO_REPARSE_TAG_SYMLINK', 0xA000000C), getattr(stat, 'IO_REPARSE_TAG_MOUNT_POINT', 0xA0000003)}
+
+
+def _is_link(st):
+    """lstat の結果が、シンボリックリンクかジャンクション(Windows)か。"""
+    return stat.S_ISLNK(st.st_mode) or getattr(st, 'st_reparse_tag', 0) in _LINK_TAGS
+
+
+def links_inside(base, parts):
+    """base から parts(base からの相対の部品。.. を含まない)をたどったとき、途中のリンク(シンボリックリンク・
+    ジャンクション)の先もすべて base の内側か。リポジトリに置いたリンクで、ルートの外のファイルを読ませない。
+    リンクの先は os.readlink で文字列として読むだけで、開かない(UNC を指すリンクを開くと、そのサーバーへつなぐ)。
+    無い部品から先は見ない(開けないので害が無い)。"""
+    todo, cur, hops = list(parts), base, 0
+    while todo:
+        p = todo.pop(0)
+        if p in ('', '.'):
+            continue
+        if p == '..':  # リンクの先を足したときだけ出る
+            if os.path.normcase(cur) == os.path.normcase(base):
+                return False
+            cur = os.path.dirname(cur)
+            continue
+        nxt = os.path.join(cur, p)
+        try:
+            st = os.lstat(nxt)
+        except OSError:
+            return True
+        if not _is_link(st):
+            cur = nxt
+            continue
+        hops += 1
+        if hops > LINK_HOPS:
+            return False
+        try:
+            t = os.readlink(nxt)
+        except (OSError, ValueError):
+            return False
+        if t.startswith('\\\\?\\') and not t[4:].upper().startswith('UNC'):  # ジャンクションの先は \\?\C:\... の形
+            t = t[4:]
+        if t.replace('\\', '/').startswith('//'):
+            return False
+        target = os.path.normpath(os.path.join(cur, t))
+        if target.replace('\\', '/').startswith('//'):
+            return False
+        try:
+            rel = os.path.relpath(target, base)
+        except ValueError:  # 別のドライブ
+            return False
+        if os.path.isabs(rel) or rel.replace('\\', '/').split('/')[0] == '..':
+            return False
+        todo, cur = [x for x in rel.replace('\\', '/').split('/') if x not in ('', '.')] + todo, base
+    return True
 
 
 def tree_place(d, root):
